@@ -1,117 +1,101 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const harness = "scripts/devtools/alpha-byte-contract-harness.rs";
-let directory = "";
-let unitRun: ReturnType<typeof spawnSync>;
-let libraryPath = "";
+const repositoryRoot = realpathSync(fileURLToPath(new URL("../..", import.meta.url)));
+const wrapper = "scripts/agentic/agent-cargo.sh";
+const productionTests = [
+  "alpha_byte_is_one_byte",
+  "authored_preserves_all_u8_values",
+  "from_normalized_clamps",
+  "from_normalized_preserves_existing_quantization",
+  "rounded_quantization_is_distinct_and_explicit",
+  "pack_rgb_alpha_preserves_channel_order",
+];
+interface CargoContractRun {
+  result: { passedTests: number };
+  output: string;
+}
+let unitRun: CargoContractRun;
+let compilerRun: CargoContractRun;
 
-function rustc(args: string[], input?: string) {
-  return spawnSync("rustc", args, {
-    cwd: new URL("../..", import.meta.url).pathname,
+function runCargoContract(args: string[]) {
+  // The wrapper owns the pinned toolchain, shared compiler lease, source
+  // identity, process supervision and cleanup. Never invoke rustc directly.
+  const execution = spawnSync("bash", [wrapper, ...args], {
+    cwd: repositoryRoot,
     encoding: "utf8",
-    input,
-    timeout: 15_000,
+    timeout: 660_000,
+    maxBuffer: 16 * 1024 * 1024,
     env: {
       ...process.env,
+      SCRIPT_KIT_REPO_ROOT: repositoryRoot,
       SCRIPT_KIT_NONINTERACTIVE: "1",
       SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0",
       SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
       SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0",
       SCRIPT_KIT_ALLOW_LIVE_AI: "0",
+      SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
+      SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
+      SCRIPT_KIT_AGENT_ARTIFACT_KIND: "",
+      SCRIPT_KIT_AGENT_RESULT_PATH: "",
+      SCRIPT_KIT_AGENT_TIMEOUT_MS: "600000",
     },
   });
+  if (execution.error || execution.status !== 0) {
+    throw new Error(`canonical AlphaByte Cargo contract failed: ${execution.error ?? execution.status}\n${execution.stderr}`);
+  }
+  const result = JSON.parse(execution.stdout);
+  expect(result).toMatchObject({
+    status: "succeeded",
+    exitCode: 0,
+    failedTests: 0,
+    cleanup: {
+      closed: true,
+      processExited: true,
+      processGroupExited: true,
+      streamsDrained: true,
+      referencesFinalized: true,
+      survivors: [],
+      failureCodes: [],
+    },
+  });
+  expect(result.testSummaries).toBeGreaterThan(0);
+  expect(result.task.kind).toBe("build-job");
+  // Raw Cargo output is retained on stderr; stdout is the owned task result.
+  return { result, output: execution.stderr };
 }
 
 beforeAll(() => {
-  directory = mkdtempSync(join(tmpdir(), "script-kit-alpha-byte-unit-"));
-  const testBinary = join(directory, "alpha-byte-production-tests");
-  const compiledTests = rustc(["--edition=2021", "--test", harness, "-o", testBinary]);
-  if (compiledTests.status !== 0) {
-    throw new Error(`production AlphaByte unit harness failed to compile: ${compiledTests.stderr}`);
-  }
-  unitRun = spawnSync(testBinary, ["--test-threads=1"], {
-    cwd: directory,
-    encoding: "utf8",
-    timeout: 10_000,
-  });
-  libraryPath = join(directory, "libalpha_byte_contract.rlib");
-  const compiledLibrary = rustc([
-    "--edition=2021",
-    "--crate-type=lib",
-    "--crate-name=alpha_byte_contract",
-    harness,
-    "-o",
-    libraryPath,
+  unitRun = runCargoContract([
+    "test", "--locked", "--lib", "theme::alpha::alpha_byte_tests::",
   ]);
-  if (compiledLibrary.status !== 0) {
-    throw new Error(`production AlphaByte compile-fail library unavailable: ${compiledLibrary.stderr}`);
-  }
-});
-
-afterAll(() => {
-  if (directory) rmSync(directory, { recursive: true, force: true });
-});
-
-function compileRejected(source: string, label: string) {
-  return rustc([
-    "--edition=2021",
-    "--crate-type=lib",
-    "-",
-    "--extern",
-    `alpha_byte_contract=${libraryPath}`,
-    "-o",
-    join(directory, `${label}.rlib`),
-  ], source);
-}
+  compilerRun = runCargoContract([
+    "test", "--locked", "--doc", "--package", "script-kit-gpui", "theme::alpha::",
+  ]);
+}, 1_320_000);
 
 describe("real production authored-alpha unit and compiler contracts", () => {
-  test("direct rustc executes every existing production AlphaByte behavior test", () => {
-    expect(unitRun.status).toBe(0);
-    expect(unitRun.stdout).toContain("running 9 tests");
-    expect(unitRun.stdout).toContain("test result: ok. 9 passed; 0 failed");
-    for (const existingProductionTest of [
-      "alpha_byte_is_one_byte",
-      "authored_preserves_all_u8_values",
-      "from_normalized_clamps",
-      "from_normalized_preserves_existing_quantization",
-      "rounded_quantization_is_distinct_and_explicit",
-      "from_authored_f32_preserves_the_historical_round_cast",
-      "pack_rgb_alpha_preserves_channel_order",
-    ]) {
-      expect(unitRun.stdout).toContain(existingProductionTest);
+  test("canonical Cargo executes every current production AlphaByte behavior test", () => {
+    expect(unitRun.result.passedTests).toBe(productionTests.length);
+    for (const name of productionTests) {
+      expect(unitRun.output).toContain(`theme::alpha::alpha_byte_tests::${name} ... ok`);
     }
+    expect(unitRun.output).toContain(`${productionTests.length} passed; 0 failed; 0 ignored`);
+    expect(compilerRun.result.passedTests).toBe(3);
+    expect(compilerRun.output).toContain("3 passed; 0 failed; 0 ignored");
   });
 
   test("a raw normalized float cannot compile through the typed packer", () => {
-    const rejected = compileRejected(
-      "pub fn reject() { let _ = alpha_byte_contract::pack_rgb_alpha(0xEF4444, 0.5_f32); }",
-      "reject-normalized-packer",
-    );
-    expect(rejected.status).not.toBe(0);
-    expect(rejected.stderr).toContain("mismatched types");
-    expect(rejected.stderr).toContain("AlphaByte");
+    expect(compilerRun.output).toMatch(/theme::alpha::pack_rgb_alpha \(line \d+\) - compile fail \.\.\. ok/);
   });
 
   test("the authored-byte constructor cannot accept a floating opacity", () => {
-    const rejected = compileRejected(
-      "pub fn reject() { let _ = alpha_byte_contract::AlphaByte::authored(0.85_f32); }",
-      "reject-float-authored",
-    );
-    expect(rejected.status).not.toBe(0);
-    expect(rejected.stderr).toContain("mismatched types");
-    expect(rejected.stderr).toContain("u8");
+    expect(compilerRun.output).toMatch(/theme::alpha::AlphaByte::authored \(line \d+\) - compile fail \.\.\. ok/);
   });
 
   test("private tuple storage cannot bypass explicit unit constructors", () => {
-    const rejected = compileRejected(
-      "pub fn reject() { let _ = alpha_byte_contract::AlphaByte(50_u8); }",
-      "reject-private-storage",
-    );
-    expect(rejected.status).not.toBe(0);
-    expect(rejected.stderr).toContain("private fields");
+    expect(compilerRun.output).toMatch(/theme::alpha::AlphaByte \(line \d+\) - compile fail \.\.\. ok/);
   });
 });

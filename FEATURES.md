@@ -29,6 +29,8 @@ Every feature below should be locked with the smallest proof set that can fail f
 3. A documented blocker when a DevTools primitive is missing, including the exact missing primitive.
 4. A `FEATURES.md` update when a contract changes intentionally.
 
+For search, the owned launcher recipe is the shared executable inventory, not a claim that every live provider or native desktop effect is covered. Receipts must account for every declared case/schedule, preserve exact target and completed-frame identities, distinguish semantic/production-consumer/GPUI/framebuffer evidence, and fail on missing capability or invalid cleanup. A sampled or blocked case is not a pass. Builds use immutable `ArtifactReference` outputs; no mtime-selected binaries, desktop activation, or native-input fallback is permitted for the owned recipe.
+
 ## Memory Layer Surfaces (Brain Time)
 
 New surfaces from the Brain Time work (`.notes/brain-time.md`). These are NOT
@@ -112,14 +114,15 @@ the matrix only through a future QA lock-in selection.
 - Choice id: `main-launcher-search-select-submit-script`
 - Surface: Main Launcher / Script Execution
 - Status: Active QA lock-in candidate
-- User contract: Filtering updates inputValue and visible rows, selectedSemanticId belongs to the filtered result, and submit produces a guarded dispatch receipt without targeting a stale row.
+- User contract: Filtering commits rows for the current query/scope revision. Automatic selection follows the first eligible result; deliberate selection anchors identity, even when choosing the already-first row. Preview, footer, actions, and guarded submit use that same subject. Stale queries, removed rows, and stale semantic targets are refused before effects.
 - Regression risk: Filtering caches, selection ownership, submit diagnostics, or script routing can drift and cause the wrong script to launch or no launch at all.
 - Proof commands:
-  - `bun scripts/devtools/events.ts record --session core-qa --start --show -- bun scripts/devtools/act.ts set-input --text script --main --strict --surface ScriptList`
-  - `bun scripts/devtools/act.ts key --key Enter --allow-submit --submit-intent script-launch --allow-submit-reason core-qa-filtered-script-submit --main --strict --surface ScriptList`
-  - `./scripts/agentic/agent-cargo.sh test --test submit_ownership_contract -- --nocapture`
-- Pass evidence: Event and act receipts show input reconciliation, filtered selection, lifecycle dispatched/source-live, and source contract tests pass.
-- Fail evidence: Receipt shows stale selectedSemanticId, submit blocked unexpectedly, wrong action host, no lifecycle dispatch, or contract tests fail.
+  - `bun scripts/devtools/devtools.ts build-ops act app-build --features owned-ui-evaluation --artifact-out .test-output/search-contract.reference.json`
+  - `bun scripts/devtools/devtools.ts design run --artifact .test-output/search-contract.reference.json --out .test-output/search-contract-proof --scenario launcher-ranking-provider`
+  - `./scripts/agentic/agent-cargo.sh test --locked -p sk-protocol --lib search_contract::tests`
+- Pass evidence: The complete bounded selection inventory passes through real source completion, grouping, input dispatch, and natural completed GPUI frames with matching retained pixels. Headers and reserved slots remain inert; calculator navigation, preflight and copy completion agree. Dispatch acceptance, confirmed completion and refusal remain distinct; external effects remain truthfully refused in owned evaluation.
+- Recorded bounded proof (2026-09-01): All 781 runnable version-2 search schedules passed, with one declared structural exclusion and complete owned cleanup. Receipt: `.test-output/search-contract-final-v20-full-20260901/receipt.json`. This does not qualify real external script/app execution.
+- Fail evidence: Unintended second-row selection, stale selected/preview/footer subject, incorrect focus or viewport movement, stale-target acceptance, absent scheduled paint, blank/mismatched readback, uncovered cases, or invalid cleanup. Hidden proof does not claim a real external script or app was launched.
 
 ### Root built-in dispatch opens the requested built-in
 
@@ -306,6 +309,7 @@ the matrix only through a future QA lock-in selection.
 - Surface: Automation / Window Targeting
 - Status: Active QA lock-in candidate
 - User contract: listAutomationWindows and inspectAutomationWindow resolve explicit targets, include window id/kind/bounds/osWindowId when available, and never silently fall back to the wrong focused window.
+- Owned search target contract: The caller's observed identity remains authoritative across client calls and deferred dispatch. A refreshed observation never silently replaces an explicit stale expectation. Pointer actions bind to the completed geometry frame; window retirement invalidates old actions, provider attachments, and retained frames.
 - Regression risk: Any runtime QA suite depends on strict targeting; target drift makes receipts false positives.
 - Proof commands:
   - `bun scripts/devtools/surfaces.ts`
@@ -355,15 +359,15 @@ the matrix only through a future QA lock-in selection.
 - Choice id: `root-unified-source-filters-browse-and-actions`
 - Surface: Main Launcher / Unified Sources
 - Status: Active QA lock-in candidate
-- User contract: Source filter chips or syntax update visible rows, source metadata, action policies, and passive snapshots without mixing rows from inactive sources.
+- User contract: Source filter chips or syntax update visible rows, source metadata, action policies, and passive snapshots without mixing rows from inactive query/scope revisions. Implicit global Files is cache-only; explicit Files/directory and other admitted publishers commit through the same interaction-preserving boundary. Empty, unavailable, failed, cancelled, and stale outcomes remain distinct.
 - Regression risk: Unified source refactors can bleed actions and rows between source domains, causing wrong launches or stale previews.
 - Proof commands:
-  - `bun scripts/devtools/inspect.ts --session core-qa --start --show --main --surface ScriptList --limit 200`
-  - `./scripts/agentic/agent-cargo.sh test --test menu_syntax_source_filters -- --nocapture`
-  - `./scripts/agentic/agent-cargo.sh test --test main_menu_result_cache_domain_contract -- --nocapture`
-  - `./scripts/agentic/agent-cargo.sh test --test filterable_surface_agentic_matrix_contract -- --nocapture`
-- Pass evidence: Inspect shows active source metadata/rows and source filter/cache-domain contracts pass.
-- Fail evidence: Rows from one source appear under another, actions mismatch source, passive snapshot is stale, or tests fail.
+  - `bun scripts/devtools/devtools.ts design run --artifact .test-output/search-contract.reference.json --out .test-output/search-source-proof --scenario launcher-ranking-provider`
+  - `./scripts/agentic/agent-cargo.sh test --locked -p sk-protocol --lib filter_coalescer::tests`
+  - `./scripts/agentic/agent-cargo.sh test --locked -p sk-protocol --lib search_contract::tests`
+- Pass evidence: Controlled source runs exercise production publication across query supersession, ABA, compatible work reuse, scope changes, completion order, row removal/content replacement, and empty/error states. The receipt accounts for every declared provider/schedule and distinguishes cache mutation from visible row publication.
+- Recorded bounded proof (2026-09-01): The same complete version-2 receipt covers all 20 controlled root providers, including both publisher orders, same-turn/cohort comparisons, scope fences, and distinct terminal outcomes; no schedule was reduced or blocked. See `scripts/devtools/README.md` for artifact and proof limits.
+- Fail evidence: A retired run changes current rows, one source releases another's worker, missing/error data becomes success, stale input executes, rows/actions cross source boundaries, or required cases lack qualified proof.
 
 ### App Launcher searches apps and reports activation feedback
 

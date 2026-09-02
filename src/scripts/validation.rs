@@ -15,7 +15,7 @@
 //! Usage:
 //!
 //! ```ignore
-//! let scripts = scripts::read_scripts();
+//! let scripts = scripts::read_scripts()?;
 //! let report = scripts::validate_script_catalog(scripts);
 //! if !report.validation.failed_scripts.is_empty() {
 //!     tracing::warn!(
@@ -610,9 +610,6 @@ struct ScriptletCapabilityRegistry {
     generation: u64,
     entries: HashMap<String, RegisteredScriptletCapabilities>,
     loaded_sources: HashMap<String, PathBuf>,
-    staged_generation: Option<u64>,
-    staged_entries: HashMap<String, RegisteredScriptletCapabilities>,
-    staged_loaded_sources: HashMap<String, PathBuf>,
 }
 
 static SCRIPTLET_CAPABILITY_REGISTRY: OnceLock<RwLock<ScriptletCapabilityRegistry>> =
@@ -670,63 +667,6 @@ fn scriptlet_validation_subject(scriptlet: &Scriptlet) -> CapabilityValidationSu
     }
 }
 
-/// Begin a complete scriptlet reload without exposing partially parsed data.
-/// Existing launcher rows retain their current blocking diagnostics until the
-/// completed replacement is published in one write-lock transaction.
-pub(crate) fn begin_scriptlet_capability_generation() -> u64 {
-    let mut registry = scriptlet_capability_registry()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    registry.generation = registry.generation.wrapping_add(1);
-    registry.staged_generation = Some(registry.generation);
-    registry.staged_entries.clear();
-    registry.staged_loaded_sources.clear();
-    registry.generation
-}
-
-/// Publish only a fully parsed current generation. A panic or abandoned loader
-/// leaves the existing active snapshot intact and never marks blocked rows safe.
-pub(crate) fn complete_scriptlet_capability_generation(generation: u64) -> bool {
-    let mut registry = scriptlet_capability_registry()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !scriptlet_generation_is_current(registry.generation, Some(generation))
-        || registry.staged_generation != Some(generation)
-    {
-        return false;
-    }
-    registry.entries = std::mem::take(&mut registry.staged_entries);
-    registry.loaded_sources = std::mem::take(&mut registry.staged_loaded_sources);
-    registry.staged_generation = None;
-    true
-}
-
-fn invalidate_staged_scriptlet_capability_generation(registry: &mut ScriptletCapabilityRegistry) {
-    if registry.staged_generation.take().is_some() {
-        registry.generation = registry.generation.wrapping_add(1);
-        registry.staged_entries.clear();
-        registry.staged_loaded_sources.clear();
-    }
-}
-
-/// Invalidate exactly one changed/deleted markdown source on incremental load.
-pub(crate) fn clear_scriptlet_capabilities_for_source(path: &Path) {
-    let mut registry = scriptlet_capability_registry()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    invalidate_staged_scriptlet_capability_generation(&mut registry);
-    registry
-        .entries
-        .retain(|_, entry| entry.source_path != path);
-    registry.loaded_sources.retain(|_, source| source != path);
-    registry
-        .staged_entries
-        .retain(|_, entry| entry.source_path != path);
-    registry
-        .staged_loaded_sources
-        .retain(|_, source| source != path);
-}
-
 /// Merge supported legacy HTML-comment declarations without treating ordinary
 /// source text, custom metadata, or `Array.prototype.find` as SDK usage.
 pub(crate) fn merge_scriptlet_capability_metadata(
@@ -755,100 +695,87 @@ pub(crate) fn merge_scriptlet_capability_metadata(
     has_metadata.then_some(metadata)
 }
 
-fn scriptlet_generation_is_current(current: u64, expected: Option<u64>) -> bool {
-    expected.is_none_or(|generation| generation == current)
-}
-
-type ScriptletCapabilityWriteTarget<'a> = (
-    &'a mut HashMap<String, RegisteredScriptletCapabilities>,
-    &'a mut HashMap<String, PathBuf>,
-);
-
-fn scriptlet_registry_write_target(
-    registry: &mut ScriptletCapabilityRegistry,
-    expected_generation: Option<u64>,
-) -> Option<ScriptletCapabilityWriteTarget<'_>> {
-    match expected_generation {
-        Some(generation)
-            if scriptlet_generation_is_current(registry.generation, Some(generation))
-                && registry.staged_generation == Some(generation) =>
-        {
-            Some((
-                &mut registry.staged_entries,
-                &mut registry.staged_loaded_sources,
-            ))
-        }
-        Some(_) => None,
-        None => {
-            invalidate_staged_scriptlet_capability_generation(registry);
-            Some((&mut registry.entries, &mut registry.loaded_sources))
-        }
-    }
-}
-
 /// Preserve codefence metadata independently of the legacy public Scriptlet
 /// shape, which is initialized by many pre-existing scriptlet fixtures.
+#[cfg(test)]
 pub(crate) fn register_scriptlet_capabilities(
     scriptlet: &Scriptlet,
     metadata: Option<&TypedMetadata>,
 ) {
-    register_scriptlet_capabilities_inner(scriptlet, metadata, None);
-}
-
-/// Commit a full-load result only when it belongs to the current generation;
-/// overlapping stale refreshes cannot overwrite newer author diagnostics.
-pub(crate) fn register_scriptlet_capabilities_for_generation(
-    scriptlet: &Scriptlet,
-    metadata: Option<&TypedMetadata>,
-    generation: u64,
-) {
-    register_scriptlet_capabilities_inner(scriptlet, metadata, Some(generation));
-}
-
-fn register_scriptlet_capabilities_inner(
-    scriptlet: &Scriptlet,
-    metadata: Option<&TypedMetadata>,
-    expected_generation: Option<u64>,
-) {
     let identity = scriptlet_capability_identity(scriptlet);
-    let Some(metadata) = metadata else {
-        let mut registry = scriptlet_capability_registry()
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((entries, loaded_sources)) =
-            scriptlet_registry_write_target(&mut registry, expected_generation)
-        else {
-            return;
-        };
-        loaded_sources.insert(identity.clone(), scriptlet_source_path(scriptlet));
-        entries.remove(&identity);
-        return;
-    };
-    let issues =
-        validate_metadata_capabilities(&scriptlet_validation_subject(scriptlet), metadata, None);
-    if !issues.is_empty() {
-        tracing::warn!(
-            scriptlet = %scriptlet.name,
-            source = %scriptlet_source_path(scriptlet).display(),
-            issue_count = issues.len(),
-            "scriptlet_sdk_capability_validation_failed"
-        );
-    }
-    let entry = RegisteredScriptletCapabilities {
-        source_path: scriptlet_source_path(scriptlet),
+    let source_path = scriptlet_source_path(scriptlet);
+    let entry = metadata.map(|metadata| RegisteredScriptletCapabilities {
+        source_path: source_path.clone(),
         metadata: metadata.clone(),
-        issues,
-    };
+        issues: validate_metadata_capabilities(
+            &scriptlet_validation_subject(scriptlet),
+            metadata,
+            None,
+        ),
+    });
     let mut registry = scriptlet_capability_registry()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some((entries, loaded_sources)) =
-        scriptlet_registry_write_target(&mut registry, expected_generation)
-    else {
-        return;
-    };
-    loaded_sources.insert(identity.clone(), entry.source_path.clone());
-    entries.insert(identity, entry);
+    registry
+        .loaded_sources
+        .insert(identity.clone(), source_path);
+    match entry {
+        Some(entry) => {
+            registry.entries.insert(identity, entry);
+        }
+        None => {
+            registry.entries.remove(&identity);
+        }
+    }
+}
+
+pub(crate) fn publish_scriptlet_capability_snapshot(
+    source: Option<&Path>,
+    parsed: Vec<(Arc<Scriptlet>, Option<TypedMetadata>)>,
+) -> Vec<Arc<Scriptlet>> {
+    let mut rows = Vec::with_capacity(parsed.len());
+    let mut entries = HashMap::new();
+    let mut loaded_sources = HashMap::with_capacity(parsed.len());
+    for (scriptlet, metadata) in parsed {
+        let identity = scriptlet_capability_identity(&scriptlet);
+        let source_path = scriptlet_source_path(&scriptlet);
+        loaded_sources.insert(identity.clone(), source_path.clone());
+        if let Some(metadata) = metadata {
+            let issues = validate_metadata_capabilities(
+                &scriptlet_validation_subject(&scriptlet),
+                &metadata,
+                None,
+            );
+            entries.insert(
+                identity,
+                RegisteredScriptletCapabilities {
+                    source_path,
+                    metadata,
+                    issues,
+                },
+            );
+        }
+        rows.push(scriptlet);
+    }
+    let mut registry = scriptlet_capability_registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.generation = registry
+        .generation
+        .checked_add(1)
+        .expect("scriptlet capability generation exhausted");
+    if let Some(source) = source {
+        registry
+            .entries
+            .retain(|_, entry| entry.source_path != source);
+        registry.loaded_sources.retain(|_, path| path != source);
+        registry.entries.extend(entries);
+        registry.loaded_sources.extend(loaded_sources);
+    } else {
+        registry.entries = entries;
+        registry.loaded_sources = loaded_sources;
+    }
+    rows
 }
 
 /// Return stable, typed diagnostics without removing the scriptlet from its
@@ -1713,84 +1640,35 @@ mod tests {
         register_scriptlet_capabilities(&stale, Some(&metadata));
         register_scriptlet_capabilities(&retained, Some(&metadata));
 
-        clear_scriptlet_capabilities_for_source(Path::new("/tmp/sdk-stale-source.md"));
+        publish_scriptlet_capability_snapshot(
+            Some(Path::new("/tmp/sdk-stale-source.md")),
+            Vec::new(),
+        );
         assert!(validate_scriptlet_capabilities(&stale).is_empty());
         assert_eq!(validate_scriptlet_capabilities(&retained).len(), 1);
     }
 
     #[test]
-    fn stale_full_reload_generation_cannot_publish_old_diagnostics() {
+    fn blocked_scriptlet_stays_blocked_until_complete_snapshot_is_published() {
         let _registry = scriptlet_registry_test_guard();
-        assert!(!scriptlet_generation_is_current(42, Some(41)));
-        assert!(scriptlet_generation_is_current(42, Some(42)));
-        assert!(scriptlet_generation_is_current(42, None));
-        let stale_generation = begin_scriptlet_capability_generation();
-        let stale = make_scriptlet("Old Generation", "/tmp/sdk-stale-generation.md", "bash");
-        let metadata = capability_metadata(serde_json::json!(["readFile"]));
-
-        let current_generation = begin_scriptlet_capability_generation();
-        assert_ne!(stale_generation, current_generation);
-        register_scriptlet_capabilities_for_generation(&stale, Some(&metadata), stale_generation);
-        assert!(validate_scriptlet_capabilities(&stale).is_empty());
-
-        let current = make_scriptlet(
-            "Current Generation",
-            "/tmp/sdk-current-generation.md",
-            "bash",
-        );
-        register_scriptlet_capabilities_for_generation(
-            &current,
-            Some(&metadata),
-            current_generation,
-        );
-        assert!(validate_scriptlet_capabilities(&current).is_empty());
-        assert!(!complete_scriptlet_capability_generation(stale_generation));
-        assert!(complete_scriptlet_capability_generation(current_generation));
-        assert_eq!(validate_scriptlet_capabilities(&current).len(), 1);
-    }
-
-    #[test]
-    fn blocked_scriptlet_stays_blocked_until_full_refresh_publishes_atomically() {
-        let _registry = scriptlet_registry_test_guard();
-        let blocked = make_scriptlet(
+        let blocked = Arc::new(make_scriptlet(
             "Blocked During Refresh",
             "/tmp/sdk-refresh-atomic.md",
             "bash",
-        );
+        ));
         let metadata = capability_metadata(serde_json::json!(["readFile"]));
         register_scriptlet_capabilities(&blocked, Some(&metadata));
+        let replacement: Vec<(Arc<Scriptlet>, Option<TypedMetadata>)> =
+            vec![(Arc::clone(&blocked), None)];
         assert_eq!(validate_scriptlet_capabilities(&blocked).len(), 1);
-
-        let generation = begin_scriptlet_capability_generation();
-        assert_eq!(validate_scriptlet_capabilities(&blocked).len(), 1);
-        register_scriptlet_capabilities_for_generation(&blocked, None, generation);
-        assert_eq!(validate_scriptlet_capabilities(&blocked).len(), 1);
-
-        assert!(complete_scriptlet_capability_generation(generation));
-        assert!(validate_scriptlet_capabilities(&blocked).is_empty());
-    }
-
-    #[test]
-    fn incremental_scriptlet_fix_invalidates_overlapping_stale_full_reload() {
-        let _registry = scriptlet_registry_test_guard();
-        let scriptlet = make_scriptlet(
-            "Incremental Wins",
-            "/tmp/sdk-refresh-incremental.md",
-            "bash",
+        drop(replacement);
+        assert_eq!(
+            validate_scriptlet_capabilities(&blocked).len(),
+            1,
+            "discarded local reads retain active diagnostics"
         );
-        let metadata = capability_metadata(serde_json::json!(["readFile"]));
-        register_scriptlet_capabilities(&scriptlet, Some(&metadata));
-        assert_eq!(validate_scriptlet_capabilities(&scriptlet).len(), 1);
-
-        let generation = begin_scriptlet_capability_generation();
-        register_scriptlet_capabilities_for_generation(&scriptlet, Some(&metadata), generation);
-        assert_eq!(validate_scriptlet_capabilities(&scriptlet).len(), 1);
-
-        clear_scriptlet_capabilities_for_source(Path::new("/tmp/sdk-refresh-incremental.md"));
-        register_scriptlet_capabilities(&scriptlet, None);
-        assert!(validate_scriptlet_capabilities(&scriptlet).is_empty());
-        assert!(!complete_scriptlet_capability_generation(generation));
-        assert!(validate_scriptlet_capabilities(&scriptlet).is_empty());
+        publish_scriptlet_capability_snapshot(None, vec![(Arc::clone(&blocked), None)]);
+        assert!(validate_scriptlet_capabilities(&blocked).is_empty());
     }
 
     #[test]

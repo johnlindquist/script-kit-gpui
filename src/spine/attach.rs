@@ -336,7 +336,9 @@ pub(crate) fn attach_outcome_for_result(
         (
             ContextSubsearchSource::Calendar | ContextSubsearchSource::Notifications,
             SearchResult::SpineProjection(row),
-        ) => {
+        ) if row.is_selectable
+            && matches!(&row.action, SpineListAction::AttachContextResult { source: owner } if owner.as_ref() == source.prefix()) =>
+        {
             // Provider-JSON rows carry their content in title/subtitle.
             let prefix = source.prefix();
             let title = row.title.to_string();
@@ -366,7 +368,15 @@ pub(crate) fn attach_outcome_for_result(
         // SpineProjection utility rows (Open full File Search, hints, empty
         // guards) keep their own action — let the normal row accept run it.
         (_, SearchResult::SpineProjection(row)) => {
-            if row.is_selectable {
+            if row.is_selectable
+                && !matches!(
+                    &row.action,
+                    SpineListAction::Noop
+                        | SpineListAction::AttachContextResult { .. }
+                        | SpineListAction::AcceptMenuSyntaxTrigger { .. }
+                        | SpineListAction::AcceptMenuSyntaxObject { .. }
+                )
+            {
                 Some(SpineAttachOutcome {
                     action: row.action.clone(),
                     alias: None,
@@ -692,7 +702,9 @@ fn composer_subsearch_results(
                         score: 0,
                         is_selectable: true,
                         action_label: None,
-                        action: SpineListAction::Noop,
+                        action: SpineListAction::AttachContextResult {
+                            source: prefix.into(),
+                        },
                     })
                 })
                 .collect()
@@ -937,9 +949,16 @@ mod tests {
             score: 0,
             is_selectable: true,
             action_label: Some(ss("Attach")),
-            action: SpineListAction::Noop,
+            action: SpineListAction::AttachContextResult {
+                source: "calendar".into(),
+            },
         };
         let result = SearchResult::SpineProjection(row);
+        assert!(
+            attach_outcome_for_result(ContextSubsearchSource::Notifications, &result, 0, 0..10)
+                .is_none(),
+            "a different source cannot own this attachment"
+        );
         let outcome =
             attach_outcome_for_result(ContextSubsearchSource::Calendar, &result, 0, 0..10)
                 .expect("calendar rows must attach");
@@ -951,11 +970,30 @@ mod tests {
             }
             other => panic!("expected TextBlock, got {other:?}"),
         }
-        // The interception action must override the row's Noop.
+        // The owning subsearch resolves the typed attachment intent.
         assert!(matches!(
             outcome.action,
             SpineListAction::ResolveSegment { .. }
         ));
+        let SearchResult::SpineProjection(mut row) = result else {
+            unreachable!()
+        };
+        row.action = SpineListAction::Noop;
+        let inert = SearchResult::SpineProjection(row.clone());
+        assert!(
+            attach_outcome_for_result(ContextSubsearchSource::Calendar, &inert, 0, 0..10).is_none(),
+            "a selectable explanation is not an attachment"
+        );
+        row.action = SpineListAction::AttachContextResult {
+            source: "unknown-provider".into(),
+        };
+        assert!(attach_outcome_for_result(
+            ContextSubsearchSource::Calendar,
+            &SearchResult::SpineProjection(row),
+            0,
+            0..10
+        )
+        .is_none());
     }
 
     /// Composer parity end-to-end: a provider-backed source queried through

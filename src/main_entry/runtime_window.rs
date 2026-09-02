@@ -1,17 +1,8 @@
         // Root is required for gpui_component's InputState focus tracking
         let window: WindowHandle<Root> = match cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
-                is_movable: true,
-                window_background,
-                show: false, // Start hidden - only show on hotkey press
-                focus: false, // Don't focus on creation
-                // CRITICAL: Use PopUp for Raycast-like behavior
-                // Creates NSPanel with NonactivatingPanel style, allowing keyboard
-                // input without activating the application (preserves previous app focus)
-                kind: WindowKind::PopUp,
-                ..Default::default()
+            match main_window_options(bounds, window_background, crate::runtime_policy::WindowHostPolicy::Interactive) {
+                Ok(options) => options,
+                Err(error) => { tracing::error!(%error, "main_window_policy_refused"); return; }
             },
             |window, cx| {
                 logging::log("APP", "Window opened, creating ScriptListApp wrapped in Root");
@@ -22,9 +13,11 @@
             },
         ) {
             Ok(window) => {
-                let any_handle: gpui::AnyWindowHandle = window.into();
-                crate::set_main_window_handle(any_handle);
-                sync_main_automation_window(Some(automation_window_bounds_from_gpui(bounds)), false, false);
+                if let Err(error) = register_main_runtime_window(window.into(), bounds, cx) {
+                    tracing::error!(%error, "main_window_registration_failed");
+                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                    return;
+                }
                 window
             }
             Err(error) => {
@@ -97,26 +90,15 @@
                         // detect_system_appearance() gets the fresh value
                         theme::invalidate_appearance_cache();
 
-                        // Reload cache + sync gpui theme + bump revision in one update.
-                        let theme = theme::service::reload_theme_cache_sync_and_bump_revision(ctx);
-                        let is_dark = theme.should_use_dark_vibrancy();
-                        let material = theme.get_vibrancy().material;
-
-                        // Reconfigure vibrancy materials on NSVisualEffectViews
-                        platform::configure_window_vibrancy_material_for_appearance(
-                            is_dark,
-                            material,
-                        );
-
-                        // Update all secondary windows (Notes, AI, Actions)
-                        platform::update_all_secondary_windows_appearance(is_dark);
+                        if let Err(error) = theme::service::reload_theme(ctx, theme::service::ThemePublicationSource::Appearance) {
+                            tracing::warn!(%error, "appearance_theme_reload_failed");
+                            return;
+                        }
 
                         // Update the app entity theme
                         view.update_theme(ctx);
                         view.sync_main_footer_popup(win, ctx);
 
-                        // Notify all registered windows to re-render with new colors
-                        windows::notify_all_windows(ctx);
                     }));
                 });
             });

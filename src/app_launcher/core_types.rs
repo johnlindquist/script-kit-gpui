@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
-use tracing::{debug, error, info, info_span, trace, warn};
+use tracing::{debug, info, info_span, trace, warn};
 
 /// Stats for icon extraction during a scan (thread-safe)
 static ICONS_EXTRACTED: AtomicUsize = AtomicUsize::new(0);
@@ -120,6 +120,8 @@ pub enum AppLoadingState {
     ScanningDirectories,
     /// All apps loaded and cache is up to date
     Ready,
+    /// The most recent scan failed; previously valid applications remain retained.
+    Failed,
 }
 
 impl AppLoadingState {
@@ -130,80 +132,54 @@ impl AppLoadingState {
             AppLoadingState::LoadingFromCache => "Loading apps...",
             AppLoadingState::ScanningDirectories => "Scanning for new apps...",
             AppLoadingState::Ready => "Apps ready",
+            AppLoadingState::Failed => "Application scan unavailable",
         }
     }
 }
 
-/// Cached list of applications (in-memory, populated from SQLite + directory scan)
-static APP_CACHE: LazyLock<Arc<Mutex<Vec<AppInfo>>>> = LazyLock::new(|| {
-    set_loading_state(AppLoadingState::LoadingFromCache);
+/// Last successful application snapshot, retained even when a later scan fails.
+#[derive(Default)]
+struct AppCache {
+    apps: Option<Vec<AppInfo>>,
+    failure: Option<String>,
+}
 
-    let start = Instant::now();
-
-    // Load from SQLite cache with icons decoded synchronously
-    let cached_apps = load_apps_from_db();
-    let cache_load_ms = start.elapsed().as_millis();
-
-    if !cached_apps.is_empty() {
-        info!(
-            app_count = cached_apps.len(),
-            cache_load_ms, "Cache load complete (icons decoded synchronously)"
-        );
-
-        // Create Arc and spawn background thread to scan for new/changed apps
-        let cache_arc = Arc::new(Mutex::new(cached_apps));
-        let cache_for_thread = Arc::clone(&cache_arc);
-
-        std::thread::spawn(move || {
-            let _span = info_span!("background_app_scan").entered();
-            set_loading_state(AppLoadingState::ScanningDirectories);
-
-            let scan_start = Instant::now();
-            let fresh_apps = scan_all_directories_with_db_update();
-            let scan_duration = scan_start.elapsed().as_millis();
-            let app_count = fresh_apps.len();
-
-            // Update the in-memory cache (this Arc is shared with APP_CACHE)
-            if let Ok(mut guard) = cache_for_thread.lock() {
-                *guard = fresh_apps;
-            }
-
-            let (db_count, db_size) = get_apps_db_stats();
-            info!(
-                app_count,
-                duration_ms = scan_duration,
-                db_apps = db_count,
-                db_icon_size_kb = db_size / 1024,
-                "Background app scan complete"
-            );
-
-            set_loading_state(AppLoadingState::Ready);
-        });
-
-        // Return the same Arc that the background thread will update
-        return cache_arc;
-    }
-
-    // No SQLite cache - do a full synchronous scan
-    info!("No SQLite cache found, performing full scan");
-    set_loading_state(AppLoadingState::ScanningDirectories);
-
-    let apps = scan_all_directories_with_db_update();
-    let duration_ms = start.elapsed().as_millis();
-
-    let (db_count, db_size) = get_apps_db_stats();
-    info!(
-        app_count = apps.len(),
-        duration_ms = duration_ms,
-        db_apps = db_count,
-        db_icon_size_kb = db_size / 1024,
-        "Scanned applications (no cache)"
-    );
-
-    set_loading_state(AppLoadingState::Ready);
-
-    Arc::new(Mutex::new(apps))
+static APP_CACHE: Mutex<AppCache> = Mutex::new(AppCache {
+    apps: None,
+    failure: None,
 });
+// Serializes native scans without holding the snapshot lock during filesystem IO.
+static APP_SCAN_LOCK: Mutex<()> = Mutex::new(());
+
+fn app_cache_snapshot(cache: &Mutex<AppCache>) -> Result<Option<Vec<AppInfo>>> {
+    let cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Application cache lock poisoned"))?;
+    if let Some(error) = &cache.failure {
+        anyhow::bail!("Application scan unavailable: {error}");
+    }
+    Ok(cache.apps.clone())
+}
+
+fn complete_app_scan(
+    cache: &Mutex<AppCache>,
+    result: Result<Vec<AppInfo>>,
+) -> Result<Vec<AppInfo>> {
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Application cache lock poisoned"))?;
+    match result {
+        Ok(apps) => {
+            cache.apps = Some(apps.clone());
+            cache.failure = None;
+            Ok(apps)
+        }
+        Err(error) => {
+            cache.failure = Some(format!("{error:#}"));
+            Err(error)
+        }
+    }
+}
 
 /// Current loading state (thread-safe, updated during scan)
 static APP_LOADING_STATE: LazyLock<Mutex<AppLoadingState>> =

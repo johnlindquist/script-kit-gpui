@@ -20,75 +20,23 @@
 #[test]
 fn test_sigterm_graceful_termination() {
     use std::os::unix::process::ExitStatusExt;
-    use std::time::Instant;
 
-    const SIGTERM: i32 = 15;
-    const SIGKILL: i32 = 9;
+    let mut split = spawn_script("sleep", &["60"], "[test:sigterm_graceful]")
+        .expect("spawn owned sleep")
+        .split();
+    let pid = split.pid();
+    assert!(split.is_running(), "owned child must start running");
 
-    // Spawn a simple sleep that will respond to SIGTERM
-    let result = spawn_script("sleep", &["60"], "[test:sigterm_graceful]");
-
-    if let Ok(session) = result {
-        let pid = session.pid();
-        let start = Instant::now();
-
-        // Process should be running
-        assert!(
-            Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false),
-            "Process should be running before split"
-        );
-
-        // Split to get access to child for wait()
-        let mut split = session.split();
-
-        // Kill the process group via ProcessHandle
-        split.kill().expect("kill should succeed");
-
-        // Wait for the child to be reaped (this clears the zombie)
-        // Generous timeout to avoid CI flakiness - the test validates behavior, not speed
-        let timeout = std::time::Duration::from_secs(5);
-        let poll_interval = std::time::Duration::from_millis(50);
-
-        while start.elapsed() < timeout {
-            match split.child.try_wait() {
-                Ok(Some(status)) => {
-                    // Child has exited and been reaped
-                    // Verify the process is actually gone now
-                    let is_dead = !Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false);
-                    assert!(is_dead, "Process should be fully dead after wait");
-
-                    // Verify process was killed by a signal (SIGTERM or SIGKILL)
-                    // sleep is well-behaved so should respond to SIGTERM (15)
-                    // but SIGKILL (9) is also acceptable if escalation occurred
-                    let signal = status.signal();
-                    assert!(
-                        signal == Some(SIGTERM) || signal == Some(SIGKILL),
-                        "Process should have been killed by SIGTERM or SIGKILL, got signal={:?}, code={:?}",
-                        signal,
-                        status.code()
-                    );
-                    return;
-                }
-                Ok(None) => {
-                    // Still running/zombie, keep waiting
-                    std::thread::sleep(poll_interval);
-                }
-                Err(e) => {
-                    panic!("Error waiting for child: {:?}", e);
-                }
-            }
-        }
-
-        panic!("Process {} did not terminate within {:?}", pid, timeout);
-    }
+    split.kill().expect("kill must reap the child and confirm its group exited");
+    let status = split.child.try_wait().unwrap().expect("child must already be reaped");
+    assert!(
+        matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)),
+        "expected termination signal, got {status:?}"
+    );
+    assert_eq!(
+        crate::process_manager::observe_owned_process_group(pid),
+        crate::process_manager::OwnedProcessGroupLiveness::Exited
+    );
 }
 
 /// Test that ProcessHandle.kill() is idempotent (safe to call multiple times)
@@ -96,53 +44,15 @@ fn test_sigterm_graceful_termination() {
 #[cfg(unix)]
 #[test]
 fn test_kill_idempotent() {
-    use std::time::Instant;
-
-    let result = spawn_script("sleep", &["10"], "[test:kill_idempotent]");
-
-    if let Ok(session) = result {
-        let pid = session.pid();
-        let mut split = session.split();
-        let start = Instant::now();
-
-        // First kill should succeed
-        split.kill().expect("First kill should succeed");
-
-        // Wait for child to be reaped
-        let timeout = std::time::Duration::from_millis(500);
-        let poll_interval = std::time::Duration::from_millis(25);
-
-        while start.elapsed() < timeout {
-            match split.child.try_wait() {
-                Ok(Some(_status)) => {
-                    // Child reaped - now test idempotency
-                    // These should all succeed without panic (killed flag is set)
-                    split.kill().expect("Second kill should succeed (no-op)");
-                    split.kill().expect("Third kill should succeed (no-op)");
-
-                    // Verify process is actually gone
-                    let is_dead = !Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false);
-                    assert!(is_dead, "Process should be fully dead");
-                    return;
-                }
-                Ok(None) => {
-                    std::thread::sleep(poll_interval);
-                }
-                Err(e) => {
-                    panic!("Error waiting for child: {:?}", e);
-                }
-            }
-        }
-
-        panic!(
-            "Process {} did not terminate within {:?} after kill",
-            pid, timeout
-        );
-    }
+    let mut split = spawn_script("sleep", &["10"], "[test:kill_idempotent]")
+        .expect("spawn owned sleep")
+        .split();
+    split.kill().expect("first kill must complete owned cleanup");
+    let status = split.child.try_wait().unwrap().expect("child reaped");
+    split.kill().expect("second kill must be a no-op");
+    split.kill().expect("third kill must be a no-op");
+    assert_eq!(split.child.try_wait().unwrap(), Some(status));
+    assert!(split.process_handle.killed);
 }
 
 /// Test that process group is killed (child processes too)
@@ -227,48 +137,44 @@ fn test_process_group_kills_children() {
 }
 
 /// Test that ProcessHandle is registered and unregistered with PROCESS_MANAGER
+#[cfg(unix)]
 #[test]
 fn test_process_handle_registration_lifecycle() {
-    let test_pid = 77777u32;
-    let test_path = "/test/registration_lifecycle.ts";
-
-    // Create handle (registers)
-    let handle = ProcessHandle::new(test_pid, test_path.to_string());
-
-    // Verify it's created correctly
-    assert_eq!(handle.pid, test_pid);
-    assert!(!handle.killed);
-
-    // Drop (unregisters and kills)
-    drop(handle);
-
-    // If we get here without panic, lifecycle completed successfully
+    let mut split = spawn_script("sleep", &["10"], "[test:registration_lifecycle]")
+        .expect("spawn owned sleep")
+        .split();
+    let pid = split.pid();
+    let manager = &crate::process_manager::PROCESS_MANAGER;
+    assert!(manager.get_active_processes().iter().any(|info| info.pid == pid));
+    split.kill().expect("complete owned cleanup");
+    drop(split);
+    assert!(!manager.get_active_processes().iter().any(|info| info.pid == pid));
 }
 
 /// Test that kill() marks the handle as killed
+#[cfg(unix)]
 #[test]
 fn test_kill_sets_killed_flag() {
-    let mut handle = ProcessHandle::new(66666, "[test:killed_flag]".to_string());
-
-    assert!(!handle.killed, "killed should be false initially");
-
-    handle.kill();
-
-    assert!(handle.killed, "killed should be true after kill()");
+    let mut split = spawn_script("sleep", &["10"], "[test:killed_flag]")
+        .expect("spawn owned sleep")
+        .split();
+    assert!(!split.process_handle.killed);
+    split.kill().expect("complete owned cleanup");
+    assert!(split.process_handle.killed);
 }
 
 /// Test that double kill doesn't attempt to kill again
+#[cfg(unix)]
 #[test]
 fn test_double_kill_is_noop() {
-    let mut handle = ProcessHandle::new(55555, "[test:double_kill_noop]".to_string());
-
-    // First kill sets flag
-    handle.kill();
-    assert!(handle.killed);
-
-    // Second kill should be a no-op (no panic, no external command)
-    handle.kill();
-    assert!(handle.killed);
+    let mut split = spawn_script("sleep", &["10"], "[test:double_kill_noop]")
+        .expect("spawn owned sleep")
+        .split();
+    split.kill().expect("complete owned cleanup");
+    assert!(split.process_handle.killed);
+    split.process_handle.kill();
+    assert!(split.process_handle.killed);
+    assert!(!split.is_running());
 }
 
 /// Test SplitSession provides correct PID
@@ -310,24 +216,10 @@ fn test_wait_returns_exit_code() {
 #[cfg(unix)]
 #[test]
 fn test_is_running_accuracy() {
-    let result = spawn_script("sleep", &["5"], "[test:is_running_accuracy]");
-
-    if let Ok(session) = result {
-        let mut split = session.split();
-
-        // Should be running initially
-        assert!(split.is_running(), "Process should be running after spawn");
-
-        // Kill it
-        split.kill().expect("kill should succeed");
-
-        // Wait a moment
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Should not be running
-        assert!(
-            !split.is_running(),
-            "Process should not be running after kill"
-        );
-    }
+    let mut split = spawn_script("sleep", &["10"], "[test:is_running_accuracy]")
+        .expect("spawn owned sleep")
+        .split();
+    assert!(split.is_running(), "process must be running after spawn");
+    split.kill().expect("kill must complete owned cleanup");
+    assert!(!split.is_running(), "process must not be running after kill");
 }

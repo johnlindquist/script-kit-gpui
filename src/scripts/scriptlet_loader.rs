@@ -4,11 +4,13 @@
 //! in the ~/.scriptkit/plugins/*/scriptlets/ directories.
 
 mod loading;
+#[cfg(test)]
 mod parsing;
 
-pub use loading::{load_scriptlets, read_scriptlets_from_file};
+pub use loading::{load_scriptlets, read_scriptlets_from_file, ScriptletCatalogue};
 
 pub(crate) use loading::extract_kit_from_path;
+#[cfg(test)]
 pub(crate) use parsing::parse_scriptlet_section;
 
 #[cfg(test)]

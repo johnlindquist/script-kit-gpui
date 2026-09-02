@@ -287,7 +287,7 @@ impl ProcessManager {
     /// Get all active processes sorted by start time (newest first).
     pub fn get_active_processes_sorted(&self) -> Vec<ProcessInfo> {
         let mut processes = self.get_active_processes();
-        processes.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        processes.sort_by_key(|a| std::cmp::Reverse(a.started_at));
         processes
     }
 
@@ -1209,42 +1209,88 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn cleanup_orphans_kills_true_orphan_with_matching_cmdline() {
-        let (manager, _temp_dir) = create_test_manager();
+        use std::io::BufRead;
+        use std::process::Stdio;
 
-        // Double-fork: sh backgrounds a sleep and exits, orphaning the sleep
-        // to launchd — the real post-crash shape. The sleep keeps the dead
-        // shell's pgid, so this also exercises the single-pid kill fallback.
-        // (No `set -m`: a job-control sh kills its job group on exit. Stdout
-        // must be detached or .output() blocks on the inherited pipe.)
-        let output = std::process::Command::new("/bin/sh")
+        let (mut manager, temp_dir) = create_test_manager();
+        let legacy_registry = manager.active_pids_path.clone();
+        // Real startup adopts legacy records into a distinct per-instance
+        // registry. Pending cleanup must survive removal of the crash input.
+        manager.active_pids_path = temp_dir
+            .path()
+            .join(format!("active-pids-{}.json", std::process::id()));
+
+        // The old parent's `$!` only proved fork, not that the child had
+        // exec'd its recorded command. Have the child report its own PID
+        // from the script whose path cleanup will match, then reap its parent.
+        let fixture_path = temp_dir.path().join("owned-orphan.sh");
+        fs::write(
+            &fixture_path,
+            "printf '%s\\n' \"$$\"\nIFS= read -r release\n",
+        )
+        .expect("write owned orphan fixture");
+        let mut parent = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg("/bin/sleep 300 >/dev/null 2>&1 & echo $!")
-            .output()
-            .expect("spawn orphaned sleep");
-        let orphan_pid: u32 = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .expect("orphan pid");
-        manager.register_process(orphan_pid, "/bin/sleep");
-        manager.active_processes.write().unwrap().clear();
-
-        // Give the shell a moment to exit so the sleep is reparented.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+            // Preserve stdin explicitly: an asynchronous shell command
+            // otherwise reads /dev/null rather than the lifetime pipe.
+            .arg("exec 3<&0; /bin/sh \"$1\" <&3 3<&- &")
+            .arg("owned-orphan-parent")
+            .arg(&fixture_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn owned orphan fixture");
+        // Keep this outside Child so wait() cannot close it. EOF releases
+        // the orphan on assertion failure, without signalling an unverified
+        // PID or imposing a guessed lifetime on a heavily loaded test run.
+        let _lifetime = parent.stdin.take().expect("owned orphan lifetime pipe");
+        let mut ready =
+            std::io::BufReader::new(parent.stdout.take().expect("owned orphan readiness pipe"));
+        let mut ready_pid = String::new();
+        assert!(parent.wait().expect("reap orphan parent").success());
+        ready.read_line(&mut ready_pid).expect("owned orphan ready");
+        let orphan_pid: u32 = ready_pid.trim().parse().expect("ready orphan pid");
+        // No dedicated group: this still exercises the owned PID fallback.
+        let record = ProcessInfo {
+            pid: orphan_pid,
+            script_path: fixture_path.to_string_lossy().into_owned(),
+            started_at: Utc::now(),
+        };
+        fs::write(&legacy_registry, serde_json::to_vec(&vec![record]).unwrap())
+            .expect("persist legacy crash record");
 
         let killed = manager.cleanup_orphans();
-        assert_eq!(killed, 1, "orphaned sleep must be reaped");
+        let pending = manager.is_tracked_process(orphan_pid);
+        assert_eq!(
+            killed,
+            usize::from(!pending),
+            "only confirmed exits count as cleaned"
+        );
+        assert!(!legacy_registry.exists(), "legacy input must be consumed");
+        assert_eq!(
+            manager
+                .load_persisted_pids()
+                .iter()
+                .any(|info| info.pid == orphan_pid),
+            pending,
+            "unconfirmed cleanup must remain persisted under the live owner"
+        );
 
-        // SIGKILL delivery is asynchronous; poll briefly.
-        let mut gone = false;
-        for _ in 0..20 {
-            // SAFETY: signal 0 only checks liveness.
-            if unsafe { libc::kill(orphan_pid as i32, 0) } != 0 {
-                gone = true;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let observation = observe_tracked_process(orphan_pid);
+            if manager.reconcile_owned_process_cleanup(orphan_pid, observation) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owned orphan {orphan_pid} did not exit after cleanup"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(gone, "orphan {orphan_pid} still alive after cleanup");
+        assert!(!manager.is_tracked_process(orphan_pid));
+        assert!(manager.load_persisted_pids().is_empty());
     }
 
     #[test]

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt;
 use std::process::Command;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -55,14 +55,21 @@ impl Default for AppearanceCache {
 /// Cache for loaded theme to avoid repeated file I/O
 #[derive(Debug, Clone)]
 struct ThemeCache {
-    theme: Theme,
+    snapshot: Arc<super::live_edit::PublishedTheme>,
 }
 
 impl Default for ThemeCache {
     fn default() -> Self {
         // Create with a dark default theme - will be replaced on first load
         Self {
-            theme: Theme::dark_default(),
+            snapshot: {
+                let theme = Theme::dark_default();
+                Arc::new(super::live_edit::PublishedTheme {
+                    resolved: Arc::new(super::live_edit::ResolvedLiveTheme::from_theme(&theme)),
+                    theme: Arc::new(theme),
+                    revision: 1,
+                })
+            },
         }
     }
 }
@@ -181,74 +188,7 @@ pub const DARK_ROW_HOVER_OPACITY: f32 = 0.06;
 pub const LIGHT_ROW_SELECTED_OPACITY: f32 = 0.07;
 pub const LIGHT_ROW_HOVER_OPACITY: f32 = 0.04;
 
-fn default_selected_opacity() -> f32 {
-    DARK_ROW_SELECTED_OPACITY
-}
-
-fn default_hover_opacity() -> f32 {
-    DARK_ROW_HOVER_OPACITY
-}
-
-fn default_preview_opacity() -> f32 {
-    0.50
-}
-
-fn default_dialog_opacity() -> f32 {
-    0.50
-}
-
-fn default_input_opacity() -> f32 {
-    0.50
-}
-
-fn default_panel_opacity() -> f32 {
-    0.50
-}
-
-fn default_input_inactive_opacity() -> f32 {
-    0.50
-}
-
-fn default_input_active_opacity() -> f32 {
-    0.50
-}
-
-fn default_border_inactive_opacity() -> f32 {
-    0.125 // 0x20 / 255 ≈ 0.125
-}
-
-fn default_border_active_opacity() -> f32 {
-    0.25 // 0x40 / 255 ≈ 0.25
-}
-
-// ── Text grading defaults (Liquid Glass) ─────────────────────────────
-// Applied to text_primary. Keep labels bright while supporting copy recedes
-// on translucent 50% surfaces; do not reintroduce secondary/muted hex dimming.
-const TEXT_NAME_OPACITY: f32 = 1.00; // Names / primary labels (0xFF)
-const TEXT_STRONG_OPACITY: f32 = 0.80; // Badges, shortcuts, section headers (0xCC)
-const TEXT_MUTED_OPACITY: f32 = 0.65; // Focused descriptions, source hints (0xA5)
-const TEXT_HINT_OPACITY: f32 = 0.45; // Hovered descriptions, type labels (0x72)
-const TEXT_PLACEHOLDER_OPACITY: f32 = 0.40; // Placeholders, idle captions (0x66)
-const TEXT_ICON_OPACITY: f32 = 0.50; // Idle icons (0x7F)
-
-fn default_text_name() -> f32 {
-    TEXT_NAME_OPACITY
-}
-fn default_text_strong() -> f32 {
-    TEXT_STRONG_OPACITY
-}
-fn default_text_muted() -> f32 {
-    TEXT_MUTED_OPACITY
-}
-fn default_text_hint() -> f32 {
-    TEXT_HINT_OPACITY
-}
-fn default_text_placeholder() -> f32 {
-    TEXT_PLACEHOLDER_OPACITY
-}
-fn default_text_icon() -> f32 {
-    TEXT_ICON_OPACITY
-}
+include!("types_opacity_defaults.rs");
 
 /// Convert 0.0–1.0 opacity to u32 alpha (0x00–0xFF) for rgba bit-packing.
 pub fn opacity_to_alpha(opacity: f32) -> u32 {
@@ -1409,6 +1349,11 @@ impl Theme {
 /// Note: On macOS in light mode, the command exits with non-zero status because the
 /// AppleInterfaceStyle key doesn't exist, so we check exit status explicitly.
 pub fn detect_system_appearance() -> bool {
+    // Evaluator appearance is injected through its explicit theme, not sampled
+    // from the operator or a defaults subprocess.
+    if crate::runtime_policy::is_owned_evaluation() {
+        return true;
+    }
     let cache = &*APPEARANCE_CACHE;
 
     let mut cache_guard = match cache.lock() {
@@ -1499,7 +1444,7 @@ fn normalize_focus_scheme_primary_text(colors: &mut FocusColorScheme) {
     colors.text.primary = super::helpers::hard_readable_text_hex(colors.background.main);
 }
 
-fn normalize_theme_primary_text(mut theme: Theme) -> Theme {
+pub(super) fn normalize_theme_primary_text(mut theme: Theme) -> Theme {
     theme.colors.text.primary =
         super::helpers::hard_readable_text_hex(theme.colors.background.main);
 
@@ -1800,175 +1745,90 @@ fn log_theme_load_result(correlation_id: &str, source: &str, theme: &Theme) {
 /// If system appearance detection is not available, defaults to dark mode.
 /// Logs errors to stderr but doesn't fail the application.
 pub fn load_theme() -> Theme {
-    let correlation_id = format!("theme_load:{}", uuid::Uuid::new_v4());
-
-    if let Some(theme) = load_theme_from_user_preferences(&correlation_id) {
-        log_theme_load_result(&correlation_id, "user_preferences", &theme);
-        log_theme_config(&theme);
-        return theme;
-    }
-
-    let theme_path = crate::setup::theme_json_path();
-
-    // Check if theme file exists
-    if !theme_path.exists() {
-        warn!(
-            correlation_id = %correlation_id,
-            path = %theme_path.display(),
-            "Theme file not found, using defaults based on system appearance"
-        );
-        let theme = default_theme_from_system_appearance();
-        log_theme_load_result(&correlation_id, "default_missing_theme_file", &theme);
-        log_theme_config(&theme);
-        return theme;
-    }
-
-    // Read and parse the JSON file
-    match std::fs::read_to_string(&theme_path) {
-        Err(e) => {
-            error!(
-                correlation_id = %correlation_id,
-                path = %theme_path.display(),
-                io_error_kind = ?e.kind(),
-                error = ?e,
-                "Failed to read theme file, using defaults"
-            );
-            let theme = default_theme_from_system_appearance();
-            log_theme_load_result(&correlation_id, "default_theme_file_read_error", &theme);
-            log_theme_config(&theme);
-            theme
+    match try_load_theme() {
+        Ok(theme) => theme,
+        Err(error) => {
+            warn!(%error, "Initial theme load failed; using appearance defaults");
+            default_theme_from_system_appearance()
         }
-        Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
-            Ok(user_theme_json) => {
-                // Key behavior: When appearance is Auto, use system appearance to
-                // determine which color scheme to use (light or dark).
-                // This allows the app to follow macOS light/dark mode automatically.
-                let is_system_dark = detect_system_appearance();
-                let requested_appearance = user_theme_json
-                    .get("appearance")
-                    .cloned()
-                    .and_then(|appearance| {
-                        serde_json::from_value::<AppearanceMode>(appearance).ok()
-                    })
-                    .unwrap_or_default();
-                let should_use_light =
-                    should_use_light_palette(requested_appearance, is_system_dark);
-
-                let mut merged_theme_json = match serde_json::to_value(if should_use_light {
-                    Theme::light_default()
-                } else {
-                    Theme::dark_default()
-                }) {
-                    Ok(default_theme_json) => default_theme_json,
-                    Err(e) => {
-                        error!(
-                            correlation_id = %correlation_id,
-                            serialize_error = ?e,
-                            "Failed to serialize default theme, using defaults"
-                        );
-                        let theme = default_theme_from_system_appearance();
-                        log_theme_load_result(
-                            &correlation_id,
-                            "default_theme_serialization_error",
-                            &theme,
-                        );
-                        log_theme_config(&theme);
-                        return theme;
-                    }
-                };
-
-                merge_json(&mut merged_theme_json, user_theme_json);
-                set_requested_appearance_on_theme_json(
-                    &mut merged_theme_json,
-                    requested_appearance,
-                );
-                hydrate_terminal_colors_for_deserialize(&mut merged_theme_json, is_system_dark);
-                let terminal_palette =
-                    terminal_palette_for_appearance(requested_appearance, is_system_dark);
-
-                match with_terminal_default_palette_hint(terminal_palette, || {
-                    serde_json::from_value::<Theme>(merged_theme_json)
-                }) {
-                    Ok(mut theme) => {
-                        debug!(
-                            correlation_id = %correlation_id,
-                            path = %theme_path.display(),
-                            "Successfully loaded theme"
-                        );
-
-                        if should_use_light {
-                            // Use light opacity defaults
-                            if theme.opacity.is_none() {
-                                theme.opacity = Some(BackgroundOpacity::light_default());
-                            }
-
-                            debug!(
-                                correlation_id = %correlation_id,
-                                system_appearance = if is_system_dark { "dark" } else { "light" },
-                                "Using light theme colors (system is in light mode)"
-                            );
-                        } else {
-                            // System is in dark mode (or explicitly set to dark)
-                            if theme.opacity.is_none() {
-                                theme.opacity = Some(BackgroundOpacity::dark_default());
-                            }
-                        }
-
-                        theme = normalize_theme_primary_text(theme);
-                        log_theme_load_result(&correlation_id, "theme_json", &theme);
-                        log_theme_config(&theme);
-                        theme
-                    }
-                    Err(e) => {
-                        error!(
-                            correlation_id = %correlation_id,
-                            path = %theme_path.display(),
-                            parse_error = ?e,
-                            content_len = contents.len(),
-                            "Failed to parse theme JSON, using defaults"
-                        );
-                        debug!(
-                            correlation_id = %correlation_id,
-                            content_len = contents.len(),
-                            "Malformed theme file content"
-                        );
-                        let theme = default_theme_from_system_appearance();
-                        log_theme_load_result(
-                            &correlation_id,
-                            "default_theme_json_parse_error",
-                            &theme,
-                        );
-                        log_theme_config(&theme);
-                        theme
-                    }
-                }
-            }
-            Err(e) => {
-                error!(
-                    correlation_id = %correlation_id,
-                    path = %theme_path.display(),
-                    parse_error = ?e,
-                    content_len = contents.len(),
-                    "Failed to parse theme JSON, using defaults"
-                );
-                debug!(
-                    correlation_id = %correlation_id,
-                    content_len = contents.len(),
-                    "Malformed theme file content"
-                );
-                let theme = default_theme_from_system_appearance();
-                log_theme_load_result(&correlation_id, "default_theme_json_parse_error", &theme);
-                log_theme_config(&theme);
-                theme
-            }
-        },
     }
+}
+
+pub(crate) fn decode_theme_json(contents: &str, is_system_dark: bool) -> anyhow::Result<Theme> {
+    let value: serde_json::Value = serde_json::from_str(contents)?;
+    let diagnostics = super::validation::validate_theme_json(&value);
+    anyhow::ensure!(
+        !diagnostics.has_errors(),
+        "{}",
+        diagnostics.format_for_log()
+    );
+    if diagnostics.has_warnings() {
+        warn!(diagnostics = %diagnostics.format_for_log(), "Theme file warnings");
+    }
+    let appearance = value
+        .get("appearance")
+        .cloned()
+        .map(serde_json::from_value::<AppearanceMode>)
+        .transpose()?
+        .unwrap_or_default();
+    let light = should_use_light_palette(appearance, is_system_dark);
+    let mut merged = serde_json::to_value(if light {
+        Theme::light_default()
+    } else {
+        Theme::dark_default()
+    })?;
+    merge_json(&mut merged, value);
+    set_requested_appearance_on_theme_json(&mut merged, appearance);
+    hydrate_terminal_colors_for_deserialize(&mut merged, is_system_dark);
+    let palette = terminal_palette_for_appearance(appearance, is_system_dark);
+    let mut theme =
+        with_terminal_default_palette_hint(palette, || serde_json::from_value::<Theme>(merged))?;
+    theme.opacity = Some(
+        theme
+            .opacity
+            .unwrap_or_else(|| {
+                if light {
+                    BackgroundOpacity::light_default()
+                } else {
+                    BackgroundOpacity::dark_default()
+                }
+            })
+            .clamped(),
+    );
+    Ok(normalize_theme_primary_text(theme))
+}
+
+/// A reload never manufactures a replacement on decode or storage failure.
+pub(super) fn try_load_theme() -> anyhow::Result<Theme> {
+    try_load_theme_with_appearance(detect_system_appearance)
+}
+
+fn try_load_theme_with_appearance(
+    detect_appearance: impl FnOnce() -> bool,
+) -> anyhow::Result<Theme> {
+    let correlation_id = format!("theme_load:{}", uuid::Uuid::new_v4());
+    super::presets::recover_theme_save()?;
+    if !crate::runtime_policy::is_owned_evaluation() {
+        if let Some(theme) = load_theme_from_user_preferences(&correlation_id) {
+            log_theme_load_result(&correlation_id, "user_preferences", &theme);
+            return Ok(theme);
+        }
+    }
+    let path = crate::setup::theme_json_path();
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(&path)?;
+    }
+    let contents = std::fs::read_to_string(&path)?;
+    let theme = decode_theme_json(&contents, detect_appearance())?;
+    log_theme_load_result(&correlation_id, "theme_json", &theme);
+    log_theme_config(&theme);
+    Ok(theme)
 }
 
 /// Get a cached version of the theme for use in render functions
 ///
 /// This avoids file I/O on every render call by caching the loaded theme.
-/// Use `reload_theme_cache()` when you need to refresh cached values.
+/// Use `service::reload_theme` to refresh through the publication transaction.
 ///
 /// # Performance
 ///
@@ -1982,64 +1842,44 @@ pub fn load_theme() -> Theme {
 /// - When you need guaranteed fresh theme data
 /// - After explicitly invalidating the cache
 pub fn get_cached_theme() -> Theme {
-    let cache = &*THEME_CACHE;
-    let cache_guard = cache.lock().unwrap_or_else(|error| {
-        warn!(
-            operation = "get_cached_theme_lock",
-            error = ?error,
-            "Theme cache mutex poisoned; recovering cached theme state"
-        );
-        error.into_inner()
-    });
-
-    cache_guard.theme.clone()
+    (*get_theme_snapshot().theme).clone()
 }
 
-/// Reload and cache the theme from disk
-///
-/// Call this when you need to refresh the cached theme (e.g., from the theme watcher).
-/// This function loads the theme from disk and updates the cache.
-pub fn reload_theme_cache() -> Theme {
-    let theme = load_theme();
-
-    let cache = &*THEME_CACHE;
-    let mut guard = cache.lock().unwrap_or_else(|error| {
-        warn!(
-            operation = "reload_theme_cache_lock",
-            error = ?error,
-            "Theme cache mutex poisoned; recovering cache for theme reload"
-        );
-        error.into_inner()
-    });
-    guard.theme = theme.clone();
-    debug!("Theme cache reloaded");
-
-    theme
+pub fn get_theme_snapshot() -> Arc<super::live_edit::PublishedTheme> {
+    THEME_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .snapshot
+        .clone()
 }
 
-#[allow(dead_code)]
-pub(crate) fn set_cached_theme_for_preview(theme: &Theme) {
-    let cache = &*THEME_CACHE;
-    let mut guard = cache.lock().unwrap_or_else(|error| {
-        warn!(
-            operation = "set_cached_theme_for_preview_lock",
-            error = ?error,
-            "Theme cache mutex poisoned; recovering cache for theme preview"
-        );
-        error.into_inner()
+/// Only the foreground publication service may mutate the cache. Holding the
+/// lock across the precomputed GPUI update makes revision+theme one authority.
+pub(super) fn commit_prepared_theme(
+    expected_revision: u64,
+    prepared: super::live_edit::PreparedTheme,
+    apply_component: impl FnOnce(super::gpui_integration::PreparedComponentTheme),
+) -> Result<Arc<super::live_edit::PublishedTheme>, super::service::ThemePublishError> {
+    let mut cache = THEME_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if cache.snapshot.revision != expected_revision {
+        return Err(super::service::ThemePublishError::StaleRevision {
+            expected: expected_revision,
+            actual: cache.snapshot.revision,
+        });
+    }
+    let revision = expected_revision
+        .checked_add(1)
+        .ok_or(super::service::ThemePublishError::RevisionExhausted)?;
+    let snapshot = Arc::new(super::live_edit::PublishedTheme {
+        revision,
+        theme: prepared.theme,
+        resolved: prepared.resolved,
     });
-    guard.theme = theme.clone();
-    debug!("Theme cache updated from preview");
-}
-
-/// Initialize the theme cache on startup
-///
-/// Call this during app initialization to ensure the theme is loaded
-/// before any render calls. This ensures `get_cached_theme()` returns
-/// the correct theme from the first render.
-pub fn init_theme_cache() {
-    reload_theme_cache();
-    debug!("Theme cache initialized");
+    apply_component(prepared.component_theme);
+    cache.snapshot = snapshot.clone();
+    Ok(snapshot)
 }
 
 // ============================================================================

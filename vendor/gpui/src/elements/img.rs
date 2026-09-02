@@ -15,7 +15,6 @@ use image::{
 use scheduler::Instant;
 use smallvec::SmallVec;
 use std::{
-    fs,
     io::{self, Cursor},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
@@ -459,13 +458,16 @@ impl Element for Img {
             window,
             cx,
             |style, window, cx| {
-                if let Some(Ok(data)) = source.use_data(
+                let image_data = source.use_data(
                     self.image_cache
                         .clone()
                         .or_else(|| window.image_cache_stack.last().cloned()),
                     window,
                     cx,
-                ) {
+                );
+                #[cfg(any(test, feature = "test-support"))]
+                let resource_failed = matches!(&image_data, Some(Err(_)));
+                if let Some(Ok(data)) = image_data {
                     let new_bounds = self
                         .style
                         .object_fit
@@ -485,6 +487,13 @@ impl Element for Img {
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {
                     replacement.paint(window, cx);
+                } else {
+                    #[cfg(any(test, feature = "test-support"))]
+                    if resource_failed {
+                        window.record_owned_resource_failed();
+                    } else {
+                        window.record_owned_resource_pending();
+                    }
                 }
             },
         )
@@ -601,8 +610,14 @@ impl Asset for ImageAssetLoader {
         let asset_source = cx.asset_source().clone();
         async move {
             let bytes = match source.clone() {
-                Resource::Path(uri) => fs::read(uri.as_ref())?,
+                Resource::Path(uri) => match crate::OwnedHiddenGuard::installed() {
+                    Some(guard) => guard.read_resource_path(uri.as_ref())?,
+                    None => std::fs::read(uri.as_ref())?,
+                },
                 Resource::Uri(uri) => {
+                    if let Some(guard) = crate::OwnedHiddenGuard::installed() {
+                        return Err(guard.refuse("network_resource").into());
+                    }
                     use anyhow::Context as _;
                     use futures::AsyncReadExt as _;
 
@@ -625,9 +640,18 @@ impl Asset for ImageAssetLoader {
                     body
                 }
                 Resource::Embedded(path) => {
-                    let data = asset_source.load(&path).ok().flatten();
+                    let data = if crate::OwnedHiddenGuard::installed().is_some() {
+                        asset_source.load(&path)?
+                    } else {
+                        asset_source.load(&path).ok().flatten()
+                    };
                     if let Some(data) = data {
-                        data.to_vec()
+                        if crate::OwnedHiddenGuard::installed().is_some()
+                            && data.len() as u64 > crate::OWNED_HIDDEN_MAX_RESOURCE_BYTES
+                        {
+                            return Err(anyhow::anyhow!("owned_resource_byte_limit").into());
+                        }
+                        data.into_owned()
                     } else {
                         return Err(ImageCacheError::Asset(
                             format!("Embedded resource not found: {}", path).into(),
@@ -636,6 +660,16 @@ impl Asset for ImageAssetLoader {
                 }
             };
 
+            if crate::OwnedHiddenGuard::installed().is_some() {
+                if bytes.len() as u64 > crate::OWNED_HIDDEN_MAX_RESOURCE_BYTES {
+                    return Err(anyhow::anyhow!("owned_resource_byte_limit").into());
+                }
+                if let Ok(format) = image::guess_format(&bytes) {
+                    return crate::decode_owned_image(&bytes, format)
+                        .map(|frames| Arc::new(RenderImage::new(frames)))
+                        .map_err(Into::into);
+                }
+            }
             if let Ok(format) = image::guess_format(&bytes) {
                 let data = match format {
                     ImageFormat::Gif => {
@@ -698,7 +732,10 @@ impl Asset for ImageAssetLoader {
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0, true)
-                    .map_err(Into::into)
+                    .map_err(|error| match error.downcast::<usvg::Error>() {
+                        Ok(error) => ImageCacheError::from(error),
+                        Err(error) => ImageCacheError::from(error),
+                    })
             }
         }
     }
@@ -755,5 +792,71 @@ impl From<usvg::Error> for ImageCacheError {
 impl From<image::ImageError> for ImageCacheError {
     fn from(value: image::ImageError) -> Self {
         Self::Image(Arc::new(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TestAppContext, canvas, fill, point, rgb, size};
+    use std::{cell::Cell, rc::Rc};
+
+    fn painted_replacement(paints: Rc<Cell<usize>>) -> AnyElement {
+        canvas(
+            |_, _, _| (),
+            move |bounds, (), window, _| {
+                paints.set(paints.get() + 1);
+                window.paint_quad(fill(bounds, rgb(0xff0000)));
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+
+    #[gpui::test]
+    fn declared_replacements_only_paint_when_selected_and_stop_after_resolution(
+        cx: &mut TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let state = Rc::new(Cell::new(0));
+        let fallback_paints = Rc::new(Cell::new(0));
+        let loading_paints = Rc::new(Cell::new(0));
+        let image = Arc::new(RenderImage::new(SmallVec::from_elem(
+            Frame::new(image::RgbaImage::from_pixel(
+                2,
+                2,
+                Rgba([255, 255, 255, 255]),
+            )),
+            1,
+        )));
+        let source = ImageSource::Custom(Arc::new({
+            let state = state.clone();
+            move |_, _| match state.get() {
+                0 => None,
+                1 => Some(Err(ImageCacheError::Asset("missing required image".into()))),
+                _ => Some(Ok(image.clone())),
+            }
+        }));
+
+        for phase in 0..3 {
+            state.set(phase);
+            let (layout, _) = cx.draw(point(px(0.), px(0.)), size(px(16.), px(16.)), |_, _| {
+                img(source.clone())
+                    .size_full()
+                    .with_fallback({
+                        let paints = fallback_paints.clone();
+                        move || painted_replacement(paints.clone())
+                    })
+                    .with_loading({
+                        let paints = loading_paints.clone();
+                        move || painted_replacement(paints.clone())
+                    })
+            });
+            // Merely declaring either replacement must not make it paint while pending.
+            // A real failure paints the fallback, and resolved data replaces that fallback.
+            assert_eq!(layout.replacement.is_some(), phase == 1);
+            assert_eq!(fallback_paints.get(), usize::from(phase != 0));
+            assert_eq!(loading_paints.get(), 0);
+        }
     }
 }

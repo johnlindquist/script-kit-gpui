@@ -25,13 +25,13 @@
 // gap in `structureLossStillOpen` instead of quietly reading as complete.
 //
 // Run:
-//   SCRIPT_KIT_AGENT_ARTIFACT_NAME=ai-rock-solid \
-//     ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
-//   SCRIPT_KIT_GPUI_BINARY="$PWD/target-agent/artifacts/ai-rock-solid/script-kit-gpui" \
+//   bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out .test-output/flow-composer.reference.json
+//   SCRIPT_KIT_ARTIFACT_REFERENCE=.test-output/flow-composer.reference.json \
 //     bun scripts/agentic/flow-composer-multiline-probe.ts
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Driver, type Json } from "../devtools/driver.ts";
+import { runtimeArtifactFromEnvironment } from "../devtools/lib/runtime-task-proof.ts";
 import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
 
 assertNoninteractiveVisualProbe("flow-composer-multiline.system-clipboard");
@@ -42,7 +42,8 @@ const receiptPath = resolve(
 	process.env.PROBE_RECEIPT ??
 		".test-output/ai-rock-solid-ux/flow-composer-multiline.json",
 );
-const binary = process.env.SCRIPT_KIT_GPUI_BINARY;
+const artifact = runtimeArtifactFromEnvironment();
+const binary = process.env.SCRIPT_KIT_GPUI_BINARY ?? artifact.executablePath;
 
 /** The message a user would realistically paste into a chat. */
 const MULTILINE = "Fix the bug\nin auth.rs";
@@ -104,7 +105,7 @@ try {
 	d = await Driver.launch({
 		sandboxHome: true,
 		sessionName: "flow-multiline",
-		...(binary ? { binary } : {}),
+		binary, immutableArtifact: artifact.reference,
 		env: { SCRIPT_KIT_FLOW_UX_CWD: repoRoot },
 	});
 	await d.request({ type: "show" });

@@ -80,10 +80,8 @@ pub fn extract_script_metadata(content: &str) -> ScriptMetadata {
                         metadata.alias = Some(value);
                     }
                 }
-                "shortcut" => {
-                    if metadata.shortcut.is_none() && !value.is_empty() {
-                        metadata.shortcut = Some(value);
-                    }
+                "shortcut" if metadata.shortcut.is_none() && !value.is_empty() => {
+                    metadata.shortcut = Some(value);
                 }
                 _ => {} // Ignore other metadata keys for now
             }
@@ -181,10 +179,8 @@ pub fn extract_schedule_metadata(content: &str) -> ScheduleMetadata {
                         metadata.cron = Some(value);
                     }
                 }
-                "schedule" => {
-                    if metadata.schedule.is_none() && !value.is_empty() {
-                        metadata.schedule = Some(value);
-                    }
+                "schedule" if metadata.schedule.is_none() && !value.is_empty() => {
+                    metadata.schedule = Some(value);
                 }
                 _ => {} // Ignore other metadata keys
             }

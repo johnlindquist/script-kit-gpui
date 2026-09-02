@@ -437,184 +437,7 @@ fn extract_last_code_block_with_lang(text: &str) -> Option<CodeBlock> {
 /// Maximum number of clipboard entries to cache for the clipboard history view.
 const CLIPBOARD_CACHE_SIZE: usize = 100;
 
-enum DeferredAgentChatAction {
-    OpenOnly,
-    SetInput {
-        text: String,
-        submit: bool,
-    },
-    SetInputWithImage {
-        text: String,
-        image_base64: String,
-        submit: bool,
-    },
-    AddAttachment {
-        path: String,
-    },
-    ApplyPreset {
-        preset_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeferredAgentChatActionKind {
-    OpenOnly,
-    SetInput,
-    SetInputSubmit,
-    SetInputWithImage,
-    SetInputWithImageSubmit,
-    AddAttachment,
-    ApplyPreset,
-}
-
-impl DeferredAgentChatActionKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::OpenOnly => "open_only",
-            Self::SetInputSubmit => "set_input_submit",
-            Self::SetInput => "set_input",
-            Self::SetInputWithImageSubmit => "set_input_with_image_submit",
-            Self::SetInputWithImage => "set_input_with_image",
-            Self::AddAttachment => "add_attachment",
-            Self::ApplyPreset => "apply_preset",
-        }
-    }
-
-    fn failure_message(self, error: impl std::fmt::Display) -> String {
-        match self {
-            Self::OpenOnly => format!("Failed to open Agent Chat: {error}"),
-            Self::AddAttachment => format!("Failed to attach file to Agent Chat: {error}"),
-            Self::ApplyPreset => format!("Failed to apply AI preset: {error}"),
-            Self::SetInput
-            | Self::SetInputSubmit
-            | Self::SetInputWithImage
-            | Self::SetInputWithImageSubmit => format!("Failed to send to Agent Chat: {error}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeferredAiImageAttachmentStage {
-    DecodeClipboardImage,
-    WriteClipboardImage,
-}
-
-impl DeferredAiImageAttachmentStage {
-    fn failure_message(self, error: impl std::fmt::Display) -> String {
-        match self {
-            Self::DecodeClipboardImage => format!("Failed to decode image attachment: {error}"),
-            Self::WriteClipboardImage => format!("Failed to write image attachment: {error}"),
-        }
-    }
-}
-
-impl DeferredAgentChatAction {
-    fn kind(&self) -> DeferredAgentChatActionKind {
-        match self {
-            Self::OpenOnly => DeferredAgentChatActionKind::OpenOnly,
-            Self::SetInput { submit: true, .. } => DeferredAgentChatActionKind::SetInputSubmit,
-            Self::SetInput { submit: false, .. } => DeferredAgentChatActionKind::SetInput,
-            Self::SetInputWithImage { submit: true, .. } => {
-                DeferredAgentChatActionKind::SetInputWithImageSubmit
-            }
-            Self::SetInputWithImage { submit: false, .. } => {
-                DeferredAgentChatActionKind::SetInputWithImage
-            }
-            Self::AddAttachment { .. } => DeferredAgentChatActionKind::AddAttachment,
-            Self::ApplyPreset { .. } => DeferredAgentChatActionKind::ApplyPreset,
-        }
-    }
-
-    fn apply_to_agent_chat(
-        self,
-        entity: Entity<crate::ai::agent_chat::ui::AgentChatView>,
-        cx: &mut App,
-    ) -> Result<&'static str, String> {
-        entity.update(cx, move |chat, cx| match self {
-            Self::OpenOnly => Ok("open_only"),
-            Self::SetInput { text, submit } => {
-                if chat.is_setup_mode() {
-                    return Err("Agent Chat is in setup mode".to_string());
-                }
-                chat.set_input(text, cx);
-                if submit {
-                    let Some(thread) = chat.thread() else {
-                        return Err("Agent Chat thread unavailable".to_string());
-                    };
-                    thread
-                        .update(cx, |thread, cx| thread.submit_input(cx))
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok("set_input")
-            }
-            Self::SetInputWithImage {
-                text,
-                image_base64,
-                submit,
-            } => {
-                if chat.is_setup_mode() {
-                    return Err("Agent Chat is in setup mode".to_string());
-                }
-
-                use base64::Engine as _;
-
-                let png_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(image_base64)
-                    .map_err(|error| {
-                        DeferredAiImageAttachmentStage::DecodeClipboardImage.failure_message(error)
-                    })?;
-                let temp_path = std::env::temp_dir().join(format!(
-                    "script-kit-agent_chat-clipboard-{}.png",
-                    uuid::Uuid::new_v4()
-                ));
-                std::fs::write(&temp_path, png_bytes).map_err(|error| {
-                    DeferredAiImageAttachmentStage::WriteClipboardImage.failure_message(error)
-                })?;
-                let path = temp_path.to_string_lossy().into_owned();
-
-                chat.live_thread()
-                    .update(cx, |thread, cx| {
-                        thread.add_context_part(
-                            crate::ai::AiContextPart::FilePath {
-                                path,
-                                label: "Clipboard Image".to_string(),
-                            },
-                            cx,
-                        );
-                        thread.set_input(text, cx);
-                        if submit {
-                            thread.submit_input(cx)?;
-                        }
-                        Ok::<(), String>(())
-                    })
-                    .map_err(|error| error.to_string())?;
-
-                Ok("set_input_with_image")
-            }
-            Self::AddAttachment { path } => {
-                if chat.is_setup_mode() {
-                    return Err("Agent Chat is in setup mode".to_string());
-                }
-
-                let label = std::path::Path::new(&path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| path.clone());
-
-                chat.live_thread().update(cx, |thread, cx| {
-                    thread.add_context_part(crate::ai::AiContextPart::FilePath { path, label }, cx);
-                });
-
-                Ok("add_attachment")
-            }
-            Self::ApplyPreset { preset_id } => {
-                chat.apply_preset_by_id(&preset_id, cx)?;
-                Ok("apply_preset")
-            }
-        })
-    }
-}
+include!("deferred_agent_chat.rs");
 
 impl ScriptListApp {
     /// Show an error toast and call cx.notify() to ensure the UI updates.
@@ -650,7 +473,7 @@ impl ScriptListApp {
         cx.notify();
     }
 
-    /// Copy text to the system clipboard with consistent success/error feedback.
+    /// Copy application text with destination-accurate success/error feedback.
     ///
     /// On success, shows a HUD with the given message and optionally hides the
     /// main window. On failure, shows an error toast.
@@ -661,32 +484,22 @@ impl ScriptListApp {
         close_after: bool,
         cx: &mut Context<Self>,
     ) {
-        let copy_result = {
-            #[cfg(target_os = "macos")]
-            {
-                self.pbcopy(text)
-                    .map_err(|e| format!("Clipboard write failed: {}", e))
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                use arboard::Clipboard;
-                Clipboard::new()
-                    .and_then(|mut c| c.set_text(text))
-                    .map_err(|e| format!("Clipboard write failed: {}", e))
-            }
-        };
-
-        match copy_result {
-            Ok(()) => {
-                self.show_hud(success_message, Some(HUD_MEDIUM_MS), cx);
+        match crate::platform::copy_text(text) {
+            Ok(receipt) => {
+                let message = match receipt.destination() {
+                    crate::runtime_policy::CopyDestination::SystemClipboard => success_message,
+                    crate::runtime_policy::CopyDestination::OwnedProcessLocal => {
+                        receipt.feedback("Copied".to_owned())
+                    }
+                };
+                self.show_hud(message, Some(HUD_MEDIUM_MS), cx);
                 if close_after {
                     self.hide_main_and_reset(cx);
                 }
             }
             Err(e) => {
-                tracing::error!(error = %e, "Clipboard write failed");
-                self.show_error_toast("Failed to copy to clipboard", cx);
+                tracing::error!(error = %e, "Text copy failed");
+                self.show_error_toast(format!("Failed to copy text: {e}"), cx);
             }
         }
     }
@@ -1101,7 +914,7 @@ impl ScriptListApp {
     /// Centralizes state transition so actions don't directly mutate legacy
     /// focus fields (`pending_focus`) in multiple places.
     fn transition_to_script_list_after_action(&mut self, cx: &mut Context<Self>) {
-        self.current_view = AppView::ScriptList;
+        self.transition_current_view_and_rekey_main_automation_surface(AppView::ScriptList);
         self.request_focus(FocusTarget::MainFilter, cx);
     }
 
@@ -1961,9 +1774,21 @@ impl ScriptListApp {
 
                         let path = crate::plugins::plugin_scripts_dir("main")
                             .join(format!("{name}.{ext}"));
+                        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+                            if let Err(error) = policy.require_owned_path(&path) {
+                                return DispatchOutcome::error(
+                                    crate::action_helpers::ERROR_ACTION_FAILED,
+                                    format!("Failed to save script: {error}"),
+                                );
+                            }
+                        }
 
                         if let Err(e) = std::fs::write(&path, &code) {
                             tracing::warn!(%e, "agent_chat_save_as_script_failed");
+                            return DispatchOutcome::error(
+                                crate::action_helpers::ERROR_ACTION_FAILED,
+                                format!("Failed to save script: {e}"),
+                            );
                         } else {
                             let mut o = DispatchOutcome::success();
                             o.user_message = code_block_action.saved_script_message(&name, ext);
@@ -1981,6 +1806,14 @@ impl ScriptListApp {
                 else {
                     return DispatchOutcome::not_handled();
                 };
+                if let Err(error) =
+                    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+                {
+                    return DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        format!("Failed to run: {error}"),
+                    );
+                }
                 let entity = entity.clone();
                 let last_response = {
                     let view = entity.read(cx);
@@ -2056,6 +1889,10 @@ impl ScriptListApp {
                             let result = cx
                                 .background_executor()
                                 .spawn(async move {
+                                    crate::runtime_policy::check(
+                                        crate::runtime_policy::ExternalEffect::Process,
+                                    )
+                                    .map_err(std::io::Error::other)?;
                                     std::process::Command::new(&cmd)
                                         .args(&args)
                                         .current_dir(std::env::temp_dir())
@@ -2104,9 +1941,21 @@ impl ScriptListApp {
                 o
             }
             "agent_chat_open_in_editor" => {
+                if let Err(error) = crate::runtime_policy::check(
+                    crate::runtime_policy::ExternalEffect::OpenExternal,
+                ) {
+                    return DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        format!("Failed to open editor: {error}"),
+                    );
+                }
                 let kit_path = crate::setup::get_kit_path();
                 if let Err(e) = open::that(&kit_path) {
                     tracing::warn!(%e, "agent_chat_open_in_editor_failed");
+                    return DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        format!("Failed to open editor: {e}"),
+                    );
                 }
                 DispatchOutcome::success()
             }
@@ -2556,6 +2405,9 @@ impl ScriptListApp {
                 }
             }
         };
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
 
         log_dispatch_outcome(
             &action_id_stripped,

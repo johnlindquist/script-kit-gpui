@@ -38,11 +38,21 @@ A sigil only counts at a word boundary — `hello@world.com` is plain search.
 
 ## Keyboard Behavior
 
-- `Enter` — run the selected row, or accept the highlighted picker row when a picker is open.
+- `Enter` — run the current eligible selected row, or accept the highlighted picker row when a picker is open. A stale query or missing row is refused; Enter never silently substitutes a neighboring result.
 - `Tab` — with typed text: **Quick AI** (opens the AI window with your query for review). With empty input: the **cwd picker**. Directory-browse queries keep `Tab` for path completion.
 - `Shift+Tab` — open the agent **model/profile picker**.
 - `⌘K` — actions for the selected row or current mode.
 - `Escape` — closes the active picker/popup first, then clears/dismisses the launcher.
+
+### Selection while results arrive
+
+- Before you deliberately choose a row, selection follows the **first eligible result**. An asynchronous result that ranks above the old first row becomes selected automatically.
+- Arrow navigation, clicking a row, or an agent selecting its semantic identity anchors that row. New results can change its position without changing your choice. Deliberately choosing the already-first row also anchors it.
+- Changing the query restores automatic selection. If an anchored row disappears, selection falls back to the first eligible result; an empty or status-only list has no selected result.
+- Empty `@source:` sub-searches are initially unarmed: the first Down arrow selects the first eligible row, not the second. Headers and layout-only slots are never choices.
+- Unavailable explanatory choices may remain selectable for inspection, but cannot run.
+- Result selection does not take keyboard focus away from the input. Refreshes do not undo deliberate scrolling. The preview, footer, actions, and Enter refer to the same current subject.
+- `~` File Search keeps its own automatic-first/user-locked-path policy; it is not the launcher's query state.
 
 ## Capture
 

@@ -262,12 +262,7 @@
                             );
                             return;
                         }
-                        // Check if we're in fallback mode first
-                        if this.main_menu_fallback_state.is_active() {
-                            this.execute_selected_fallback(cx);
-                        } else {
-                            this.execute_selected(cx);
-                        }
+                        let _dispatch = this.execute_selected(cx);
                     }
                 }
                 InputEvent::PressTab { secondary } => {

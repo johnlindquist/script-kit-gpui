@@ -16,6 +16,7 @@ pub struct NativeMainWindowHidden {
 
 #[derive(Debug)]
 pub enum MainWindowHideCompletion {
+    PolicyRefused(crate::runtime_policy::EffectRefusal),
     Hidden(NativeMainWindowHidden),
     Superseded,
     MissingWindow,
@@ -57,6 +58,7 @@ fn main_window_hide_was_superseded(
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 fn hide_main_window_with_geometry_trace(cycle_id: Option<u64>) {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("hide_main_window") {
         return;
     }
@@ -116,6 +118,7 @@ static MAIN_SPACE_CHANGE_OBSERVER: std::sync::LazyLock<std::sync::Mutex<Option<u
 
 #[cfg(target_os = "macos")]
 pub fn install_main_window_space_change_hide_observer() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::GlobalMonitor) { return; }
     if require_main_thread("install_main_window_space_change_hide_observer") {
         return;
     }
@@ -164,6 +167,7 @@ pub fn install_main_window_space_change_hide_observer() {
 
 #[cfg(target_os = "macos")]
 fn hide_main_window_for_active_space_change() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("hide_main_window_for_active_space_change") {
         return;
     }
@@ -222,6 +226,9 @@ fn hide_main_window_with_completion(
     expected_visibility_generation: u64,
     geometry_cycle_id: Option<u64>,
 ) -> MainWindowHideCompletion {
+    if let Err(error) = crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility) {
+        return MainWindowHideCompletion::PolicyRefused(error);
+    }
     if require_main_thread("hide_main_window_with_completion") {
         return MainWindowHideCompletion::WrongThread;
     }
@@ -338,6 +345,7 @@ pub fn defer_hide_main_window_with_geometry_trace(cx: &mut gpui::App, cycle_id: 
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("show_main_window_without_activation") {
         return;
     }
@@ -471,6 +479,7 @@ pub fn show_main_window_without_activation_with_geometry_trace(_cycle_id: u64) {
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 pub fn show_main_window_background() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("show_main_window_background") {
         return;
     }
@@ -563,6 +572,7 @@ pub fn show_main_window_background() {
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 pub fn conceal_main_window() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("conceal_main_window") {
         return;
     }
@@ -611,6 +621,7 @@ pub fn defer_conceal_main_window(cx: &mut gpui::App) {
 /// Used when returning focus to the main window after closing overlays like the actions popup.
 #[cfg(target_os = "macos")]
 pub fn activate_main_window() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("activate_main_window") {
         return;
     }
@@ -663,6 +674,7 @@ pub enum ShareSheetItem {
 /// Show the macOS share sheet anchored to the main window contentView.
 #[cfg(target_os = "macos")]
 pub fn show_share_sheet(item: ShareSheetItem) {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("show_share_sheet") {
         return;
     }
@@ -753,6 +765,7 @@ pub fn show_share_sheet(_item: ShareSheetItem) {
 /// Returns (x, y, width, height) or None if window not available.
 #[cfg(target_os = "macos")]
 pub fn get_main_window_bounds() -> Option<(f64, f64, f64, f64)> {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) { return None; }
     if require_main_thread("get_main_window_bounds") {
         return None;
     }
@@ -793,6 +806,7 @@ pub fn get_main_window_bounds() -> Option<(f64, f64, f64, f64)> {
 ///
 #[cfg(target_os = "macos")]
 pub fn is_main_window_focused() -> bool {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) { return false; }
     if require_main_thread("is_main_window_focused") {
         return false;
     }
@@ -822,6 +836,7 @@ pub fn is_main_window_focused() -> bool {
 /// Notes-owned focus.
 #[cfg(target_os = "macos")]
 pub fn is_notes_window_focused() -> bool {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) { return false; }
     if require_main_thread("is_notes_window_focused") {
         return false;
     }

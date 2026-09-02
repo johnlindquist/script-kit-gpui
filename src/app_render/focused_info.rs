@@ -1350,7 +1350,7 @@ impl ScriptListApp {
                             .file_path
                             .as_ref()
                             .map(|p| p.split('#').next().unwrap_or(p).to_string())
-                            .unwrap_or_else(|| format!("scriptlet:{}", &m.scriptlet.name));
+                            .unwrap_or_else(|| format!("scriptlet:{}", m.scriptlet.name));
                         // Launcher-managed overrides take precedence over inline metadata.
                         let shortcut = override_shortcut.or_else(|| m.scriptlet.shortcut.clone());
                         let alias = override_alias.or_else(|| m.scriptlet.alias.clone());
@@ -1370,7 +1370,7 @@ impl ScriptListApp {
                         Some(
                             ScriptInfo::with_all(
                                 &m.entry.name,
-                                format!("builtin:{}", &m.entry.id),
+                                format!("builtin:{}", m.entry.id),
                                 false,
                                 m.entry.default_action_text(),
                                 override_shortcut,

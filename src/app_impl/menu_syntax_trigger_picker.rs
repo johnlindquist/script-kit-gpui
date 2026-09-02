@@ -394,7 +394,9 @@ pub(crate) fn trigger_picker_row_to_main_list_row(
         score: if row.enabled { 0 } else { i32::MIN },
         is_selectable: trigger_picker_row_is_default_selectable(row),
         action_label: action_label.map(SharedString::from),
-        action: crate::spine::SpineListAction::Noop,
+        action: crate::spine::SpineListAction::AcceptMenuSyntaxTrigger {
+            row_id: row.id.clone().into(),
+        },
     }
 }
 
@@ -918,6 +920,28 @@ mod tests {
             Some("type:value")
         );
         assert!(neutral.enabled);
+    }
+
+    #[test]
+    fn main_list_action_binds_raw_owner_id_and_preserves_enabled_gate() {
+        for enabled in [false, true] {
+            let row = qualifier_row("type", enabled);
+            let projected = trigger_picker_row_to_main_list_row(&row);
+            assert_eq!(projected.id.as_ref(), "menu-syntax-trigger:type");
+            assert_eq!(
+                projected.action,
+                crate::spine::SpineListAction::AcceptMenuSyntaxTrigger {
+                    row_id: "type".into()
+                }
+            );
+            assert_eq!(
+                crate::scripts::SearchResult::SpineProjection(projected)
+                    .command_descriptor()
+                    .unwrap()
+                    .can_execute(),
+                enabled
+            );
+        }
     }
 
     #[test]

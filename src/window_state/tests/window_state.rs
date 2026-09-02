@@ -258,17 +258,24 @@ mod tests {
     #[test]
     fn test_reset_to_script_list_flushes_day_page_save() {
         let content = read_source_file("app_impl/registries_state.rs");
-        let start = content
-            .find("pub(crate) fn reset_to_script_list")
+        let entry = content
+            .split("pub(crate) fn reset_to_script_list(")
+            .nth(1)
+            .and_then(|body| body.split("\n    }").next())
             .expect("reset_to_script_list should exist in app_impl/registries_state.rs");
-        let body = &content[start..];
+        assert!(entry.contains("self.reset_to_script_list_impl(false, cx)"));
+        let body = content
+            .split("fn reset_to_script_list_impl(")
+            .nth(1)
+            .and_then(|body| body.split("\n    }").next())
+            .expect("reset_to_script_list must delegate to the shared reset implementation");
 
         let flush = body
             .find("AppView::DayPage { entity, .. }")
             .expect("reset_to_script_list must flush the Day Page save before dropping the view");
         let view_reset = body
-            .find("self.current_view = AppView::ScriptList;")
-            .expect("reset_to_script_list should reset current_view");
+            .find("self.transition_current_view_and_rekey_main_automation_surface(AppView::ScriptList)")
+            .expect("reset_to_script_list should transition current_view and rekey its automation surface");
         assert!(
             flush < view_reset,
             "Day Page save flush must run BEFORE current_view is replaced (the entity drops with it)"
@@ -399,46 +406,38 @@ mod tests {
     }
 
     #[test]
-    fn test_simulate_key_escape_uses_go_back_or_close_for_opened_from_main_menu() {
+    fn test_simulate_key_escape_delegates_shared_plan_before_calibrated_hide() {
         let content = read_source_file("app_impl/simulate_key_dispatch.rs");
         let anchor = "SimulateKey: Escape - close menu-syntax picker, clear filter, go back, or hide";
-        let start = content
-            .find(anchor)
-            .unwrap_or_else(|| panic!("Expected Escape SimulateKey branch log anchor"));
-        let branch = &content[start..std::cmp::min(start + 6000, content.len())];
+        let branch = content
+            .split(anchor)
+            .nth(1)
+            .and_then(|body| body.split("SimulateKey: Unhandled key").next())
+            .expect("Expected Escape SimulateKey branch");
 
+        // Entry-origin handling belongs to the shared launcher decision. This
+        // adapter may hide only after that owner returns DismissMain.
+        let compact: String = branch.split_whitespace().collect();
         assert!(
-            branch.contains("view.opened_from_main_menu"),
-            "Escape SimulateKey branch must check opened_from_main_menu"
+            compact.contains(
+                "ifview.apply_shared_launcher_escape(\"simulate_key\",window,ctx)==crate::window_orchestrator::interaction::LauncherEscapeDecision::DismissMain{"
+            ),
+            "Escape SimulateKey must gate native dismissal on the shared launcher escape decision"
+        );
+        let decision = branch
+            .find("LauncherEscapeDecision::DismissMain")
+            .expect("shared escape dismissal decision");
+        let hide = branch
+            .find("view.defer_calibrated_main_window_hide(")
+            .expect("Escape dismissal must retain the calibrated main-only hide owner");
+        assert!(decision < hide, "shared escape handling must precede main-window hide");
+        assert!(
+            branch.contains("MainWindowPostHide::PreserveState"),
+            "simulated Escape must preserve the calibrated hide's post-hide state contract"
         );
         assert!(
-            branch.contains("view.go_back_or_close(window, ctx);"),
-            "Escape SimulateKey branch must delegate opened-from-main-menu handling to go_back_or_close"
-        );
-
-        let opened_from_main_menu_start = branch
-            .find("} else if view.opened_from_main_menu {")
-            .unwrap_or_else(|| panic!("Expected opened_from_main_menu branch"));
-        let fallback_start = opened_from_main_menu_start
-            + branch[opened_from_main_menu_start..]
-                .find("} else {")
-                .unwrap_or_else(|| {
-                    panic!("Expected fallback else branch after opened_from_main_menu")
-                });
-        let fallback_branch = &branch[fallback_start..];
-        assert!(
-            fallback_branch.contains("defer_calibrated_main_window_hide("),
-            "non-opened-from-main-menu fallback must route through the shared calibrated main-only hide owner"
-        );
-        assert!(
-            !fallback_branch.contains("ctx.hide();"),
-            "non-opened-from-main-menu fallback must not app-hide, because that can hide Notes"
-        );
-
-        let opened_from_main_menu_branch = &branch[opened_from_main_menu_start..fallback_start];
-        assert!(
-            !opened_from_main_menu_branch.contains("ctx.hide();"),
-            "opened_from_main_menu branch must not directly call ctx.hide()"
+            !branch.contains("ctx.hide();"),
+            "Escape must not app-hide, because that can hide Notes"
         );
     }
 

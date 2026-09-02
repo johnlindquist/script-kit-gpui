@@ -552,8 +552,6 @@ pub mod layout {
     pub const ARG_LIST_PADDING_Y: f32 = 8.0;
     /// Divider thickness (matches default design border_thin)
     pub const ARG_DIVIDER_HEIGHT: f32 = 1.0;
-    /// Main-window context chrome measured by the shared layout contract.
-    pub const SELECT_CONTEXT_HEADER_HEIGHT: f32 = 30.0;
     /// Painted shell/footer boundary consumed outside the logical row budget.
     pub const SELECT_SHELL_FOOTER_BOUNDARY: f32 = 1.0;
     /// Input row text height (cursor height + margins)
@@ -633,6 +631,9 @@ fn height_for_view_with_layout(
         // Views with preview panel - FIXED height, no dynamic resizing
         // DivPrompt also uses standard height to match main window
         ViewType::ScriptList | ViewType::DivPrompt => standard_height,
+        ViewType::MicroPrompt => {
+            px(main_layout::HEADER_PADDING_Y + ARG_INPUT_LINE_HEIGHT + WINDOW_BORDER_Y)
+        }
         ViewType::MainWindow | ViewType::MiniAiChat => {
             // Flat item_count fallback: assumes all items are selectable (no section headers).
             // Prefer height_for_main_window(MainWindowSizing) for content-aware sizing.
@@ -685,13 +686,7 @@ fn height_for_view_with_layout(
             px(target)
         }
         ViewType::SelectPrompt => {
-            // Select uses the shared prompt header/footer budget plus the
-            // main-window context header. Routing it through Arg sizing
-            // omitted that 30px context row and clipped the first 40px
-            // Comfortable choice row at small choice counts (OF-13).
-            //
-            // GEO-009: SelectPrompt renders UnifiedListItem (Comfortable), so
-            // its prediction resolves the SelectPromptUnified mode.
+            // Select renders one canonical header and UnifiedListItem rows.
             let select_metrics = crate::list_item::metrics::resolved_list_presentation_metrics(
                 crate::list_item::metrics::ListPresentationMode::SelectPromptUnified,
                 crate::designs::DesignVariant::default(),
@@ -701,8 +696,8 @@ fn height_for_view_with_layout(
             let list_height = (visible_items * select_metrics.row_slot_height)
                 + ARG_LIST_PADDING_Y
                 + ARG_DIVIDER_HEIGHT;
-            let total_height = ARG_HEADER_HEIGHT
-                + SELECT_CONTEXT_HEADER_HEIGHT
+            let total_height = arg_layout::arg_header_chrome_height()
+                + arg_layout::arg_rendered_footer_reservation().reservation_height
                 + list_height
                 + SELECT_SHELL_FOOTER_BOUNDARY
                 + WINDOW_BORDER_Y;
@@ -713,7 +708,7 @@ fn height_for_view_with_layout(
             // shared resolver; the sixth choice is reached by scrolling.
             let (_, target) = arg_layout::current_resolved_arg_layout_for_target(
                 arg_layout::ArgPresentationMode::Mini,
-                item_count.max(1),
+                item_count,
                 f32::from(MIN_HEIGHT),
                 f32::from(standard_height),
             );
@@ -752,9 +747,11 @@ pub enum ViewType {
     FocusedTextMini,
     /// Arg prompt with choices - dynamic height based on item count
     ArgPromptWithChoices,
-    /// Select prompt with a main-window context header plus an internal search header.
+    /// Select prompt with a single canonical input/context header.
     SelectPrompt,
-    /// Arg prompt without choices (input only) - compact height
+    /// Footerless, input-only ultra-compact prompt.
+    MicroPrompt,
+    /// Arg prompt without choices (input only) - compact height.
     ArgPromptNoChoices,
     /// Div prompt (HTML display) - full height
     DivPrompt,
@@ -1289,26 +1286,36 @@ mod resize_tests {
             height_for_view_with_layout(ViewType::MiniPrompt, 3, &layout),
             px(base_height + 3.0 * row)
         );
+        assert_eq!(
+            height_for_view_with_layout(ViewType::MiniPrompt, 0, &layout),
+            height_for_view_with_layout(ViewType::ArgPromptNoChoices, 0, &layout),
+        );
     }
 
     #[test]
-    fn test_select_one_choice_reserves_context_header_and_one_full_row() {
+    fn test_select_one_choice_reserves_one_canonical_header_and_one_full_row() {
         let layout = default_layout();
         let height = f32::from(height_for_view_with_layout(
             ViewType::SelectPrompt,
             1,
             &layout,
         ));
-        let required = layout::ARG_HEADER_HEIGHT
-            + layout::SELECT_CONTEXT_HEADER_HEIGHT
-            + crate::list_item::LIST_ITEM_HEIGHT
+        let row = crate::list_item::metrics::resolved_list_presentation_metrics(
+            crate::list_item::metrics::ListPresentationMode::SelectPromptUnified,
+            crate::designs::DesignVariant::default(),
+            crate::designs::current_main_menu_theme(),
+        )
+        .row_slot_height;
+        let required = arg_layout::arg_header_chrome_height()
+            + arg_layout::arg_rendered_footer_reservation().reservation_height
+            + row
             + layout::ARG_LIST_PADDING_Y
             + layout::ARG_DIVIDER_HEIGHT
             + layout::SELECT_SHELL_FOOTER_BOUNDARY
             + layout::WINDOW_BORDER_Y;
 
         assert_eq!(height, required);
-        assert!(height >= 149.0, "Select must retain one complete 40px row");
+        assert!(height > arg_layout::arg_header_chrome_height() + row);
     }
 
     #[test]
@@ -1327,6 +1334,19 @@ mod resize_tests {
             height_for_view_with_layout(ViewType::ArgPromptNoChoices, 0, &layout),
             px(expected)
         );
+    }
+
+    #[test]
+    fn micro_has_no_canonical_context_or_footer_reservation() {
+        let layout = default_layout();
+        let height = height_for_view_with_layout(ViewType::MicroPrompt, 6, &layout);
+        assert_eq!(
+            height,
+            px(main_layout::HEADER_PADDING_Y
+                + layout::ARG_INPUT_LINE_HEIGHT
+                + layout::WINDOW_BORDER_Y)
+        );
+        assert!(height < height_for_view_with_layout(ViewType::ArgPromptNoChoices, 0, &layout));
     }
 
     #[test]

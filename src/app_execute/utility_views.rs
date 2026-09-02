@@ -169,9 +169,20 @@ impl ScriptListApp {
         parse_directory_path: impl Fn(&str) -> Option<crate::file_search::ParsedDirPath>,
         is_directory_path: impl Fn(&str) -> bool,
         expand_path: impl Fn(&str) -> Option<String>,
-        list_directory: impl Fn(&str, usize, bool) -> Vec<crate::file_search::FileResult>,
-        search_files: impl Fn(&str, Option<&str>, usize) -> Vec<crate::file_search::FileResult>,
-    ) -> Vec<crate::file_search::FileResult> {
+        list_directory: impl Fn(
+            &str,
+            usize,
+            bool,
+        ) -> std::io::Result<Vec<crate::file_search::FileResult>>,
+        search_files: impl Fn(
+            &str,
+            Option<&str>,
+            usize,
+        ) -> Result<
+            Vec<crate::file_search::FileResult>,
+            crate::file_search::SearchFailure,
+        >,
+    ) -> Result<Vec<crate::file_search::FileResult>, crate::file_search::SearchFailure> {
         // Try structured parse first — handles ~/dev/fin → list ~/dev/
         if let Some(parsed) = parse_directory_path(query) {
             tracing::info!(
@@ -184,7 +195,8 @@ impl ScriptListApp {
                 &parsed.directory,
                 crate::file_search::DEFAULT_CACHE_LIMIT,
                 parsed.show_hidden,
-            );
+            )
+            .map_err(Into::into);
         }
 
         if is_directory_path(query) {
@@ -197,21 +209,24 @@ impl ScriptListApp {
                 .map(|path| std::path::Path::new(path).is_dir())
                 .unwrap_or(false);
 
-            let directory_results =
-                list_directory(query, crate::file_search::DEFAULT_CACHE_LIMIT, false);
-            if directory_results.is_empty() && !is_real_dir {
-                tracing::info!(message = %"Path mode not a real directory; falling back to Spotlight search",
-                );
-                return search_files(query, None, crate::file_search::DEFAULT_SEARCH_LIMIT);
-            }
-
-            return directory_results;
+            return match list_directory(query, crate::file_search::DEFAULT_CACHE_LIMIT, false) {
+                Ok(results) if results.is_empty() && !is_real_dir => {
+                    search_files(query, None, crate::file_search::DEFAULT_SEARCH_LIMIT)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !is_real_dir => {
+                    search_files(query, None, crate::file_search::DEFAULT_SEARCH_LIMIT)
+                }
+                Ok(results) => Ok(results),
+                Err(error) => Err(error.into()),
+            };
         }
 
         search_files(query, None, crate::file_search::DEFAULT_SEARCH_LIMIT)
     }
 
-    pub(crate) fn resolve_file_search_results(query: &str) -> Vec<crate::file_search::FileResult> {
+    pub(crate) fn resolve_file_search_results(
+        query: &str,
+    ) -> Result<Vec<crate::file_search::FileResult>, crate::file_search::SearchFailure> {
         Self::resolve_file_search_results_with(
             query,
             crate::file_search::parse_directory_path,
@@ -307,6 +322,7 @@ impl ScriptListApp {
             Ok(term_prompt) => {
                 let entity = cx.new(|_| term_prompt);
                 self.current_view = AppView::QuickTerminalView { entity };
+                self.note_main_route_changed();
                 self.focused_input = FocusedInput::None;
                 self.pending_focus = Some(FocusTarget::TermPrompt);
                 // DEFERRED RESIZE: Avoid RefCell borrow error by deferring window resize
@@ -470,7 +486,9 @@ impl ScriptListApp {
         &self,
         selected_index: usize,
     ) -> Option<(usize, &crate::file_search::FileResult)> {
-        let projection = self.file_search_selection_binding(selected_index).projection?;
+        let projection = self
+            .file_search_selection_binding(selected_index)
+            .projection?;
         let entry = self.cached_file_results.get(projection.result_index)?;
         Some((projection.display_index, entry))
     }
@@ -675,10 +693,9 @@ impl ScriptListApp {
 
     fn shell_quote_path_for_cd(path: &std::path::Path) -> String {
         let value = path.to_string_lossy();
-        if value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '=' | '+'))
-        {
+        if value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '=' | '+')
+        }) {
             return value.to_string();
         }
         format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -765,10 +782,8 @@ impl ScriptListApp {
                 {
                     let mut initial_input = quick_terminal_cwd_sync_hook();
                     if let Some(cwd) = cwd.as_ref() {
-                        initial_input.push_str(&format!(
-                            "cd {}\r",
-                            Self::shell_quote_path_for_cd(cwd)
-                        ));
+                        initial_input
+                            .push_str(&format!("cd {}\r", Self::shell_quote_path_for_cd(cwd)));
                     }
                     if let Some(command) = startup_command.as_ref() {
                         initial_input.push_str(command.trim_end_matches(&['\r', '\n'][..]));
@@ -802,6 +817,7 @@ impl ScriptListApp {
                     });
                 }
                 self.current_view = AppView::QuickTerminalView { entity };
+                self.note_main_route_changed();
                 self.focused_input = FocusedInput::None;
                 self.pending_focus = Some(FocusTarget::TermPrompt);
                 self.warm_quick_terminal_pty(cx);
@@ -884,6 +900,7 @@ impl ScriptListApp {
                 .detach();
 
                 self.current_view = AppView::WebcamView { entity };
+                self.note_main_route_changed();
                 self.focused_input = FocusedInput::None;
                 self.pending_focus = Some(FocusTarget::AppRoot);
                 resize_to_view_sync(ViewType::DivPrompt, 0);
@@ -940,6 +957,7 @@ impl ScriptListApp {
         .detach();
 
         self.current_view = AppView::WebcamView { entity };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None;
         self.pending_focus = Some(FocusTarget::AppRoot);
 
@@ -971,6 +989,7 @@ impl ScriptListApp {
         self.show_error_toast("Webcam capture is only supported on macOS", cx);
 
         self.current_view = AppView::WebcamView { entity };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None;
         self.pending_focus = Some(FocusTarget::AppRoot);
         resize_to_view_sync(ViewType::DivPrompt, 0);
@@ -1014,14 +1033,15 @@ mod utility_views_file_search_tests {
             |_| None, // parse_directory_path returns None
             |_| true,
             |_| Some("/definitely/not/a/real/dir".to_string()),
-            |_, _, _| Vec::new(),
+            |_, _, _| Ok(Vec::new()),
             |query, onlyin, limit| {
                 assert_eq!(query, "~/missing-dir");
                 assert!(onlyin.is_none());
                 assert_eq!(limit, crate::file_search::DEFAULT_SEARCH_LIMIT);
-                vec![test_file_result("fallback-result")]
+                Ok(vec![test_file_result("fallback-result")])
             },
-        );
+        )
+        .expect("non-directory query falls back");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "fallback-result");
@@ -1038,12 +1058,13 @@ mod utility_views_file_search_tests {
                 assert_eq!(query, "~/dir");
                 assert_eq!(limit, crate::file_search::DEFAULT_CACHE_LIMIT);
                 assert!(!show_hidden);
-                vec![test_file_result("directory-result")]
+                Ok(vec![test_file_result("directory-result")])
             },
             |_, _, _| {
                 panic!("search_files should not be called when directory listing returns results")
             },
-        );
+        )
+        .expect("directory listing succeeds");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "directory-result");
@@ -1061,9 +1082,10 @@ mod utility_views_file_search_tests {
                 assert_eq!(query, "invoice");
                 assert!(onlyin.is_none());
                 assert_eq!(limit, crate::file_search::DEFAULT_SEARCH_LIMIT);
-                vec![test_file_result("search-result")]
+                Ok(vec![test_file_result("search-result")])
             },
-        );
+        )
+        .expect("search succeeds");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "search-result");
@@ -1087,15 +1109,37 @@ mod utility_views_file_search_tests {
                 assert_eq!(query, "~/dev/");
                 assert_eq!(limit, crate::file_search::DEFAULT_CACHE_LIMIT);
                 assert!(!show_hidden);
-                vec![test_file_result("parsed-dir-result")]
+                Ok(vec![test_file_result("parsed-dir-result")])
             },
             |_, _, _| {
                 panic!("search_files should not be called when parse_directory_path succeeds")
             },
-        );
+        )
+        .expect("parsed directory succeeds");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "parsed-dir-result");
+    }
+
+    #[test]
+    fn file_search_resolver_preserves_directory_failure_without_search_fallback() {
+        let error = ScriptListApp::resolve_file_search_results_with(
+            "~/restricted/",
+            |_| None,
+            |_| true,
+            |_| None,
+            |_, _, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "restricted directory",
+                ))
+            },
+            |_, _, _| panic!("a failed source must not invoke a different provider"),
+        )
+        .expect_err("directory failure must propagate");
+        assert!(
+            matches!(error, crate::file_search::SearchFailure::Source(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
     }
 
     #[test]

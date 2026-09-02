@@ -5,7 +5,42 @@ mod tests {
     #[test]
     fn every_conflict_has_complete_lifecycle_identity() {
         let bundle = checked_in_design_bundle().expect("bundle builds");
-        assert_eq!(bundle.conflicts.len(), 34);
+        let expected_conflicts = [
+            "confirmLayout.protocolModelVsRendererTruth",
+            "confirmGap.rendererSpacingVsLayoutOracle",
+            "confirmTypography.implicitLineHeightVsModeledSlots",
+            "confirmFooter.heightLadder",
+            "confirmFooter.slotVsInnerFrame",
+            "confirmFooter.selectedNeutralVsDangerTitle",
+            "confirmStack.rendererIntrinsicVsLayoutModel",
+            "confirmCapture.stockThemeVsReferenceRaster",
+            "actionsRow.compactSlotVsInheritedItemHeight",
+            "actionsRow.radiusConfiguredVsPainted",
+            "actionsRow.selectionConfiguredVsPainted",
+            "actionsRow.hoverConfiguredVsPainted",
+            "actionsSection.paddingDeclaredVsCenteredRenderer",
+            "actionsShortcut.popupTokensVsFooterRenderer",
+            "actionsFooter.legacyHeightVsFooterlessContract",
+            "actionsCaret.stockProfileVsReferenceCapture",
+            "actionsAlpha.truncateVsRoundedChromeHelpers",
+            "notesMarkdown.titleGlyphExtentsVsLineBox",
+            "dayPageFooter.spacerVsNativeHostBand",
+            "agentChat.error.bgAlphaUnits",
+            "agentChat.standard.roleSplitOnlyFields",
+            "argPrompt.windowHeight.miniVsFull",
+            "argPrompt.headerHeight.modelVsPaint",
+            "argPrompt.rowHeight.modelVsPaint",
+            "argPrompt.listPadding.deadModelField",
+            "argPrompt.footerHeight.modelVsPaint",
+            "rowHeight.legacyVsThemed",
+            "sectionHeader.slotVsLegacy",
+            "selectedFill.componentVsTheme",
+        ];
+        assert_eq!(bundle.conflicts.len(), expected_conflicts.len());
+        assert_eq!(
+            bundle.conflicts.iter().map(|conflict| conflict.id.as_str()).collect::<std::collections::BTreeSet<_>>(),
+            expected_conflicts.into_iter().collect::<std::collections::BTreeSet<_>>()
+        );
         for conflict in &bundle.conflicts {
             let lifecycle = &conflict.lifecycle;
             assert!(!lifecycle.owner.is_empty(), "{} owner", conflict.id);
@@ -202,7 +237,8 @@ mod tests {
             other => panic!("{id} is not text: {other:?}"),
         };
         let number = |id: &str| match &bundle.tokens.get(id).expect(id).value {
-            TokenValue::Number { value } => *value,
+            TokenValue::Number { value } | TokenValue::NormalizedOpacity { value } => *value,
+            TokenValue::AlphaByte { value } => f64::from(*value),
             other => panic!("{id} is not a number: {other:?}"),
         };
         let weight = |id: &str| match &bundle.tokens.get(id).expect(id).value {
@@ -223,22 +259,18 @@ mod tests {
         assert_eq!(length("notes.titlebar.trafficLightOriginY"), 7.0);
         assert_eq!(length("notes.editor.paddingX"), 16.0);
         assert_eq!(length("notes.editor.paddingY"), 12.0);
-        assert_eq!(length("notes.footer.statusMinWidth"), 24.0);
-        assert_eq!(length("notes.footer.contentInsetX"), 14.0);
-        assert_eq!(length("notes.footer.actionGap"), 2.0);
         // Opacity numbers cross the f32→f64 bridge (0.7f32 is not exactly
         // 0.7), matching the existing exported-number precedent
         // (--sk-main-menu-context-opacity).
         assert_eq!(number("notes.titlebar.titleRestOpacity"), 0.7f32 as f64);
-        assert_eq!(number("notes.footer.restOpacity"), 0.5);
         for id in ["notes.window.defaultWidth", "notes.titlebar.height"] {
             let r = record(id);
             assert!(matches!(r.stage, TokenStage::Source), "{id} must be source");
             assert!(r.writable, "{id} must be writable");
         }
 
-        // Layout MODEL: honest 28px reservation, distinct from paint.
-        assert_eq!(length("notes.layout.footerReservationHeight"), 28.0);
+        // Production Notes has no footer and reserves no footer geometry.
+        assert_eq!(length("notes.layout.footerReservationHeight"), 0.0);
         assert_eq!(length("notes.layout.autoResize.maxHeight"), 600.0);
         assert_eq!(length("notes.layout.autoResize.assumedLineHeight"), 20.0);
         assert_eq!(length("notes.layout.autoResize.applyThreshold"), 5.0);
@@ -246,14 +278,14 @@ mod tests {
             record("notes.layout.footerReservationHeight")
                 .css_var
                 .is_none(),
-            "the 28px model reservation must not leak into mockup CSS"
+            "absent footer must not emit a CSS footer alias"
         );
         assert!(!record("notes.layout.autoResize.assumedLineHeight").writable);
 
         // Footer presentation facts.
-        assert_eq!(text("notes.footer.presentation"), "inWindowGpui");
+        assert_eq!(text("notes.footer.presentation"), "absent");
         assert_eq!(text("notes.footer.nativeOverlay"), "false");
-        assert_eq!(text("notes.footer.visibility"), "selectedNoteOnly");
+        assert_eq!(text("notes.footer.visibility"), "never");
         assert_eq!(text("notes.editor.markdown.language"), "markdown");
         for id in [
             "notes.editor.markdown.highlightQueryFingerprint",
@@ -274,13 +306,11 @@ mod tests {
         assert_eq!(length("resolved.notes.editor.caretHeight"), 17.0);
         assert_eq!(text("resolved.notes.editor.fontFamily"), "JetBrains Mono");
         assert_eq!(length("resolved.notes.titlebar.titleFontSize"), 14.0);
-        assert_eq!(length("resolved.notes.footer.statusFontSize"), 12.0);
-        // Painted footer band (32) vs the 28px model above.
-        assert_eq!(length("resolved.notes.footer.intrinsicHeight"), 32.0);
+        assert!(!bundle.tokens.contains_key("resolved.notes.footer.intrinsicHeight"));
+        assert!(bundle.tokens.values().all(|record| !record.css_var.as_deref().unwrap_or("").starts_with("--sk-notes-footer")));
         for id in [
             "resolved.notes.editor.baseFontSize",
             "resolved.notes.editor.lineBoxHeight",
-            "resolved.notes.footer.intrinsicHeight",
         ] {
             let r = record(id);
             assert!(
@@ -330,26 +360,8 @@ mod tests {
             "the highlight theme is reachable; the visibility conflict must not fire"
         );
 
-        // Notes drift stays recorded.
-        for conflict_id in [
-            "notesFooter.layoutReservationVsIntrinsicPaint",
-            "notesFooter.buttonHeightSourceDuplication",
-            "notesMarkdown.titleGlyphExtentsVsLineBox",
-        ] {
-            assert!(
-                bundle.conflicts.iter().any(|c| c.id == conflict_id),
-                "missing conflict {conflict_id}"
-            );
-        }
-        assert_eq!(
-            bundle
-                .conflicts
-                .iter()
-                .find(|c| c.id == "notesFooter.layoutReservationVsIntrinsicPaint")
-                .expect("reservation conflict")
-                .severity,
-            "warning"
-        );
+        assert!(bundle.conflicts.iter().any(|c| c.id == "notesMarkdown.titleGlyphExtentsVsLineBox"));
+        assert!(bundle.conflicts.iter().all(|c| !c.id.starts_with("notesFooter.")));
 
         // ── Settings hub ────────────────────────────────────────────────
         // Canonical shared owners only — settings mints NO alias tokens
@@ -376,24 +388,14 @@ mod tests {
             weight("resolved.builtinMainInput.countLabel.fontWeight"),
             400.0
         );
-        // The first "Settings" separator paints the LEGACY list-item default
-        // path (26/6) while the themed InfoBarBase pair stays 28/4.
-        assert_eq!(
-            length("resolved.listItem.default.firstSectionSlotHeight"),
-            26.0
-        );
-        assert_eq!(
-            length("resolved.listItem.default.firstSectionPaddingTop"),
-            6.0
-        );
+        // Settings consumes the same themed first-section geometry.
+        assert!(!bundle.tokens.contains_key("resolved.listItem.default.firstSectionSlotHeight"));
         assert_eq!(length("mainMenu.list.firstSectionSlotHeight"), 28.0);
         assert_eq!(length("mainMenu.section.firstPaddingTop"), 4.0);
         for id in [
             "resolved.builtinMainInput.countLabel.fontSize",
             "resolved.builtinMainInput.countLabel.lineHeight",
             "resolved.builtinMainInput.countLabel.fontWeight",
-            "resolved.listItem.default.firstSectionSlotHeight",
-            "resolved.listItem.default.firstSectionPaddingTop",
         ] {
             let r = record(id);
             assert!(
@@ -446,26 +448,17 @@ mod tests {
             "settings must not mint alias tokens under settings.*"
         );
 
-        // Settings drift stays recorded.
-        for conflict_id in [
-            "settingsSection.firstSlotLegacyVsThemed",
-            "settingsRows.authoredIconHintsVsResolvedNone",
-            "settingsFooter.nativeRunVsGpuiOpenHint",
-        ] {
-            assert!(
-                bundle.conflicts.iter().any(|c| c.id == conflict_id),
-                "missing conflict {conflict_id}"
-            );
+        assert_eq!(text("settingsHub.icons.policy"), "iconless");
+        assert_eq!(text("settingsHub.footer.primaryLabel"), "Open");
+        assert_eq!(text("settingsHub.footer.primaryEnabled"), "true");
+        for conflict_id in ["settingsSection.firstSlotLegacyVsThemed",
+            "settingsRows.authoredIconHintsVsResolvedNone", "settingsFooter.nativeRunVsGpuiOpenHint"] {
+            assert!(!bundle.conflicts.iter().any(|c| c.id == conflict_id));
         }
-        assert_eq!(
-            bundle
-                .conflicts
-                .iter()
-                .find(|c| c.id == "settingsRows.authoredIconHintsVsResolvedNone")
-                .expect("icon conflict")
-                .severity,
-            "warning"
-        );
+        let caret = record("actionsDialog.search.caretHeight");
+        assert!(!caret.writable);
+        assert!(matches!(caret.stage, TokenStage::Resolved));
+        assert_eq!(length("actionsDialog.search.caretHeight"), length("actionsDialog.search.fontSize"));
 
         // ── Day Page (2026-07-11 Oracle-corrected slice) ────────────────
         // The five Day-owned geometry tokens (source, writable) — the ONLY
@@ -690,12 +683,6 @@ mod tests {
             "--sk-notes-caret-width",
             "--sk-notes-caret-height",
             "--sk-notes-caret-color",
-            "--sk-notes-footer-height",
-            "--sk-notes-footer-content-inset-x",
-            "--sk-notes-footer-rest-opacity",
-            "--sk-notes-footer-status-min-width",
-            "--sk-notes-footer-status-font-size",
-            "--sk-notes-footer-action-gap",
             "--sk-notes-markdown-title-color",
             "--sk-notes-markdown-title-font-weight",
             "--sk-notes-markdown-heading-marker-color",
@@ -708,7 +695,10 @@ mod tests {
                 "{var} must render exactly once"
             );
         }
-        assert!(css.contains("--sk-notes-footer-height: 32px;"));
+        assert!(
+            !css.contains("--sk-notes-footer-"),
+            "footerless Notes must not export hypothetical footer paint tokens"
+        );
         assert!(css.contains("--sk-notes-editor-line-box-height: 20px;"));
         assert!(css.contains("--sk-notes-markdown-title-color: rgb(251 191 36);"));
         assert!(!css.contains("--sk-notes-editor-line-height:"));
@@ -721,8 +711,8 @@ mod tests {
             "--sk-builtin-main-input-count-font-size",
             "--sk-builtin-main-input-count-line-height",
             "--sk-builtin-main-input-count-font-weight",
-            "--sk-list-item-default-first-section-slot-height",
-            "--sk-list-item-default-first-section-padding-top",
+            "--sk-main-menu-first-section-slot-height",
+            "--sk-main-menu-first-section-padding-top",
         ] {
             assert_eq!(
                 css.matches(&format!("{var}:")).count(),
@@ -734,8 +724,9 @@ mod tests {
         assert!(css.contains("--sk-builtin-main-input-count-font-size: 14px;"));
         assert!(css.contains("--sk-builtin-main-input-count-line-height: 23px;"));
         assert!(css.contains("--sk-builtin-main-input-count-font-weight: 400;"));
-        assert!(css.contains("--sk-list-item-default-first-section-slot-height: 26px;"));
-        assert!(css.contains("--sk-list-item-default-first-section-padding-top: 6px;"));
+        assert!(css.contains("--sk-main-menu-first-section-slot-height: 28px;"));
+        assert!(css.contains("--sk-main-menu-first-section-padding-top: 4px;"));
+        assert!(!css.contains("--sk-list-item-default-first-section-"));
         assert!(!css.contains("--sk-settings-"));
 
         // Day Page slice vars render exactly once; NO rejected Day aliases.
@@ -816,8 +807,9 @@ mod tests {
             "thought/tool header opacities must not collapse into one var"
         );
 
-        // Authored alpha leaves: JSON-only, and the decimal-50 foot-gun
-        // stays authored decimal (0x32 only after the shared packer).
+        // Authored byte values retain units distinct from normalized opacity.
+        assert!(matches!(record("agentChat.error.bgAlpha").value, TokenValue::AlphaByte { value: 50 }));
+        assert!(matches!(record("agentChat.block.toolHeaderOpacity").value, TokenValue::NormalizedOpacity { .. }));
         assert_eq!(number("agentChat.error.bgAlpha"), 50.0);
         assert_eq!(number("agentChat.user.bgAlpha"), 6.0);
         assert_eq!(number("agentChat.block.toolBorderAlpha"), 127.0);

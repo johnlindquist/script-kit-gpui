@@ -33,13 +33,92 @@ pub struct FormPromptState {
     pub colors: FormFieldColors,
     /// Currently focused field index (for Tab navigation).
     pub focused_index: usize,
+    focus_revision: u64,
     /// Focus handle for this form.
     pub focus_handle: FocusHandle,
     /// Output contract for SDK resolution.
     pub output_mode: FormPromptOutputMode,
+    pub(crate) validation_error: Option<String>,
 }
 
 impl FormPromptState {
+    /// Aggregate source epochs without hashing field contents or mutating on reads.
+    /// Include every field so changing focus cannot exchange one field's epoch for another.
+    pub fn dictation_input_revision(&self, cx: &App) -> u64 {
+        self.fields
+            .iter()
+            .fold(self.focus_revision, |revision, (_, field)| {
+                let field_revision = match field {
+                    FormFieldEntity::TextField(entity) => entity.read(cx).revision(),
+                    FormFieldEntity::TextArea(entity) => entity.read(cx).revision(),
+                    FormFieldEntity::Checkbox(entity) => entity.read(cx).revision(),
+                };
+                assert!(
+                    revision <= u64::MAX - field_revision,
+                    "form input revision exhausted"
+                );
+                revision + field_revision
+            })
+    }
+
+    pub fn dictation_input_len(&self, cx: &App) -> Option<usize> {
+        match &self.fields.get(self.focused_index)?.1 {
+            FormFieldEntity::TextField(entity) => Some(entity.read(cx).value().len()),
+            FormFieldEntity::TextArea(entity) => Some(entity.read(cx).value().len()),
+            FormFieldEntity::Checkbox(_) => None,
+        }
+    }
+
+    fn set_focused_index(&mut self, index: usize) {
+        if self.focused_index != index {
+            assert!(
+                self.focus_revision < u64::MAX,
+                "form focus revision exhausted"
+            );
+            self.focus_revision += 1;
+            self.focused_index = index;
+        }
+    }
+
+    pub fn update_theme(&mut self, theme: &crate::theme::Theme, cx: &mut Context<Self>) {
+        let colors = FormFieldColors::from_theme(theme);
+        self.colors = colors;
+        for (_, field) in &self.fields {
+            match field {
+                FormFieldEntity::TextField(entity) => {
+                    entity.update(cx, |field, cx| field.update_colors(colors, cx))
+                }
+                FormFieldEntity::TextArea(entity) => {
+                    entity.update(cx, |field, cx| field.update_colors(colors, cx))
+                }
+                FormFieldEntity::Checkbox(entity) => {
+                    entity.update(cx, |field, cx| field.update_colors(colors, cx))
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn field_values(&self, cx: &App) -> Vec<(String, String)> {
+        self.fields
+            .iter()
+            .map(|(field, entity)| (field.name.clone(), Self::field_value(entity, cx)))
+            .collect()
+    }
+
+    pub fn focused_value(&self, cx: &App) -> Option<String> {
+        self.fields
+            .get(self.focused_index)
+            .map(|(_, entity)| Self::field_value(entity, cx))
+    }
+    pub fn validated_submit_value(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        self.validation_error = self.submit_validation_message(cx);
+        cx.notify();
+        self.validation_error
+            .is_none()
+            .then(|| self.collect_values(cx))
+    }
+
     fn build_values_json(values: impl IntoIterator<Item = (String, String)>) -> String {
         let mut map = serde_json::Map::new();
         for (key, value) in values {
@@ -105,8 +184,10 @@ impl FormPromptState {
             fields,
             colors,
             focused_index: 0,
+            focus_revision: 0,
             focus_handle: cx.focus_handle(),
             output_mode,
+            validation_error: None,
         }
     }
 
@@ -269,7 +350,7 @@ impl FormPromptState {
         if self.fields.is_empty() {
             return;
         }
-        self.focused_index = index.min(self.fields.len() - 1);
+        self.set_focused_index(index.min(self.fields.len() - 1));
         if let Some(focus_handle) = self.focus_handle_at(self.focused_index, cx) {
             focus_handle.focus(window, cx);
         }
@@ -289,7 +370,7 @@ impl FormPromptState {
                 (field_semantic_id == semantic_id).then_some(index)
             })?;
 
-        self.focused_index = index;
+        self.set_focused_index(index);
         self.fields
             .get(index)
             .map(|(field, _)| field.label.clone().unwrap_or_else(|| field.name.clone()))
@@ -428,6 +509,15 @@ impl Render for FormPromptState {
 
         // Build the form fields container
         let mut container = div().flex().flex_col().gap(px(16.)).w_full();
+        if let Some(error) = &self.validation_error {
+            container = container.child(
+                div()
+                    .id("form-validation-error")
+                    .text_sm()
+                    .text_color(gpui::rgb(colors.error))
+                    .child(error.clone()),
+            );
+        }
 
         for (index, (_field_def, entity)) in self.fields.iter().enumerate() {
             let focus_slot_click = cx.listener(
@@ -512,4 +602,50 @@ mod tests {
             })
         );
     }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn form_dictation_epoch_tracks_field_and_focus_aba(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let colors = FormFieldColors::from_theme(&crate::theme::Theme::default());
+    let form = cx.new(|cx| FormPromptState::new("epoch".into(),
+        "<input name='first' value='cat'><textarea name='second'>hé</textarea><input name='check' type='checkbox'>".into(), colors, cx));
+    form.update(cx, |form, cx| {
+        let initial = form.dictation_input_revision(cx);
+        assert_eq!(form.dictation_input_len(cx), Some(3));
+        form.set_input("cat".into(), cx);
+        form.update_theme(&crate::theme::Theme::default(), cx);
+        assert_eq!(form.dictation_input_revision(cx), initial);
+        form.set_input("dog".into(), cx);
+        let changed = form.dictation_input_revision(cx);
+        assert!(changed > initial);
+        form.set_input("cat".into(), cx);
+        assert!(form.dictation_input_revision(cx) > changed);
+        let before_focus = form.dictation_input_revision(cx);
+        form.set_focused_index(1);
+        form.set_input("hé".into(), cx);
+        assert_eq!(form.dictation_input_len(cx), Some("hé".len()));
+        form.set_focused_index(0);
+        assert_eq!(form.focused_value(cx).as_deref(), Some("cat"));
+        assert!(form.dictation_input_revision(cx) > before_focus);
+        let focused = form.dictation_input_revision(cx);
+        form.set_focused_index(0);
+        form.field_values(cx);
+        assert_eq!(form.dictation_input_revision(cx), focused);
+        form.set_focused_index(2);
+        assert_eq!(form.dictation_input_len(cx), None);
+        let checkbox_epoch = form.dictation_input_revision(cx);
+        let FormFieldEntity::Checkbox(checkbox) = form.fields[2].1.clone() else {
+            panic!("checkbox fixture")
+        };
+        checkbox.update(cx, |checkbox, cx| {
+            checkbox.set_checked(false, cx);
+            assert_eq!(checkbox.revision(), 0);
+            checkbox.toggle(cx);
+            checkbox.toggle(cx);
+            assert!(!checkbox.is_checked());
+        });
+        assert!(form.dictation_input_revision(cx) > checkbox_epoch);
+    });
 }

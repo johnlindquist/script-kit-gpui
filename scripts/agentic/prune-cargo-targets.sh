@@ -22,14 +22,19 @@ set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_KIT_REPO_ROOT:-$(cd "${SCRIPT_ROOT}/../.." && pwd)}"
-# shellcheck source=scripts/agentic/cargo-cache-locks.sh
-source "${SCRIPT_ROOT}/cargo-cache-locks.sh"
-cd "$REPO_ROOT"
 
 APPLY=0
 if [ "${1:-}" = "--apply" ]; then
     APPLY=1
 fi
+
+if [[ "$APPLY" == "1" && "${SCRIPT_KIT_NONINTERACTIVE:-1}" != "0" ]]; then
+    echo '[prune] destructive legacy cleanup refused in noninteractive mode; target/ is report-only' >&2
+    exit 78
+fi
+# shellcheck source=scripts/agentic/cargo-cache-locks.sh
+source "${SCRIPT_ROOT}/cargo-cache-locks.sh"
+cd "$REPO_ROOT"
 
 PRUNE_TIME_DAYS="${PRUNE_TIME_DAYS:-14}"
 PRUNE_AGENT_DAYS="${PRUNE_AGENT_DAYS:-7}"
@@ -46,8 +51,10 @@ fi
 log "before sizes:"
 du -sh target target/debug target/debug/incremental target-agent 2>/dev/null || true
 
-# 1. cargo-sweep on target/, never while a known build owns an active lease.
-if cargo_cache_any_live_lock; then
+# 1. Agent diagnostics never invoke Cargo against the human watcher's target/.
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-1}" != "0" ]]; then
+    log "target/ is report-only in noninteractive mode; preserving the human watcher cache"
+elif cargo_cache_any_live_lock; then
     log "active Cargo build lease detected; preserving shared target artifacts"
 elif ! command -v cargo-sweep >/dev/null 2>&1; then
     log "cargo-sweep not installed. Install with: cargo install cargo-sweep"

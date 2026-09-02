@@ -23,6 +23,9 @@ use crate::list_item::{GroupedListItem, SourceChipStatusKind, SourceChipStatusRo
 use crate::menu_bar::MenuBarItem;
 use crate::plugins::PluginSkill;
 
+use super::command_contract::{
+    record_main_menu_ranking_sections, MainMenuRankingEvidence, MainMenuRankingEvidenceMap,
+};
 use super::search::{fuzzy_search_root_windows, fuzzy_search_unified_all_with_skills_and_flows};
 use super::types::{
     FallbackMatch, MatchIndices, Script, ScriptIssueMatch, ScriptMatch, ScriptMatchKind, Scriptlet,
@@ -62,6 +65,39 @@ pub const ROOT_PASSIVE_RESULT_SCORE_BASE: i32 = 100_000;
 
 pub(crate) fn root_passive_result_score(rank: usize) -> i32 {
     ROOT_PASSIVE_RESULT_SCORE_BASE.saturating_sub(rank as i32)
+}
+
+fn record_passive_ranking(
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    rows: &[SearchResult],
+    limit: Option<usize>,
+    pin_reason: Option<&'static str>,
+) {
+    let Some(ranking) = ranking else {
+        return;
+    };
+    for (provider_rank, row) in rows.iter().enumerate() {
+        let Some(key) = row.stable_selection_key() else {
+            continue;
+        };
+        let provider_score = match row {
+            SearchResult::Note(item) => Some(f64::from(item.hit.score)),
+            SearchResult::AiVault(item) => Some(f64::from(item.hit.score)),
+            SearchResult::BrowserTab(item) => Some(f64::from(item.hit.score)),
+            _ => None,
+        };
+        ranking.insert(
+            key,
+            MainMenuRankingEvidence {
+                provider_rank: (!matches!(row, SearchResult::Flow(_))).then_some(provider_rank),
+                provider_score,
+                budget_limit: limit,
+                admitted_count: Some(rows.len()),
+                pin_reason,
+                ..MainMenuRankingEvidence::default()
+            },
+        );
+    }
 }
 
 /// Get grouped results with SUGGESTED/MAIN sections based on frecency.
@@ -125,6 +161,7 @@ pub(crate) fn get_grouped_results_with_input_history(
         input_history,
         None,
         None,
+        None,
     )
 }
 
@@ -154,6 +191,7 @@ pub(crate) fn get_grouped_results_with_input_history_and_query(
     input_history: Option<&crate::input_history::InputHistory>,
     advanced_query: Option<&crate::menu_syntax::AdvancedQuery>,
     launcher_context: Option<&crate::context_snapshot::launcher_context::LauncherContextSnapshot>,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) -> (Vec<GroupedListItem>, Vec<SearchResult>) {
     // When filter is non-empty and we have menu bar items, include them in search.
     let all_builtins: Vec<BuiltInEntry>;
@@ -194,6 +232,7 @@ pub(crate) fn get_grouped_results_with_input_history_and_query(
             preferred_result_key,
             launcher_context,
             advanced_query.is_some_and(|query| query.has_predicates()),
+            ranking.as_deref_mut(),
         );
     }
 
@@ -202,6 +241,7 @@ pub(crate) fn get_grouped_results_with_input_history_and_query(
         frecency_store,
         suggested_config,
         flow_discovery,
+        ranking.as_deref_mut(),
     )
 }
 
@@ -216,6 +256,7 @@ pub(crate) fn prepend_script_issues_row(
     grouped: &mut Vec<GroupedListItem>,
     flat_results: &mut Vec<SearchResult>,
     validation: &ValidationReport,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     let failed_count = validation.failed_scripts.len();
     if failed_count == 0 && validation.retained_issues.is_empty() && validation.warnings.is_empty()
@@ -302,6 +343,11 @@ pub(crate) fn prepend_script_issues_row(
     };
 
     flat_results.insert(0, SearchResult::ScriptIssue(issue));
+    if let Some(ranking) = ranking {
+        if let Some(key) = flat_results[0].stable_selection_key() {
+            ranking.entry(key).or_default().pin_reason = Some("catalog-validation");
+        }
+    }
 
     for entry in grouped.iter_mut() {
         if let GroupedListItem::Item(idx) = entry {
@@ -328,6 +374,7 @@ pub(crate) fn prepend_root_brain_inbox_section(
     items: &[crate::brain::InboxItem],
     options: crate::brain::RootBrainInboxSectionOptions,
     now: i64,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if !filter_text.trim().is_empty()
         || !options.enabled
@@ -350,6 +397,12 @@ pub(crate) fn prepend_root_brain_inbox_section(
         })
         .collect();
 
+    record_passive_ranking(
+        ranking.as_deref_mut(),
+        &rows,
+        Some(options.max_results),
+        Some("brain-inbox"),
+    );
     let shift = rows.len();
     for entry in grouped.iter_mut() {
         if let GroupedListItem::Item(idx) = entry {
@@ -367,6 +420,7 @@ pub(crate) fn prepend_root_brain_inbox_section(
     ));
     section.extend((0..shift).map(GroupedListItem::Item));
     grouped.splice(0..0, section);
+    record_main_menu_ranking_sections(ranking, grouped, flat_results);
 }
 
 /// Human-readable liveness lane for a Conversations row. The running dot is
@@ -426,6 +480,7 @@ pub(crate) fn prepend_root_conversations_section(
     records: &[crate::ai::conversations::ConversationRecord],
     flows: &[crate::flows::model::FlowDescriptor],
     now_unix: i64,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     let query = filter_text.trim().to_lowercase();
     let mut records: Vec<&crate::ai::conversations::ConversationRecord> = records
@@ -479,6 +534,12 @@ pub(crate) fn prepend_root_conversations_section(
         return;
     }
 
+    record_passive_ranking(
+        ranking.as_deref_mut(),
+        &rows,
+        None,
+        Some("background-conversation-recency"),
+    );
     let shift = rows.len();
     for entry in grouped.iter_mut() {
         if let GroupedListItem::Item(idx) = entry {
@@ -495,6 +556,7 @@ pub(crate) fn prepend_root_conversations_section(
     ));
     section.extend((0..shift).map(GroupedListItem::Item));
     grouped.splice(0..0, section);
+    record_main_menu_ranking_sections(ranking, grouped, flat_results);
 }
 
 /// Moves the launcher row identified by `is_alias_target` to the very top of
@@ -511,6 +573,7 @@ pub(crate) fn pin_alias_match_first(
     flat_results: &mut Vec<SearchResult>,
     is_alias_target: &dyn Fn(&SearchResult) -> bool,
     fallback: &dyn Fn() -> SearchResult,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     let flat_idx = match flat_results.iter().position(is_alias_target) {
         Some(idx) => idx,
@@ -519,6 +582,11 @@ pub(crate) fn pin_alias_match_first(
             flat_results.len() - 1
         }
     };
+    if let Some(ranking) = ranking {
+        if let Some(key) = flat_results[flat_idx].stable_selection_key() {
+            ranking.entry(key).or_default().pin_reason = Some("exact-alias");
+        }
+    }
 
     let pin_index = |grouped: &[GroupedListItem]| -> usize {
         match grouped.first() {
@@ -592,6 +660,7 @@ pub(crate) fn get_grouped_results_with_validation(
         input_history,
         validation,
         None,
+        None,
     )
 }
 
@@ -619,6 +688,7 @@ pub(crate) fn get_grouped_results_with_validation_and_query(
     input_history: Option<&crate::input_history::InputHistory>,
     validation: Option<&ValidationReport>,
     advanced_query: Option<&crate::menu_syntax::AdvancedQuery>,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) -> (Vec<GroupedListItem>, Vec<SearchResult>) {
     let (mut grouped, mut flat_results) = get_grouped_results_with_input_history_and_query(
         scripts,
@@ -636,6 +706,7 @@ pub(crate) fn get_grouped_results_with_validation_and_query(
         input_history,
         advanced_query,
         None,
+        ranking.as_deref_mut(),
     );
 
     // Show the pinned row unconditionally when the grouped view is active
@@ -657,7 +728,12 @@ pub(crate) fn get_grouped_results_with_validation_and_query(
                 || !report.warnings.is_empty())
                 && !advanced_query_rejects_issue(advanced_query)
             {
-                prepend_script_issues_row(&mut grouped, &mut flat_results, report);
+                prepend_script_issues_row(
+                    &mut grouped,
+                    &mut flat_results,
+                    report,
+                    ranking.as_deref_mut(),
+                );
             }
         }
     }
@@ -759,6 +835,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files(
         },
         &crate::config::UnifiedSearchPassiveSource::DEFAULT_ORDER,
         crate::config::UnifiedSearchPassiveResultLimitsConfig::default(),
+        None,
     )
 }
 
@@ -808,6 +885,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
     root_browser_history_options: crate::browser_history::RootBrowserHistorySectionOptions,
     root_passive_source_order: &[crate::config::UnifiedSearchPassiveSource],
     root_passive_result_limits: crate::config::UnifiedSearchPassiveResultLimitsConfig,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) -> (Vec<GroupedListItem>, Vec<SearchResult>) {
     let (mut grouped, mut flat_results) = get_grouped_results_with_validation_and_query(
         scripts,
@@ -825,6 +903,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
         input_history,
         validation,
         advanced_query,
+        ranking.as_deref_mut(),
     );
     if root_source_filters.active() {
         filter_grouped_results_by_root_sources(
@@ -842,6 +921,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
             filter_text,
             advanced_query,
             root_source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Windows),
+            ranking.as_deref_mut(),
         );
     }
 
@@ -858,6 +938,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
             advanced_query,
             root_file_options,
             root_source_filters.active(),
+            ranking.as_deref_mut(),
         );
         append_recent_root_file_section(
             &mut grouped,
@@ -866,6 +947,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
             filter_text,
             advanced_query,
             root_file_options,
+            ranking.as_deref_mut(),
         );
     }
     let mut passive_budget =
@@ -887,6 +969,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     root_todo_options,
                     &mut passive_budget,
                     root_source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Todo),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::BrowserTabs => {
@@ -906,6 +989,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::BrowserTabs),
                     browser_tabs_domain_intent,
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::Brain => {
@@ -922,6 +1006,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::Brain),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::Notes => {
@@ -938,6 +1023,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::Notes),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::ClipboardHistory => {
@@ -956,6 +1042,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::ClipboardHistory),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::DictationHistory => {
@@ -974,6 +1061,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::Dictation),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::AgentChatHistory => {
@@ -992,6 +1080,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::Conversations),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::AiVault => {
@@ -1009,6 +1098,7 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::AiVault),
+                    ranking.as_deref_mut(),
                 );
             }
             crate::config::UnifiedSearchPassiveSource::BrowserHistory => {
@@ -1027,12 +1117,14 @@ pub(crate) fn get_grouped_results_with_validation_query_and_root_files_with_opti
                     &mut passive_budget,
                     root_source_filters
                         .includes(crate::menu_syntax::RootUnifiedSourceFilter::BrowserHistory),
+                    ranking.as_deref_mut(),
                 );
             }
         }
     }
 
     append_missing_explicit_source_status_rows(&mut grouped, &flat_results, root_source_filters);
+    record_main_menu_ranking_sections(ranking, &grouped, &flat_results);
 
     (grouped, flat_results)
 }
@@ -1302,6 +1394,7 @@ fn append_root_agent_chat_history_section(
     options: crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::ai::agent_chat::ui::history::root_agent_chat_history_query_is_eligible(
@@ -1356,6 +1449,23 @@ fn append_root_agent_chat_history_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    if let Some(ranking) = ranking.as_deref_mut() {
+        for (row, hit) in rows.iter().zip(hits) {
+            if let Some(facts) = row
+                .stable_selection_key()
+                .and_then(|key| ranking.get_mut(&key))
+            {
+                facts.provider_score = Some(f64::from(hit.score));
+                facts.match_evidence = hit.evidence.as_ref().and_then(|original| {
+                    let mut evidence = row.ranking_evidence();
+                    evidence.score = i32::try_from(hit.score).ok()?;
+                    evidence.tier = original.tier as i32;
+                    Some(evidence)
+                });
+            }
+        }
+    }
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1384,6 +1494,7 @@ fn append_root_brain_section(
     options: crate::brain::RootBrainSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some() || !crate::brain::root_brain_query_is_eligible(filter_text, options)
     {
@@ -1423,6 +1534,11 @@ fn append_root_brain_section(
         )
     });
     let insertion_index = root_brain_passive_insertion_index(grouped, flat_results);
+    if ranking.is_some() {
+        let pin = (insertion_index < root_file_passive_insertion_index(grouped, flat_results))
+            .then_some("brain-before-file-handoff");
+        record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), pin);
+    }
     append_root_passive_section_at(
         grouped,
         flat_results,
@@ -1443,6 +1559,7 @@ fn append_root_notes_section(
     options: crate::notes::RootNotesSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some() || !crate::notes::root_notes_query_is_eligible(filter_text, options)
     {
@@ -1454,6 +1571,7 @@ fn append_root_notes_section(
         return;
     }
 
+    let display_now_ms = crate::runtime_policy::root_search_display_unix_ms();
     let rows = hits
         .iter()
         .take(limit)
@@ -1465,7 +1583,10 @@ fn append_root_notes_section(
                 hit.title.clone()
             };
             let pinned = if hit.is_pinned { "Pinned · " } else { "" };
-            let updated = crate::formatting::format_relative_time_short_dt(hit.updated_at);
+            let updated = crate::formatting::format_relative_time_short_millis_at(
+                hit.updated_at.timestamp_millis(),
+                display_now_ms,
+            );
             SearchResult::Note(crate::scripts::NoteMatch {
                 hit: hit.clone(),
                 title,
@@ -1475,6 +1596,7 @@ fn append_root_notes_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1497,6 +1619,7 @@ fn append_root_todos_section(
     options: crate::menu_syntax::RootTodoSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if !crate::menu_syntax::root_todo_query_is_eligible(filter_text, options) {
         return;
@@ -1522,6 +1645,21 @@ fn append_root_todos_section(
     }
     rows.truncate(limit);
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    if let Some(ranking) = ranking.as_deref_mut() {
+        let provider_ranks: std::collections::HashMap<_, _> = hits
+            .iter()
+            .enumerate()
+            .map(|(rank, hit)| (hit.stable_key.as_str(), rank))
+            .collect();
+        for row in &rows {
+            if let SearchResult::Todo(item) = row {
+                if let Some(facts) = ranking.get_mut(&item.hit.stable_key) {
+                    facts.provider_rank = provider_ranks.get(item.hit.stable_key.as_str()).copied();
+                }
+            }
+        }
+    }
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1544,6 +1682,7 @@ fn append_root_clipboard_history_section(
     options: crate::clipboard_history::RootClipboardHistorySectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::clipboard_history::root_clipboard_history_query_is_eligible(filter_text, options)
@@ -1556,6 +1695,7 @@ fn append_root_clipboard_history_section(
         return;
     }
 
+    let display_now_ms = crate::runtime_policy::root_search_display_unix_ms();
     let rows = hits
         .iter()
         .take(limit)
@@ -1569,7 +1709,10 @@ fn append_root_clipboard_history_section(
                 crate::clipboard_history::ContentType::Image => "Image",
             };
             let pinned = if entry.pinned { "Pinned · " } else { "" };
-            let time = crate::formatting::format_relative_time_short_millis(entry.timestamp);
+            let time = crate::formatting::format_relative_time_short_millis_at(
+                entry.timestamp,
+                display_now_ms,
+            );
             SearchResult::ClipboardHistory(crate::scripts::ClipboardHistoryMatch {
                 entry: entry.clone(),
                 title: entry.display_preview(),
@@ -1579,6 +1722,7 @@ fn append_root_clipboard_history_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1601,6 +1745,7 @@ fn append_root_dictation_history_section(
     options: crate::dictation::RootDictationHistorySectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::dictation::root_dictation_history_query_is_eligible(filter_text, options)
@@ -1649,6 +1794,23 @@ fn append_root_dictation_history_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    if let Some(ranking) = ranking.as_deref_mut() {
+        for (row, hit) in rows.iter().zip(hits) {
+            if let Some(facts) = row
+                .stable_selection_key()
+                .and_then(|key| ranking.get_mut(&key))
+            {
+                facts.provider_score = Some(f64::from(hit.score));
+                facts.match_evidence = hit.evidence.as_ref().and_then(|original| {
+                    let mut evidence = row.ranking_evidence();
+                    evidence.score = i32::try_from(hit.score).ok()?;
+                    evidence.tier = original.tier as i32;
+                    Some(evidence)
+                });
+            }
+        }
+    }
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1672,6 +1834,7 @@ fn append_root_browser_tabs_section(
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
     domain_intent: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::browser_tabs::root_browser_tabs_query_is_eligible(filter_text, options.clone())
@@ -1709,6 +1872,12 @@ fn append_root_browser_tabs_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(
+        ranking.as_deref_mut(),
+        &rows,
+        Some(limit),
+        domain_intent.then_some("bare-domain-tabs"),
+    );
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1741,6 +1910,7 @@ fn append_root_browser_history_section(
     options: crate::browser_history::RootBrowserHistorySectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::browser_history::root_browser_history_query_is_eligible(
@@ -1756,12 +1926,16 @@ fn append_root_browser_history_section(
         return;
     }
 
+    let display_now_ms = crate::runtime_policy::root_search_display_unix_ms();
     let rows = hits
         .iter()
         .take(limit)
         .enumerate()
         .map(|(rank, hit)| {
-            let time = crate::formatting::format_relative_time_short_millis(hit.last_visit_unix_ms);
+            let time = crate::formatting::format_relative_time_short_millis_at(
+                hit.last_visit_unix_ms,
+                display_now_ms,
+            );
             SearchResult::BrowserHistory(crate::scripts::BrowserHistoryMatch {
                 hit: hit.clone(),
                 subtitle: format!(
@@ -1773,6 +1947,7 @@ fn append_root_browser_history_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1792,6 +1967,7 @@ fn append_recent_root_file_section(
     filter_text: &str,
     advanced_query: Option<&crate::menu_syntax::AdvancedQuery>,
     options: crate::file_search::RootFileSectionOptions,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if !options.files_enabled || !options.recent_files_enabled {
         return;
@@ -1810,7 +1986,8 @@ fn append_recent_root_file_section(
         .count();
     let eligible_recent_files = recent_file_results
         .iter()
-        .filter(|file| {
+        .enumerate()
+        .filter(|(_, file)| {
             crate::file_search::root_global_file_result_is_eligible(file)
                 && file.file_type != crate::file_search::FileType::Directory
         })
@@ -1834,17 +2011,36 @@ fn append_recent_root_file_section(
 
     let insertion_index = root_file_passive_insertion_index(grouped, flat_results);
 
+    let admitted_count = eligible_recent_files.len();
     let mut recent_group = Vec::with_capacity(eligible_recent_files.len() + 2);
     recent_group.push(GroupedListItem::SectionHeader(
         "Recent Files".to_string(),
         None,
     ));
-    for (rank, file) in eligible_recent_files.into_iter().enumerate() {
+    for (rank, (provider_rank, file)) in eligible_recent_files.into_iter().enumerate() {
         let idx = flat_results.len();
         flat_results.push(SearchResult::File(crate::scripts::FileMatch {
             file: file.clone(),
             score: i32::MAX.saturating_sub(rank as i32),
         }));
+        if let Some(ranking) = ranking.as_deref_mut() {
+            if let Some(key) = flat_results[idx].stable_selection_key() {
+                ranking.insert(
+                    key,
+                    MainMenuRankingEvidence {
+                        provider_rank: Some(provider_rank),
+                        budget_limit: Some(
+                            options
+                                .source_filter_browse_target_visible_rows
+                                .unwrap_or(crate::file_search::ROOT_FILE_RECENT_RENDER_LIMIT),
+                        ),
+                        admitted_count: Some(admitted_count),
+                        section: Some("Recent Files".to_string()),
+                        ..MainMenuRankingEvidence::default()
+                    },
+                );
+            }
+        }
         recent_group.push(GroupedListItem::Item(idx));
     }
     if let Some(status) = source_status {
@@ -1931,6 +2127,7 @@ fn append_root_ai_vault_section(
     options: crate::ai_vault::RootAiVaultSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::ai_vault::root_ai_vault_query_is_eligible(filter_text, &options)
@@ -1956,6 +2153,7 @@ fn append_root_ai_vault_section(
         })
         .collect::<Vec<_>>();
 
+    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1994,6 +2192,7 @@ fn append_root_file_section(
     advanced_query: Option<&crate::menu_syntax::AdvancedQuery>,
     options: crate::file_search::RootFileSectionOptions,
     suppress_handoff: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if !options.files_enabled {
         return;
@@ -2101,11 +2300,35 @@ fn append_root_file_section(
         None,
     ));
     for file_match in files {
+        if let Some(ranking) = ranking.as_deref_mut() {
+            ranking.insert(
+                format!("file/{}", file_match.file.path),
+                MainMenuRankingEvidence {
+                    score: Some(file_match.score),
+                    section: Some(ui_state.section_label.clone()),
+                    budget_limit: Some(options.source_chip_visible_limit.unwrap_or(match mode {
+                        crate::file_search::RootFileSectionMode::GlobalQuery => {
+                            crate::file_search::ROOT_FILE_RENDER_LIMIT
+                        }
+                        crate::file_search::RootFileSectionMode::DirectoryBrowse => {
+                            crate::file_search::ROOT_FILE_BROWSE_RENDER_LIMIT
+                        }
+                    })),
+                    admitted_count: Some(ui_state.visible_file_count),
+                    pin_reason: promote.then_some("file-section-promotion"),
+                    ..MainMenuRankingEvidence::default()
+                },
+            );
+        }
         let idx = flat_results.len();
         flat_results.push(SearchResult::File(file_match));
         file_group.push(GroupedListItem::Item(idx));
     }
     if let Some(handoff) = handoff {
+        if let (Some(ranking), Some(key)) = (ranking.as_deref_mut(), handoff.stable_selection_key())
+        {
+            ranking.entry(key).or_default().pin_reason = Some("file-search-handoff");
+        }
         let idx = flat_results.len();
         flat_results.push(handoff);
         file_group.push(GroupedListItem::Item(idx));
@@ -2219,6 +2442,7 @@ fn append_root_windows_section(
     filter_text: &str,
     advanced_query: Option<&crate::menu_syntax::AdvancedQuery>,
     explicit_source_filter: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some_and(|query| query.has_predicates()) {
         return;
@@ -2267,6 +2491,14 @@ fn append_root_windows_section(
     for window_match in matches {
         let idx = flat_results.len();
         flat_results.push(SearchResult::Window(window_match));
+        if let Some(ranking) = ranking.as_deref_mut() {
+            if let Some(key) = flat_results[idx].stable_selection_key() {
+                let mut facts = MainMenuRankingEvidence::active(&flat_results[idx]);
+                facts.section = Some("Windows".to_string());
+                facts.admitted_count = Some(shown);
+                ranking.insert(key, facts);
+            }
+        }
         grouped.push(GroupedListItem::Item(idx));
     }
     if explicit_source_filter {

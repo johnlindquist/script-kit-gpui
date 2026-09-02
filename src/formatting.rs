@@ -57,7 +57,11 @@ pub fn format_relative_time_short_dt(dt: DateTime<Utc>) -> String {
 /// Output examples: "just now", "3 minutes ago", "2 hours ago", "5 days ago".
 #[allow(dead_code)]
 pub fn format_relative_time_short_millis(timestamp_ms: i64) -> String {
-    let now_ms = Utc::now().timestamp_millis();
+    format_relative_time_short_millis_at(timestamp_ms, Utc::now().timestamp_millis())
+}
+
+/// Same production formatting with an explicit wall-clock reference.
+pub fn format_relative_time_short_millis_at(timestamp_ms: i64, now_ms: i64) -> String {
     let age_secs = (now_ms - timestamp_ms) / 1000;
 
     format_relative_seconds(age_secs.max(0))
@@ -364,6 +368,27 @@ mod tests {
         assert_eq!(
             format_relative_time_short_millis(ninety_five_seconds_ago),
             "1 minute ago"
+        );
+    }
+
+    #[test]
+    fn relative_time_millis_uses_the_explicit_reference_clock() {
+        let timestamp = 1_777_593_600_000;
+        assert_eq!(
+            format_relative_time_short_millis_at(timestamp, timestamp + 60_000),
+            "1 minute ago"
+        );
+        assert_eq!(
+            format_relative_time_short_millis_at(timestamp, timestamp + 119_999),
+            "1 minute ago"
+        );
+        assert_eq!(
+            format_relative_time_short_millis_at(timestamp, timestamp + 120_000),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            format_relative_time_short_millis_at(timestamp, timestamp - 1),
+            "just now"
         );
     }
 

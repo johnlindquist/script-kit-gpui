@@ -4,8 +4,8 @@ pub use super::color_resolver::{ColorResolver, SpacingResolver, TypographyResolv
 pub use super::gpui_integration::sync_gpui_component_theme;
 pub use super::helpers::{hover_overlay_bg, modal_overlay_bg, ListItemColors, PromptColors};
 pub use super::types::{
-    get_cached_theme, init_theme_cache, invalidate_appearance_cache, load_theme,
-    reload_theme_cache, ColorScheme, FontConfig, Theme, VibrancyMaterial,
+    get_cached_theme, get_theme_snapshot, invalidate_appearance_cache, load_theme, ColorScheme,
+    FontConfig, Theme, VibrancyMaterial,
 };
 // Keep curated re-exports lint-clean when the prelude isn't imported internally.
 const _: () = {
@@ -18,10 +18,9 @@ const _: () = {
     let _ = core::mem::size_of::<ListItemColors>();
     let _ = core::mem::size_of::<PromptColors>();
     let _ = get_cached_theme;
-    let _ = init_theme_cache;
+    let _ = get_theme_snapshot;
     let _ = invalidate_appearance_cache;
     let _ = load_theme;
-    let _ = reload_theme_cache;
     let _ = core::mem::size_of::<ColorScheme>();
     let _ = core::mem::size_of::<FontConfig>();
     let _ = core::mem::size_of::<Theme>();

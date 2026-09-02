@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -22,10 +23,7 @@ import { targetIdentity } from "../../devtools/lib/target-identity.ts";
 
 assertNoninteractiveVisualProbe("cons-proof-gov.ax-scroll");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY
-    ?? "target-agent/artifacts/cons-proof-c06/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const axPath = resolve(
   process.env.CONSISTENCY_AX_RECEIPT_PATH
     ?? ".artifacts/consistency/PF-007/ax-focus-activation.json",
@@ -189,18 +187,16 @@ async function enabledScenario() {
   let selectedScrollState: Obj = {};
   let focusedSemanticId: string | null = null;
   try {
-    driver = await Driver.launch({
-      binary,
-      sessionName: `cons-proof-c06-enabled-${process.pid}`,
-      sandboxHome: true,
-      defaultTimeoutMs: 12_000,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1",
-        SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
-        SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-      },
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+    sessionName: `cons-proof-c06-enabled-${process.pid}`,
+    sandboxHome: true,
+    defaultTimeoutMs: 12_000,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1",
+      SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
+      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+    }, });
     driver.send({ type: "show" });
     await driver.waitForState({ windowVisible: true }, { timeoutMs: 10_000 });
 
@@ -403,19 +399,17 @@ async function disabledScenario() {
   let runtimeError: string | null = null;
   let proof: Obj = {};
   try {
-    driver = await Driver.launch({
-      binary,
-      sessionName: `cons-proof-c06-disabled-${process.pid}`,
-      sandboxHome: true,
-      defaultTimeoutMs: 12_000,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1",
-        SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
-        SCRIPT_KIT_TEST_FOOTER_DESCRIPTOR_FIXTURE: "disabled",
-        SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-      },
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+    sessionName: `cons-proof-c06-disabled-${process.pid}`,
+    sandboxHome: true,
+    defaultTimeoutMs: 12_000,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1",
+      SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
+      SCRIPT_KIT_TEST_FOOTER_DESCRIPTOR_FIXTURE: "disabled",
+      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+    }, });
     driver.send({ type: "show" });
     await driver.waitForState({ windowVisible: true }, { timeoutMs: 10_000 });
     const stateBefore = await poll(

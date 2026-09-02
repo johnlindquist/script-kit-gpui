@@ -183,7 +183,7 @@ fn generate_test_function(
         }
 
         parse_quote! {
-            #[test]
+            #[::core::prelude::v1::test]
             fn #outer_fn_name() {
                 #inner_fn
 
@@ -276,7 +276,7 @@ fn generate_test_function(
         }
 
         parse_quote! {
-            #[test]
+            #[::core::prelude::v1::test]
             fn #outer_fn_name() {
                 #inner_fn
 

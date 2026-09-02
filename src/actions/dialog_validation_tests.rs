@@ -1020,8 +1020,7 @@ fn test_chat_no_models_no_messages() {
     };
 
     let actions = get_chat_context_actions(&info);
-    // change_model + continue_in_chat + capture_screen_area
-    assert_eq!(actions.len(), 3);
+    crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
     assert_eq!(actions[0].id, "chat:change_model");
 }
 
@@ -1046,8 +1045,7 @@ fn test_chat_with_models_and_response() {
     };
 
     let actions = get_chat_context_actions(&info);
-    // change_model + continue_in_chat + copy_response + clear_conversation + capture_screen_area = 5
-    assert_eq!(actions.len(), 5);
+    crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
     // No flat model rows in root — models live in the drill-down picker
     assert!(
         !actions

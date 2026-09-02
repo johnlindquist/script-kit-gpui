@@ -139,6 +139,8 @@ impl ScriptListApp {
             depth,
             color_scheme: GridColorScheme::default(),
         });
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
 
         logging::log(
             "DEBUG_GRID",
@@ -157,8 +159,30 @@ impl ScriptListApp {
 
     /// Hide the debug grid overlay
     pub(crate) fn hide_grid(&mut self, cx: &mut Context<Self>) {
+        if self.grid_config.is_none() { return; }
         self.grid_config = None;
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
         logging::log("DEBUG_GRID", "Grid overlay hidden");
         cx.notify();
     }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn grid_overlay_open_close_advance_source_revisions(cx: &mut gpui::TestAppContext) {
+    let app = main_menu_selection_test_app(cx);
+    app.update(cx, |app, cx| {
+        let before = app.owned_revision_facts();
+        app.show_grid(crate::protocol::GridOptions::default(), cx);
+        let shown = app.owned_revision_facts();
+        assert!(shown.data_generation > before.data_generation);
+        assert!(shown.presentation_revision > before.presentation_revision);
+        assert_eq!(app.owned_revision_facts(), shown);
+        app.hide_grid(cx);
+        let hidden = app.owned_revision_facts();
+        assert!(hidden.presentation_revision > shown.presentation_revision);
+        app.hide_grid(cx);
+        assert_eq!(app.owned_revision_facts(), hidden);
+    });
 }

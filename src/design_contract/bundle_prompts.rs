@@ -498,7 +498,7 @@ fn append_prompt_design_tokens(
                                                                            // CURSOR_HEIGHT_LG model. Runtime capture 2026-07-12: input band
                                                                            // spans 41px (= 8 + 25 + 8) between context zone and divider.
         let arg_input_line_height =
-            crate::theme::TypographyResolver::new(&theme, crate::designs::DesignVariant::Default)
+            crate::theme::TypographyResolver::new(theme, crate::designs::DesignVariant::Default)
                 .font_size_xl()
                 * 1.25; // 25
         let arg_header_height = (HEADER_PADDING_Y * 2.0) + arg_input_line_height; // 41
@@ -561,7 +561,7 @@ fn append_prompt_design_tokens(
             Some("--sk-arg-input-font-size"),
             TokenValue::Length {
                 value: crate::theme::TypographyResolver::new(
-                    &theme,
+                    theme,
                     crate::designs::DesignVariant::Default,
                 )
                 .font_size_xl() as f64,
@@ -636,7 +636,7 @@ fn append_prompt_design_tokens(
             ],
             "info",
             "Script-driven arg prompts open from the MINI launcher and clamp to 5 model \
-             rows (279); the full-mode ArgPromptWithChoices model reserves 319.",
+             rows; the full-mode ArgPromptWithChoices model reserves its own derived height.",
         );
         b.conflict(
             "argPrompt.headerHeight.modelVsPaint",

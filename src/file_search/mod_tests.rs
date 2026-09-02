@@ -591,6 +591,28 @@ mod tests {
     }
 
     #[test]
+    fn root_file_cache_reuse_requires_accepted_key_not_displayed_query() {
+        let mut cache = std::collections::VecDeque::from([("global:old".to_string(), Vec::new())]);
+        // The waiting branch can change the displayed request before the old
+        // physical worker ends. Equal display/scope must not consume new work.
+        let displayed_request = "global:new";
+        assert!(reusable_root_file_cache_entry(&cache, displayed_request, true).is_none());
+        assert!(reusable_root_file_cache_entry(
+            &std::collections::VecDeque::new(),
+            displayed_request,
+            true
+        )
+        .is_none());
+
+        cache.push_back((displayed_request.to_string(), Vec::new()));
+        let (key, rows) = reusable_root_file_cache_entry(&cache, displayed_request, true)
+            .expect("an accepted empty result is a reusable snapshot");
+        assert_eq!(key, displayed_request);
+        assert!(rows.is_empty());
+        assert!(reusable_root_file_cache_entry(&cache, displayed_request, false).is_none());
+    }
+
+    #[test]
     fn root_directory_browse_source_key_ignores_child_fragments() {
         let root =
             std::env::temp_dir().join(format!("script-kit-root-source-key-{}", std::process::id()));
@@ -1137,7 +1159,7 @@ mod tests {
     }
     #[test]
     fn test_search_files_empty_query() {
-        let results = search_files("", None, 10);
+        let results = search_files("", None, 10).expect("empty query succeeds without native IO");
         assert!(results.is_empty());
     }
     #[test]
@@ -1179,7 +1201,8 @@ mod tests {
     #[test]
     fn test_search_files_real_query() {
         // This test only runs on macOS and verifies mdfind works
-        let results = search_files("System Preferences", Some("/System"), 5);
+        let results = search_files("System Preferences", Some("/System"), 5)
+            .expect("Spotlight source succeeds");
         // We don't assert specific results as they may vary,
         // but the function should not panic
         assert!(results.len() <= 5);
@@ -1359,15 +1382,17 @@ mod tests {
     }
     #[test]
     fn test_list_directory_nonexistent() {
-        // Non-existent directory should return empty
-        let results = list_directory("/this/path/does/not/exist/at/all", 50);
-        assert!(results.is_empty());
+        let temp = tempfile::tempdir().expect("temp directory");
+        let missing = temp.path().join("missing");
+        let error = list_directory(missing.to_str().expect("UTF-8 path"), 50)
+            .expect_err("missing directory is not empty success");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
     #[cfg(target_os = "macos")]
     #[test]
     fn test_list_directory_system() {
         // List /System which exists on all macOS systems
-        let results = list_directory("/System", 10);
+        let results = list_directory("/System", 10).expect("read System directory");
         assert!(!results.is_empty(), "Should find items in /System");
 
         // Should contain Library
@@ -1383,7 +1408,7 @@ mod tests {
     #[test]
     fn test_list_directory_home() {
         // List home directory using ~
-        let results = list_directory("~", 100);
+        let results = list_directory("~", 100).expect("read home directory");
 
         // Home should have at least some contents
         // (assuming it's a valid home directory)
@@ -1396,7 +1421,7 @@ mod tests {
     #[test]
     fn test_list_directory_dirs_first() {
         // Test using /tmp which usually has both dirs and files
-        let results = list_directory("/tmp", 50);
+        let results = list_directory("/tmp", 50).expect("read tmp directory");
 
         // If we have results, verify sorting
         if results.len() >= 2 {
@@ -1439,7 +1464,8 @@ mod tests {
         std::fs::write(temp_dir.join("a.txt"), b"a").expect("should create a.txt");
         std::fs::write(temp_dir.join("c.txt"), b"c").expect("should create c.txt");
 
-        let results = list_directory(temp_dir.to_str().expect("utf8 temp path"), 3);
+        let results = list_directory(temp_dir.to_str().expect("utf8 temp path"), 3)
+            .expect("read fixture directory");
         let names: Vec<&str> = results.iter().map(|result| result.name.as_str()).collect();
 
         assert_eq!(results.len(), 3, "directory listing should obey limit");
@@ -1454,12 +1480,13 @@ mod tests {
     #[test]
     fn test_list_directory_zero_limit_returns_empty() {
         let tmp_dir = std::env::temp_dir();
-        let results = list_directory(tmp_dir.to_str().expect("utf8 temp path"), 0);
+        let results = list_directory(tmp_dir.to_str().expect("utf8 temp path"), 0)
+            .expect("zero limit succeeds");
         assert!(results.is_empty(), "limit=0 should return no results");
     }
     #[test]
     fn test_list_directory_hides_dotfiles_by_default() {
-        let results = list_directory("~", 100);
+        let results = list_directory("~", 100).expect("read home directory");
 
         for result in &results {
             assert!(
@@ -1486,7 +1513,8 @@ mod tests {
         std::fs::write(temp_dir.join("visible-file"), b"visible").expect("should create file");
 
         let hidden_results =
-            list_directory_with_options(temp_dir.to_str().expect("utf8 temp path"), 10, true);
+            list_directory_with_options(temp_dir.to_str().expect("utf8 temp path"), 10, true)
+                .expect("read hidden fixture directory");
         let hidden_names: Vec<&str> = hidden_results
             .iter()
             .map(|result| result.name.as_str())
@@ -1500,7 +1528,8 @@ mod tests {
             "hidden listing should include dotfiles"
         );
 
-        let default_results = list_directory(temp_dir.to_str().expect("utf8 temp path"), 10);
+        let default_results = list_directory(temp_dir.to_str().expect("utf8 temp path"), 10)
+            .expect("read fixture directory");
         let default_names: Vec<&str> = default_results
             .iter()
             .map(|result| result.name.as_str())

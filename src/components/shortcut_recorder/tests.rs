@@ -78,6 +78,160 @@ fn real_gpui_chord_then_enter_dispatches_save() {
 }
 
 #[test]
+fn semantic_actions_share_recording_validation_and_completion() {
+    let mut cx = TestAppContext::single();
+    let window = recorder_window(&mut cx);
+    window
+        .update(&mut cx, |recorder, _, cx| {
+            let initial = recorder.automation_elements();
+            assert_eq!(
+                initial,
+                recorder.automation_elements(),
+                "inspection must not consume actions or mutate the recorder"
+            );
+            let save = initial
+                .iter()
+                .find(|item| item.semantic_id == "shortcut-save-button")
+                .unwrap();
+            assert_eq!(save.action_disabled.as_deref(), Some("shortcut_incomplete"));
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-save-button", cx),
+                Err("shortcut_incomplete".into())
+            );
+            assert!(recorder.pending_action.is_none());
+            recorder.handle_key_down(
+                "k",
+                gpui::Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+            let recorded = recorder.shortcut.clone();
+            let ready = recorder.automation_elements();
+            assert!(ready
+                .iter()
+                .find(|item| item.semantic_id == "shortcut-save-button")
+                .unwrap()
+                .action_disabled
+                .is_none());
+            assert!(ready
+                .iter()
+                .any(|item| item.role.as_deref() == Some("keycap")));
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-save-button", cx),
+                Ok(true)
+            );
+            assert_eq!(
+                recorder.take_pending_action(),
+                Some(RecorderAction::Save(recorded))
+            );
+            assert_eq!(recorder.take_pending_action(), None);
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-clear-button", cx),
+                Ok(true)
+            );
+            assert!(recorder.is_recording);
+            assert!(recorder.shortcut.is_empty());
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-clear-button", cx),
+                Err("shortcut_empty".into())
+            );
+            assert_eq!(
+                recorder.activate_semantic_action("not-a-recorder-action", cx),
+                Ok(false)
+            );
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-cancel-button", cx),
+                Ok(true)
+            );
+            assert_eq!(recorder.take_pending_action(), Some(RecorderAction::Cancel));
+        })
+        .expect("real recorder action update");
+}
+
+#[test]
+fn recorder_projection_reflects_conflicts_and_absent_capture_only_actions() {
+    let mut cx = TestAppContext::single();
+    let window = recorder_window(&mut cx);
+    window
+        .update(&mut cx, |recorder, _, cx| {
+            recorder.handle_key_down(
+                "k",
+                gpui::Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+            recorder.conflict = Some(super::ShortcutConflict {
+                command_name: "Existing command".into(),
+                shortcut: "cmd-k".into(),
+            });
+            let elements = recorder.automation_elements();
+            assert!(elements
+                .iter()
+                .any(|item| item.semantic_id == "shortcut-conflict-warning"));
+            assert_eq!(
+                elements
+                    .iter()
+                    .find(|item| item.semantic_id == "shortcut-save-button")
+                    .unwrap()
+                    .action_disabled
+                    .as_deref(),
+                Some("shortcut_conflict")
+            );
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-save-button", cx),
+                Err("shortcut_conflict".into())
+            );
+            assert!(recorder.pending_action.is_none());
+            recorder.capture_only = true;
+            assert!(!recorder
+                .automation_elements()
+                .iter()
+                .any(|item| item.element_type == crate::protocol::ElementType::Button));
+            assert_eq!(
+                recorder.activate_semantic_action("shortcut-cancel-button", cx),
+                Err("shortcut_action_not_present".into())
+            );
+        })
+        .expect("real recorder projection update");
+}
+
+#[test]
+fn production_recorder_controls_publish_real_painted_bounds() {
+    let mut cx = TestAppContext::single();
+    let window = recorder_window(&mut cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        let _ = window.draw(cx);
+        for selector in [
+            "shortcut-modal-content",
+            "shortcut-recorder-header",
+            "shortcut-key-display",
+            "shortcut-modal-action-row",
+            "shortcut-save-button",
+            "shortcut-clear-button",
+            "shortcut-cancel-button",
+        ] {
+            let bounds = window
+                .debug_bounds()
+                .get(selector)
+                .expect("rendered control measurement");
+            assert!(f32::from(bounds.size.width) > 0.0, "{selector} width");
+            assert!(f32::from(bounds.size.height) > 0.0, "{selector} height");
+        }
+        let save = window.debug_bounds().get("shortcut-save-button").unwrap();
+        let cancel = window.debug_bounds().get("shortcut-cancel-button").unwrap();
+        assert!(
+            save.origin.x < cancel.origin.x,
+            "measure distinct real action frames, not their shared panel"
+        );
+    })
+    .expect("paint real recorder window");
+}
+
+#[test]
 fn test_recorded_shortcut_to_display_string() {
     let mut shortcut = RecordedShortcut::new();
     shortcut.cmd = true;

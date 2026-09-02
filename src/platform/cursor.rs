@@ -303,6 +303,7 @@ fn install_cursor_rects() {
 /// are re-applied each call (so new windows get tagged).
 #[cfg(target_os = "macos")]
 pub fn install_cursor_tracking() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeInput) { return; }
     use std::sync::Once;
 
     static CONN_ONCE: Once = Once::new();

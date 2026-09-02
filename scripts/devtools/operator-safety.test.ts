@@ -209,6 +209,17 @@ describe("noninteractive DevTools operator safety", () => {
     }
   });
 
+  test("capture cursor payloads never grant an unowned transport capture or screen authority", () => {
+    for (const frameCursor of [{ traceGeneration: 1, afterFrameGeneration: 0 }, null,
+        { traceGeneration: 1, afterFrameGeneration: 0, extra: true }]) {
+      const capture = { type: "design", command: { operation: "captureFrame", target: { type: "instance", id: "main", generation: 1 }, includeImage: false, frameCursor } };
+      expect(() => check(capture)).toThrow(NoninteractiveSafetyError);
+      expect(() => check({ type: "batch", commands: [capture] })).toThrow(NoninteractiveSafetyError);
+      for (const type of ["captureScreenshot", "captureWindow", "simulateGpuiEvent", "show"])
+        expect(() => check({ type, frameCursor })).toThrow(NoninteractiveSafetyError);
+    }
+  });
+
   test("batch wrapping cannot smuggle visible or submitting commands", () => {
     for (const unsafe of [
       { type: "show" },

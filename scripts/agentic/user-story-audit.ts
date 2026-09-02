@@ -335,8 +335,8 @@ async function main() {
     .filter((recipe) => includeKnown || !ALREADY_EXERCISED_THIS_THREAD.has(recipe))
     .slice(0, limit);
 
-  if (candidates.length < limit) {
-    throw new Error(`Only found ${candidates.length} eligible stress recipes for limit ${limit}`);
+  if (!Number.isSafeInteger(limit) || limit <= 0 || candidates.length < limit) {
+    throw new Error(`Nonempty exact story selection required; found ${candidates.length}, requested ${limit}`);
   }
 
   const startedAt = new Date().toISOString();
@@ -393,6 +393,8 @@ async function main() {
   const artifactPath = join(".test-output", `agentic-100-user-story-audit-${startedAt.replace(/[:.]/g, "-")}.json`);
   await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`);
   console.log(JSON.stringify({ ...artifact, artifactPath }, null, 2));
+  if (!dryRun && (results.length !== candidates.length || results.length === 0 || results.some(result => result.status !== "pass")))
+    process.exitCode = 1;
 }
 
 await main();

@@ -467,7 +467,7 @@ try {
     () =>
       driver!.request(
         { type: "getAgentChatState" },
-        { expect: "agentChatStateResult", timeoutMs: 15_000 },
+        { expect: "agent_chatStateResult", timeoutMs: 15_000 },
       ),
     (response) => String(statePayload(response).status ?? "") !== "notAgentChat",
     30_000,

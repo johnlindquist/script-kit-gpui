@@ -110,28 +110,19 @@ fn main_list_visible_range(
 fn main_list_row_stable_key(
     grouped_item: &GroupedListItem,
     grouped_index: usize,
-    flat_results: &[scripts::SearchResult],
+    rows: &[MainMenuRowProjection],
 ) -> String {
+    if let Ok(index) = rows.binary_search_by_key(&grouped_index, |row| row.grouped_index) {
+        return rows[index].stable_key.clone();
+    }
     match grouped_item {
-        GroupedListItem::Item(result_index) => flat_results
-            .get(*result_index)
-            .and_then(scripts::SearchResult::stable_selection_key)
-            .unwrap_or_else(|| format!("generated/item/{grouped_index}/{result_index}")),
         GroupedListItem::SectionHeader(label, icon) => {
             format!("section/{label}/{}", icon.as_deref().unwrap_or("none"))
         }
         GroupedListItem::ReservedSectionSlot => "section/reserved-leading-slot".to_string(),
-        GroupedListItem::Status(status) => format!(
-            "status/{}/{}/{}",
-            status.source.receipt_label(),
-            status.status_kind.as_str(),
-            status.label
-        ),
+        GroupedListItem::Status(status) => format!("status/{}", status.source.receipt_label()),
+        GroupedListItem::Item(_) => format!("inert/{grouped_index}"),
     }
-}
-
-fn main_list_row_semantic_id(stable_key: &str) -> String {
-    format!("main-list-row:{stable_key}")
 }
 
 fn main_list_safe_scroll_offset_for_item(
@@ -316,6 +307,23 @@ fn main_list_scroll_lifecycle_phase(
 }
 
 impl ScriptListApp {
+    pub(crate) fn note_main_menu_viewport_input(
+        &mut self,
+        source: crate::scrolling::list_interaction::ListViewportInputSource,
+    ) {
+        if matches!(self.current_view, AppView::ScriptList)
+            && self
+                .main_menu_result_caches
+                .viewport_intent
+                .note_input(source)
+        {
+            self.main_menu_result_caches.viewport_revision = self
+                .main_menu_viewport_revision()
+                .checked_add(1)
+                .expect("main menu viewport revision exhausted");
+        }
+    }
+
     fn record_main_list_scroll_frame_trace(
         &mut self,
         event: &gpui::ScrollWheelEvent,
@@ -585,7 +593,7 @@ impl ScriptListApp {
         self.trigger_scroll_activity(cx);
     }
 
-    pub(crate) fn main_list_scroll_receipt(&mut self) -> serde_json::Value {
+    pub(crate) fn main_list_scroll_receipt(&self) -> serde_json::Value {
         let viewport_height = self.main_list_state.viewport_bounds().size.height;
         let footer_height = main_list_footer_overlay_total_padding();
         let scroll_offset = self.main_list_state.logical_scroll_top();
@@ -603,7 +611,7 @@ impl ScriptListApp {
             selected_semantic_id,
             hovered_semantic_id,
         ) = {
-            let (grouped_items, flat_results) = self.get_grouped_results_cached();
+            let (grouped_items, _) = self.get_grouped_results_cached();
             let content_height = script_list_content_height_with(&grouped_items, heights);
             let scroll_top =
                 script_list_pixel_top_for_offset(&grouped_items, scroll_offset, heights);
@@ -612,19 +620,26 @@ impl ScriptListApp {
             .max(0.0);
             let (first_visible_index, last_visible_index_exclusive) =
                 main_list_visible_range(&grouped_items, scroll_top, visible_height, heights);
-            let stable_key_at = |index: usize| {
-                grouped_items
-                    .get(index)
-                    .map(|item| main_list_row_stable_key(item, index, &flat_results))
+            let row_at = |index: usize| {
+                self.main_menu_committed_rows()
+                    .iter()
+                    .find(|row| row.grouped_index == index)
             };
-            let semantic_id_at =
-                |index: usize| stable_key_at(index).map(|key| main_list_row_semantic_id(&key));
-            let selected_row_top = grouped_items.get(self.selected_index).map(|_| {
-                script_list_pixel_top_for_item(&grouped_items, self.selected_index, heights)
+            let semantic_id_at = |index: usize| row_at(index).map(|row| row.semantic_id.clone());
+            let selected_row =
+                self.resolved_main_menu_selected_subject()
+                    .map(|subject| match subject {
+                        ResolvedMainMenuSelection::SearchResult { row, .. }
+                        | ResolvedMainMenuSelection::Calculator { row, .. } => row,
+                    });
+            let selected_row_top = selected_row.map(|row| {
+                script_list_pixel_top_for_item(&grouped_items, row.grouped_index, heights)
             });
-            let selected_row_bottom = grouped_items.get(self.selected_index).map(|item| {
-                selected_row_top.unwrap_or(0.0) + heights.row_height(item, self.selected_index)
-            });
+            let selected_row_bottom = selected_row
+                .and_then(|row| grouped_items.get(row.grouped_index))
+                .map(|item| {
+                    selected_row_top.unwrap_or(0.0) + heights.row_height(item, self.selected_index)
+                });
             (
                 content_height,
                 selected_row_top,
@@ -636,8 +651,8 @@ impl ScriptListApp {
                 last_visible_index_exclusive
                     .checked_sub(1)
                     .and_then(semantic_id_at),
-                stable_key_at(self.selected_index),
-                semantic_id_at(self.selected_index),
+                selected_row.map(|row| row.stable_key.clone()),
+                selected_row.map(|row| row.semantic_id.clone()),
                 self.hovered_index.and_then(semantic_id_at),
             )
         };
@@ -756,6 +771,7 @@ impl ScriptListApp {
             },
             "focusedSemanticId": (self.focused_input == FocusedInput::MainFilter).then_some("input:filter"),
             "lastInteractionSource": self.last_list_interaction_source.as_str(),
+            "pendingReveal": self.main_menu_pending_reveal(),
             "performance": self.main_list_scroll_frame_trace.receipt(),
             "affordance": {
                 "atTop": geometry.at_top,
@@ -814,14 +830,27 @@ impl ScriptListApp {
         reason: &'static str,
         cx: &mut Context<Self>,
     ) {
-        // The reveal can only converge after the next render splices the
-        // list's internal item tree to the current grouping (ListState clamps
-        // scroll offsets to its own stale item count until then). Give the
-        // loop enough frames to observe a post-splice layout on long lists
-        // [PF-008].
+        // Retry only within the exact committed interaction and surface lifetime.
         const ATTEMPTS: usize = 30;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
+        if self.resolved_main_menu_selected_subject().is_none() {
+            return;
+        }
+        self.main_menu_result_caches.reveal_sequence = self
+            .main_menu_result_caches
+            .reveal_sequence
+            .checked_add(1)
+            .expect("main menu reveal sequence exhausted");
+        let ticket = MainMenuRevealTicket {
+            sequence: self.main_menu_result_caches.reveal_sequence,
+            query: self.root_search.query_stamp(),
+            result_revision: self.main_menu_result_revision(),
+            selection_revision: self.main_menu_selection_revision(),
+            viewport_revision: self.main_menu_viewport_revision(),
+            surface_generation: self.owned_revision_facts().surface_generation,
+        };
+        self.main_menu_result_caches.pending_reveal = Some(ticket);
         self.last_scrolled_index = None;
         cx.spawn(async move |this, cx| {
             for _ in 0..ATTEMPTS {
@@ -829,6 +858,18 @@ impl ScriptListApp {
                 let revealed = cx
                     .update(|cx| {
                         this.update(cx, |app, cx| {
+                            if app.main_menu_pending_reveal() != Some(ticket)
+                                || !matches!(app.current_view, AppView::ScriptList)
+                                || !app.root_search.query_is_current()
+                                || app.root_search.query_stamp() != ticket.query
+                                || app.main_menu_result_revision() != ticket.result_revision
+                                || app.main_menu_selection_revision() != ticket.selection_revision
+                                || app.main_menu_viewport_revision() != ticket.viewport_revision
+                                || app.owned_revision_facts().surface_generation != ticket.surface_generation
+                                || app.resolved_main_menu_selected_subject().is_none()
+                            {
+                                return true;
+                            }
                             let viewport_height = app.main_list_state.viewport_bounds().size.height;
                             let def = app.current_main_menu_theme.def();
                             let header_height = main_list_header_overlay_height(def);
@@ -841,7 +882,8 @@ impl ScriptListApp {
                             }
 
                             app.last_scrolled_index = None;
-                            app.reveal_main_list_selection_above_footer(reason);
+                            app.adjust_selected_item_above_footer_overlay(app.selected_index);
+                            tracing::trace!(target: "SCROLL_STATE", reason, "retried fenced minimal reveal");
                             cx.notify();
                             // A single reveal pass can land short: the model
                             // computes exact pixel offsets, but the applied
@@ -857,6 +899,13 @@ impl ScriptListApp {
                     break;
                 }
             }
+            let _ = cx.update(|cx| {
+                this.update(cx, |app, _cx| {
+                    if app.main_menu_pending_reveal() == Some(ticket) {
+                        app.main_menu_result_caches.pending_reveal = None;
+                    }
+                })
+            });
         })
         .detach();
     }
@@ -910,6 +959,9 @@ impl ScriptListApp {
     }
 
     fn scroll_to_selected_if_needed(&mut self, reason: &str) {
+        if self.resolved_main_menu_selected_subject().is_none() {
+            return;
+        }
         let target = self.selected_index;
 
         // Check if we've already scrolled to this index
@@ -1072,82 +1124,31 @@ impl ScriptListApp {
     /// just like move_selection_up/down. Otherwise, holding arrow keys
     /// can land on headers causing navigation to feel "stuck".
     fn move_selection_by(&mut self, delta: i32, cx: &mut Context<Self>) {
-        self.enter_keyboard_mode(cx);
-        if delta != 0 {
-            self.mark_main_menu_selection_user_moved();
+        if delta == 0 {
+            return;
         }
-
-        let selection_update = {
-            let (grouped_items, _) = self.get_grouped_results_cached();
-            let len = grouped_items.len();
-
-            if len == 0 {
-                None
-            } else {
-                let clamped_index = self.selected_index.min(len.saturating_sub(1));
-                let first_selectable = self.main_menu_result_caches.first_selectable_index();
-                let last_selectable = self.main_menu_result_caches.last_selectable_index();
-
-                if let (Some(first), Some(last)) = (first_selectable, last_selectable) {
-                    let target =
-                        (clamped_index as i32 + delta).clamp(first as i32, last as i32) as usize;
-
-                    let new_index = if delta > 0 {
-                        let mut idx = target;
-                        while idx < last
-                            && matches!(
-                                grouped_items.get(idx),
-                                Some(
-                                    GroupedListItem::SectionHeader(..)
-                                        | GroupedListItem::Status(..)
-                                )
-                            )
-                        {
-                            idx += 1;
-                        }
-                        idx
-                    } else if delta < 0 {
-                        let mut idx = target;
-                        while idx > first
-                            && matches!(
-                                grouped_items.get(idx),
-                                Some(
-                                    GroupedListItem::SectionHeader(..)
-                                        | GroupedListItem::Status(..)
-                                )
-                            )
-                        {
-                            idx -= 1;
-                        }
-                        idx
-                    } else {
-                        clamped_index
-                    };
-
-                    let resolved_index = if matches!(
-                        grouped_items.get(new_index),
-                        Some(GroupedListItem::SectionHeader(..) | GroupedListItem::Status(..))
-                    ) {
-                        clamped_index
-                    } else {
-                        new_index
-                    };
-
-                    if resolved_index != clamped_index {
-                        Some((resolved_index, "coalesced_nav"))
-                    } else {
-                        Some((clamped_index, "coalesced_nav_clamp"))
-                    }
+        self.flush_pending_main_menu_query(cx);
+        self.enter_keyboard_mode(cx);
+        let unarmed = self.spine_empty_subsearch_selection_suppressed();
+        let target = crate::scrolling::list_interaction::main_menu_navigation_target(
+            self.main_menu_committed_rows()
+                .iter()
+                .filter(|row| row.eligibility.selectable)
+                .map(|row| row.grouped_index),
+            self.selected_index,
+            delta,
+            unarmed,
+        );
+        if let Some(target) = target {
+            self.set_selected_index(
+                target,
+                if unarmed {
+                    "spine_empty_subsearch_arm"
                 } else {
-                    Some((clamped_index, "coalesced_nav_clamp"))
-                }
-            }
-        };
-
-        if let Some((new_index, reason)) = selection_update {
-            self.set_selected_index(new_index, reason, cx);
-        } else {
-            self.selected_index = 0;
+                    "coalesced_nav"
+                },
+                cx,
+            );
         }
     }
 
@@ -1188,7 +1189,7 @@ impl ScriptListApp {
         );
     }
 
-    pub(crate) fn main_menu_viewport_snapshot(&mut self) -> MainMenuViewportSnapshot {
+    pub(crate) fn main_menu_viewport_snapshot(&self) -> MainMenuViewportSnapshot {
         let offset = self.main_list_state.logical_scroll_top();
         let viewport_height = self.main_list_state.viewport_bounds().size.height;
         let query = self.computed_filter_text.clone();
@@ -1196,7 +1197,7 @@ impl ScriptListApp {
         let heights = ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme());
 
         let (first_visible_keys, fallback_item_ix, offset_in_item, selected_in_viewport) = {
-            let (grouped_items, flat_results) = self.get_grouped_results_cached();
+            let grouped_items = self.main_menu_result_caches.grouped_items();
             if grouped_items.is_empty() {
                 (Vec::new(), 0, gpui::px(0.0), false)
             } else {
@@ -1229,10 +1230,25 @@ impl ScriptListApp {
                 let offset_in_item = gpui::px((scroll_top - anchor_top).max(0.0));
                 let first_visible_keys = (fallback_item_ix..grouped_items.len())
                     .take(MAIN_MENU_VIEWPORT_ANCHOR_KEY_COUNT)
-                    .map(|ix| main_list_row_stable_key(&grouped_items[ix], ix, &flat_results))
+                    .map(|ix| {
+                        main_list_row_stable_key(
+                            &grouped_items[ix],
+                            ix,
+                            self.main_menu_committed_rows(),
+                        )
+                    })
                     .collect();
-                let selected_in_viewport =
-                    visible.is_some_and(|(first, last)| (first..last).contains(&selected_index));
+                let selected_in_viewport = self.resolved_main_menu_selected_subject().is_some()
+                    && main_list_safe_scroll_offset_for_item(
+                        grouped_items,
+                        offset,
+                        viewport_height,
+                        main_list_header_overlay_height(self.current_main_menu_theme.def()),
+                        main_list_footer_overlay_total_padding(),
+                        selected_index,
+                    )
+                    .is_none()
+                    && usable_height > gpui::px(0.0);
                 (
                     first_visible_keys,
                     fallback_item_ix,
@@ -1244,6 +1260,8 @@ impl ScriptListApp {
 
         MainMenuViewportSnapshot {
             query,
+            query_stamp: self.main_menu_committed_query_stamp(),
+            intent: self.main_menu_result_caches.viewport_intent,
             first_visible_keys,
             fallback_item_ix,
             offset_in_item,
@@ -1251,7 +1269,7 @@ impl ScriptListApp {
         }
     }
 
-    pub(crate) fn main_menu_interaction_snapshot(&mut self) -> MainMenuInteractionSnapshot {
+    pub(crate) fn main_menu_interaction_snapshot(&self) -> MainMenuInteractionSnapshot {
         MainMenuInteractionSnapshot {
             selection: self.main_menu_selection_snapshot(),
             viewport: self.main_menu_viewport_snapshot(),
@@ -1274,7 +1292,10 @@ impl ScriptListApp {
 
         self.last_scrolled_index = None;
 
-        self.main_list_row_generation = self.main_list_row_generation.wrapping_add(1);
+        self.main_list_row_generation = self
+            .main_list_row_generation
+            .checked_add(1)
+            .expect("main list row generation exhausted");
 
         if old_list_count != item_count {
             self.main_list_state.splice(0..old_list_count, item_count);
@@ -1316,15 +1337,17 @@ impl ScriptListApp {
                 offset_in_item: gpui::px(0.0),
             },
             MainListReplacementPolicy::PreserveViewport(snapshot)
-                if snapshot.query == self.computed_filter_text =>
+                if snapshot.query_stamp == self.main_menu_committed_query_stamp() =>
             {
                 let heights =
                     ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme());
-                let (grouped_items, flat_results) = self.get_grouped_results_cached();
+                let (grouped_items, _) = self.get_grouped_results_cached();
                 let replacement_keys: Vec<String> = grouped_items
                     .iter()
                     .enumerate()
-                    .map(|(ix, item)| main_list_row_stable_key(item, ix, &flat_results))
+                    .map(|(ix, item)| {
+                        main_list_row_stable_key(item, ix, self.main_menu_committed_rows())
+                    })
                     .collect();
                 crate::scrolling::list_geometry::restore_stable_viewport_offset(
                     &snapshot.first_visible_keys,
@@ -1340,6 +1363,10 @@ impl ScriptListApp {
             },
         };
         self.main_list_state.scroll_to(restored_offset);
+        self.main_menu_result_caches.viewport_revision = self
+            .main_menu_viewport_revision()
+            .checked_add(1)
+            .expect("main menu viewport revision exhausted");
 
         if crate::logging::filter_perf_trace_enabled() {
             tracing::info!(
@@ -1366,74 +1393,13 @@ impl ScriptListApp {
     /// # Returns
     /// `true` if selection was changed, `false` if it was already valid.
     pub fn validate_selection_bounds(&mut self, cx: &mut Context<Self>) -> bool {
-        enum ValidationState {
-            Empty,
-            NonEmpty {
-                valid_idx: usize,
-                has_selectable: bool,
-            },
+        let changed = self.reconcile_main_menu_selection_intent();
+        self.main_menu_fallback_state.clear();
+        if changed {
+            self.clear_menu_syntax_filter_accept_hint();
+            cx.notify();
         }
-
-        let validation_state = {
-            let (grouped_items, _) = self.get_grouped_results_cached();
-            let item_count = grouped_items.len();
-
-            if item_count == 0 {
-                ValidationState::Empty
-            } else {
-                let clamped_index = self.selected_index.min(item_count.saturating_sub(1));
-                let has_selectable = self.main_menu_result_caches.has_selectable_grouped_item();
-                ValidationState::NonEmpty {
-                    valid_idx: validated_selection_index(&grouped_items, clamped_index),
-                    has_selectable,
-                }
-            }
-        };
-
-        match validation_state {
-            ValidationState::Empty => {
-                // Empty list - reset all selection state
-                let changed = self.selected_index != 0
-                    || self.hovered_index.is_some()
-                    || self.last_scrolled_index.is_some();
-
-                self.selected_index = 0;
-                self.clear_menu_syntax_filter_accept_hint();
-                self.hovered_index = None;
-                self.last_scrolled_index = None;
-
-                self.main_menu_fallback_state.clear();
-
-                if changed {
-                    cx.notify();
-                }
-                changed
-            }
-            ValidationState::NonEmpty {
-                valid_idx,
-                has_selectable,
-            } => {
-                // List has items - coerce selection to a valid selectable item
-                self.main_menu_fallback_state.clear();
-
-                if valid_idx == 0 && !has_selectable {
-                    // No selectable items (list is all headers) - reset to 0
-                    if self.selected_index != 0 {
-                        self.clear_menu_syntax_filter_accept_hint();
-                        self.selected_index = 0;
-                        cx.notify();
-                        return true;
-                    }
-                } else if self.selected_index != valid_idx {
-                    self.clear_menu_syntax_filter_accept_hint();
-                    self.selected_index = valid_idx;
-                    cx.notify();
-                    return true;
-                }
-
-                false
-            }
-        }
+        changed
     }
 
     /// Ensure the navigation flush task is running. Spawns a background task

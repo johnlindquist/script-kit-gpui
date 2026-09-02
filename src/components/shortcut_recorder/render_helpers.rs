@@ -59,6 +59,7 @@ impl ShortcutRecorder {
         };
 
         div()
+            .debug_selector(|| "shortcut-key-display".into())
             .w_full()
             .h(px(KEY_DISPLAY_HEIGHT))
             .px(px(KEY_DISPLAY_PADDING))
@@ -78,6 +79,7 @@ impl ShortcutRecorder {
 
         if let Some(ref conflict) = self.conflict {
             div()
+                .debug_selector(|| "shortcut-conflict-warning".into())
                 .w_full()
                 .mt(px(8.))
                 .text_xs()

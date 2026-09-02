@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Once;
 
 /// Thin wrapper delegating to the canonical implementation in `window_resize`.
 fn main_window_sizing_from_grouped_items(
@@ -58,31 +57,13 @@ impl ScriptListApp {
             return label.to_string();
         }
 
-        let Some(selected_index) = crate::list_item::coerce_selection(
-            self.main_menu_result_caches.grouped_items(),
-            self.selected_index,
-        ) else {
-            return "Run".to_string();
-        };
-
-        let Some(result_idx) = self
-            .main_menu_result_caches
-            .flat_result_index_for_grouped_item(selected_index)
-        else {
-            return "Run".to_string();
-        };
-
-        if self
-            .inline_calculator_for_result_index(result_idx)
-            .is_some()
-        {
-            return "Copy".to_string();
+        match self.resolved_main_menu_selected_subject() {
+            Some(ResolvedMainMenuSelection::SearchResult { result, .. }) => {
+                main_window_result_action_label(result, frontmost_app_name.as_deref())
+            }
+            Some(ResolvedMainMenuSelection::Calculator { .. }) => "Copy".to_string(),
+            None => "Run".to_string(),
         }
-
-        self.main_menu_result_caches
-            .search_result_for_flat_index(result_idx)
-            .map(|result| main_window_result_action_label(result, frontmost_app_name.as_deref()))
-            .unwrap_or_else(|| "Run".to_string())
     }
 
     pub(crate) fn dispatch_main_window_footer_action(
@@ -92,17 +73,17 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
         source: &'static str,
     ) {
-        let Some(config) = self.main_window_footer_config_with_cx(Some(&*cx)) else {
-            tracing::info!(
-                target: "script_kit::footer_popup",
-                event = "main_window_footer_action_blocked",
-                source,
-                action = ?action,
-                reason = "no_current_footer",
-                "Ignored footer action without a live host surface"
-            );
+        if matches!(action, crate::footer_popup::FooterAction::Run)
+            && matches!(self.current_view, AppView::ScriptList)
+        {
+            self.set_main_menu_dispatch_observation(None);
+            self.flush_pending_main_menu_query(cx);
+        }
+        let Some(mut config) = self.main_window_footer_config_with_cx(Some(&*cx)) else {
+            tracing::info!(target: "script_kit::footer_popup", source, action = ?action, reason = "no_current_footer", "Ignored footer action without a live host surface");
             return;
         };
+        self.enrich_footer_config_with_agent_chat_info(&mut config);
 
         let live_header_affordance = source == "main_view_context_click"
             && match action {
@@ -189,14 +170,35 @@ impl ScriptListApp {
 
         match action {
             crate::footer_popup::FooterAction::Tips => {
-                let builtins = crate::config::load_config().get_builtins();
+                let builtins = self.config.get_builtins();
                 if let Some(entry) =
                     crate::builtins::resolve_builtin_entry("builtin/tips", &builtins)
                 {
-                    self.execute_builtin(&entry, cx);
+                    let _outcome = self.execute_builtin(&entry, cx);
                 }
             }
             crate::footer_popup::FooterAction::Run => {
+                if let AppView::SettingsView {
+                    filter,
+                    selected_index,
+                } = &self.current_view
+                {
+                    let items = self.get_settings_items();
+                    if let Some(descriptor) = selected_settings_action_descriptor(
+                        &items,
+                        filter,
+                        *selected_index,
+                        self.settings_action_availability(),
+                    ) {
+                        self.submit_settings_action(
+                            descriptor.action_id,
+                            SettingsActivationSource::NativeFooter,
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
                 if matches!(self.current_view, AppView::ScriptList) {
                     if self.should_consume_menu_syntax_trigger_picker_press_enter(source)
                         || self.should_consume_script_list_enter_after_submit(source)
@@ -204,11 +206,7 @@ impl ScriptListApp {
                     {
                         return;
                     }
-                    if self.main_menu_fallback_state.is_active() {
-                        self.execute_selected_fallback(cx);
-                    } else {
-                        self.execute_selected(cx);
-                    }
+                    let _dispatch = self.execute_selected(cx);
                 } else if matches!(self.current_view, AppView::PermissionsWizardView { .. }) {
                     self.dispatch_permissions_wizard_action(
                         crate::permissions_wizard::PermissionsWizardAction::GrantSelected,
@@ -293,7 +291,7 @@ impl ScriptListApp {
                     let values = entity.read(cx).collect_values(cx);
                     self.submit_prompt_response(prompt_id, Some(values), cx);
                 } else if !self.try_run_ready_agent_chat_script(cx) {
-                    self.execute_selected(cx);
+                    let _dispatch = self.execute_selected(cx);
                 }
             }
             crate::footer_popup::FooterAction::Actions => {
@@ -527,7 +525,8 @@ impl ScriptListApp {
                 );
                 if !matches!(self.current_view, AppView::ScriptList) {
                     self.current_view = AppView::ScriptList;
-                    self.reset_main_menu_selection_user_moved();
+                    self.note_main_route_changed();
+                    self.reset_main_menu_selection_intent();
                 }
                 self.cwd_pick_mode = true;
                 self.open_file_search_view("~/".to_string(), FileSearchPresentation::Full, cx);
@@ -585,43 +584,37 @@ impl ScriptListApp {
                 }
                 if !matches!(self.current_view, AppView::ScriptList) {
                     self.current_view = AppView::ScriptList;
-                    self.reset_main_menu_selection_user_moved();
+                    self.note_main_route_changed();
+                    self.reset_main_menu_selection_intent();
                 }
                 self.open_profile_search(cx);
             }
         }
     }
 
-    /// If the current view is an Agent Chat chat with a validated `SCRIPT_READY` receipt,
-    /// execute that specific script and return `true`. Otherwise return `false`
-    /// so the caller can fall back to `execute_selected`.
-    /// Start a one-time async bridge that drains `footer_action_channel()` and
-    /// dispatches each action into the existing `ScriptListApp` methods.
-    fn ensure_main_footer_action_listener(&self, window: &Window, cx: &mut Context<Self>) {
-        MAIN_FOOTER_ACTION_LISTENER.call_once(|| {
-            let rx = crate::footer_popup::footer_action_channel().1.clone();
-            tracing::info!(
-                target: "script_kit::footer_popup",
-                event = "native_footer_listener_started",
-                "Started native footer action listener"
-            );
-            cx.spawn_in(window, async move |this, cx| {
-                while let Ok(action) = rx.recv().await {
-                    if let Err(error) = this.update_in(cx, |app, window, cx| {
-                        app.handle_main_footer_action(action, window, cx);
-                    }) {
-                        tracing::warn!(
-                            target: "script_kit::footer_popup",
-                            event = "native_footer_action_dispatch_failed",
-                            action = ?action,
-                            %error,
-                            "Failed to dispatch native footer action into ScriptListApp"
-                        );
-                    }
+    /// One receiver task per owning main root and GPUI window lifetime.
+    fn ensure_main_footer_action_listener(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.main_footer_action_task.is_some() {
+            return;
+        }
+        let rx = crate::footer_popup::footer_action_receiver(window);
+        let lifetime = crate::footer_popup::footer_owner_subscription(window, cx);
+        self.main_footer_action_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let _lifetime = lifetime;
+            while let Ok(event) = rx.recv().await {
+                if this
+                    .update_in(cx, |app, window, cx| {
+                        if let Some(action) = event.accept(window) {
+                            app.handle_main_footer_action(action, window, cx);
+                            event.complete(window);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
                 }
-            })
-            .detach();
-        });
+            }
+        }));
     }
 
     fn standard_main_window_footer_buttons(&self) -> Vec<crate::footer_popup::FooterButtonConfig> {
@@ -678,16 +671,13 @@ impl ScriptListApp {
             return None;
         }
 
-        let selected_index = crate::list_item::coerce_selection(
-            self.main_menu_result_caches.grouped_items(),
-            self.selected_index,
-        )?;
-        let result_index = self
-            .main_menu_result_caches
-            .flat_result_index_for_grouped_item(selected_index)?;
-        self.main_menu_result_caches
-            .search_result_for_flat_index(result_index)?
-            .command_execution_block_reason()
+        match self.resolved_main_menu_selected_subject() {
+            Some(ResolvedMainMenuSelection::SearchResult { result, .. }) => {
+                crate::main_window_preflight::command_block_reason(self, result)
+            }
+            Some(ResolvedMainMenuSelection::Calculator { .. }) => None,
+            None => Some("No current selected result."),
+        }
     }
 
     /// Views whose actions are all per-entry have a dead ⌘K toggle when no
@@ -726,63 +716,6 @@ impl ScriptListApp {
             && !self.quick_terminal_can_apply_back()
     }
 
-    fn quick_terminal_footer_buttons(&self) -> Vec<crate::footer_popup::FooterButtonConfig> {
-        use crate::footer_popup::{FooterAction, FooterButtonConfig};
-
-        let footer_disabled = self.main_window_footer_buttons_blocked();
-        let enabled = !footer_disabled;
-        let can_apply = self.quick_terminal_can_apply_back();
-        let can_attach_to_agent = self.quick_terminal_can_attach_to_agent_chat();
-
-        let mut buttons = Vec::with_capacity(if can_apply || can_attach_to_agent {
-            2
-        } else {
-            1
-        });
-        if can_apply {
-            buttons
-                .push(FooterButtonConfig::new(FooterAction::Apply, "⌘↩", "Apply").enabled(enabled));
-        } else if can_attach_to_agent {
-            buttons.push(FooterButtonConfig::new(FooterAction::Ai, "⌘↩", "Agent").enabled(enabled));
-        }
-        buttons.push(FooterButtonConfig::new(FooterAction::Close, "⌘W", "Close").enabled(enabled));
-
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "quick_terminal_footer_buttons_resolved",
-            can_apply,
-            can_attach_to_agent,
-            footer_disabled,
-            button_count = buttons.len(),
-            "Resolved quick-terminal native footer buttons"
-        );
-
-        buttons
-    }
-
-    /// Footer buttons for an in-window `ConfirmPrompt`. Reuses the native
-    /// Apply/Close slots so no AppKit ObjC selector wiring needs to change —
-    /// only the labels and `selected` flag change per options + focused button.
-    fn confirm_prompt_footer_buttons(
-        &self,
-        options: &crate::confirm::ParentConfirmOptions,
-        focused_button: ConfirmFocusedButton,
-    ) -> Vec<crate::footer_popup::FooterButtonConfig> {
-        use crate::footer_popup::{FooterAction, FooterButtonConfig};
-
-        let confirm_focused = matches!(focused_button, ConfirmFocusedButton::Confirm);
-        let cancel_focused = matches!(focused_button, ConfirmFocusedButton::Cancel);
-
-        vec![
-            FooterButtonConfig::new(FooterAction::Apply, "↵", options.confirm_text.to_string())
-                .selected(confirm_focused)
-                .enabled(true),
-            FooterButtonConfig::new(FooterAction::Close, "Esc", options.cancel_text.to_string())
-                .selected(cancel_focused)
-                .enabled(true),
-        ]
-    }
-
     fn main_window_footer_buttons_for_current_view(
         &self,
         cx: Option<&gpui::App>,
@@ -808,6 +741,33 @@ impl ScriptListApp {
         }
 
         let enabled = !self.main_window_footer_buttons_blocked();
+        if let AppView::SettingsView {
+            filter,
+            selected_index,
+        } = &self.current_view
+        {
+            use crate::footer_popup::{FooterAction, FooterButtonConfig};
+            let items = self.get_settings_items();
+            let descriptor = selected_settings_action_descriptor(
+                &items,
+                filter,
+                *selected_index,
+                self.settings_action_availability(),
+            );
+            let mut buttons = Vec::new();
+            if let Some(descriptor) = descriptor {
+                let mut button =
+                    FooterButtonConfig::new(FooterAction::Run, "↵", descriptor.primary_verb)
+                        .enabled(enabled && descriptor.enabled);
+                if let Some(reason) = descriptor.disabled_reason {
+                    button = button.disabled_reason(reason);
+                }
+                buttons.push(button);
+            }
+            buttons
+                .push(FooterButtonConfig::new(FooterAction::Close, "Esc", "Back").enabled(enabled));
+            return buttons;
+        }
 
         if matches!(self.current_view, AppView::About { .. }) {
             return about_footer_buttons(enabled);
@@ -1442,7 +1402,7 @@ impl ScriptListApp {
         let mut config = MainWindowFooterConfig::new(surface, buttons);
         if matches!(self.current_view, AppView::ScriptList)
             && self.filter_text.trim().is_empty()
-            && crate::config::load_config().is_tips_enabled()
+            && self.config.is_tips_enabled()
         {
             if let Some(tip) = script_kit_gpui::tips::current_footer_tip() {
                 config.left_info = Some(crate::footer_popup::FooterLeftInfo {
@@ -1533,7 +1493,7 @@ impl ScriptListApp {
         );
 
         if self.main_window_footer_config_with_cx(Some(&*cx)).is_none()
-            || !crate::is_main_window_visible()
+            || (!window.is_owned_hidden() && !crate::is_main_window_visible())
         {
             tracing::info!(
                 target: "script_kit::footer_popup",
@@ -1550,10 +1510,14 @@ impl ScriptListApp {
         self.dispatch_main_window_footer_action(action, window, cx, "native_footer");
     }
 
-    pub(crate) fn sync_main_footer_popup(&self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync_main_footer_popup(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ensure_main_footer_action_listener(window, cx);
 
-        let mut config = if crate::is_main_window_visible() {
+        let mut config = if window.is_owned_hidden() || crate::is_main_window_visible() {
             self.main_window_footer_config_with_cx(Some(&*cx))
         } else {
             None
@@ -1574,6 +1538,9 @@ impl ScriptListApp {
             "Syncing native main window footer"
         );
 
+        if !crate::footer_popup::footer_config_matches(window.window_handle(), config.as_ref()) {
+            self.mark_main_presentation_changed();
+        }
         crate::footer_popup::sync_main_footer_popup(window, config.as_ref(), &mut *cx);
     }
 
@@ -1606,11 +1573,10 @@ impl ScriptListApp {
         }
     }
 
-    pub(crate) fn render_clickable_main_view_context_zone(
+    pub(crate) fn prompt_header_context(
         &self,
-        menu_def: crate::designs::MainMenuThemeDef,
         cx: &mut gpui::Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> crate::prompts::base::PromptHeaderContext {
         let zone = self.main_view_context_zone_spec();
         let app = cx.entity().downgrade();
         let handler: crate::components::main_view_chrome::SemanticChipActionHandler =
@@ -1666,12 +1632,18 @@ impl ScriptListApp {
                     }
                 });
             });
-        crate::components::main_view_chrome::render_main_view_context_zone_required(
-            &self.theme,
-            menu_def,
+        crate::prompts::base::PromptHeaderContext {
             zone,
-            handler,
-        )
+            on_action: handler,
+        }
+    }
+
+    pub(crate) fn render_clickable_main_view_context_zone(
+        &self,
+        menu_def: crate::designs::MainMenuThemeDef,
+        cx: &mut gpui::Context<Self>,
+    ) -> gpui::AnyElement {
+        self.prompt_header_context(cx).render(&self.theme, menu_def)
     }
 
     pub(crate) fn render_clickable_main_view_context_header(
@@ -1713,6 +1685,8 @@ impl ScriptListApp {
 
     pub(crate) fn toggle_logs(&mut self, cx: &mut Context<Self>) {
         self.show_logs = !self.show_logs;
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
         cx.notify();
     }
 
@@ -1766,10 +1740,10 @@ impl ScriptListApp {
                 if filtered.is_empty() && choices.is_empty() {
                     Some((mini_prompt_view_type(), 0))
                 } else {
-                    Some((mini_prompt_view_type(), filtered.len().min(5)))
+                    Some((mini_prompt_view_type(), filtered.len()))
                 }
             }
-            AppView::MicroPrompt { .. } => Some((ViewType::ArgPromptNoChoices, 0)),
+            AppView::MicroPrompt { .. } => Some((ViewType::MicroPrompt, 0)),
             AppView::DivPrompt { .. } => Some((ViewType::DivPrompt, 0)),
             AppView::FormPrompt { .. } => Some((ViewType::DivPrompt, 0)), // Use DivPrompt size for forms
             AppView::EditorPrompt { .. } => Some((ViewType::EditorPrompt, 0)),
@@ -2154,21 +2128,31 @@ impl ScriptListApp {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        let restore = if let AppView::ConfirmPrompt {
+        let AppView::ConfirmPrompt {
             sender, previous, ..
         } = &self.current_view
-        {
-            let _ = sender.try_send(confirmed);
-            Some((**previous).clone())
-        } else {
-            None
+        else {
+            return;
         };
-
-        if let Some(previous) = restore {
-            self.current_view = previous;
-            self.sync_main_footer_popup(window, cx);
-            cx.notify();
+        if let Err(error) = sender.try_send(confirmed) {
+            self.show_error_toast(format!("Unable to deliver confirmation: {error}"), cx);
+            return;
         }
+        if self
+            .prompt_completion
+            .as_ref()
+            .is_some_and(|binding| binding.is_confirm_lifetime() && !binding.observation().retired)
+        {
+            // The bound completion owner restores only after the SDK/local sink succeeds.
+            return;
+        }
+        let previous = (**previous).clone();
+        self.transition_current_view_and_rekey_main_automation_surface(previous);
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
+        self.sync_main_footer_popup(window, cx);
+        cx.notify();
     }
 
     /// Update window size using deferred execution (SAFE during render/event cycles).
@@ -2303,20 +2287,30 @@ impl ScriptListApp {
     pub(crate) fn try_set_prompt_input(&mut self, text: String, cx: &mut Context<Self>) -> bool {
         match &mut self.current_view {
             AppView::ArgPrompt { .. } => {
+                self.filter_text = text.clone();
+                self.pending_filter_sync = true;
                 self.arg_input.set_text(text);
-                self.arg_selected_index = 0;
+                self.set_arg_selected_index(0);
                 self.arg_list_scroll_handle
                     .scroll_to_item(0, ScrollStrategy::Top);
-                self.update_window_size();
+                self.mark_main_data_changed();
+                if !crate::runtime_policy::is_owned_evaluation() {
+                    self.update_window_size();
+                }
                 cx.notify();
                 true
             }
             AppView::MiniPrompt { .. } | AppView::MicroPrompt { .. } => {
+                self.filter_text = text.clone();
+                self.pending_filter_sync = true;
                 self.arg_input.set_text(text);
-                self.arg_selected_index = 0;
+                self.set_arg_selected_index(0);
                 self.arg_list_scroll_handle
                     .scroll_to_item(0, ScrollStrategy::Top);
-                self.update_window_size();
+                self.mark_main_data_changed();
+                if !crate::runtime_policy::is_owned_evaluation() {
+                    self.update_window_size();
+                }
                 cx.notify();
                 true
             }
@@ -2353,7 +2347,13 @@ impl ScriptListApp {
                 selected_index,
                 ..
             } => {
-                let results = ScriptListApp::resolve_file_search_results(&text);
+                let results = match ScriptListApp::resolve_file_search_results(&text) {
+                    Ok(results) => results,
+                    Err(error) => {
+                        self.show_error_toast(format!("File search failed: {error}"), cx);
+                        return true;
+                    }
+                };
                 logging::log(
                     "EXEC",
                     &format!(

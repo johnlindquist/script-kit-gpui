@@ -81,6 +81,10 @@ fn all_action_kinds_round_trip_to_camel_case() {
         (MainWindowPreflightActionKind::RunFallback, "runFallback"),
         (MainWindowPreflightActionKind::AskAi, "askAi"),
         (
+            MainWindowPreflightActionKind::CopyCalculator,
+            "copyCalculator",
+        ),
+        (
             MainWindowPreflightActionKind::PasteResumeCommand,
             "pasteResumeCommand",
         ),

@@ -337,6 +337,9 @@ fn create_new_script_using_builder<F>(
 where
     F: Fn(&str) -> String,
 {
+    if let Some(scope) = crate::runtime_policy::owned_evaluation() {
+        scope.require_owned_path(scripts_dir)?;
+    }
     let sanitized_name = sanitize_name(name);
     validate_sanitized_name(name, &sanitized_name, "ts", "Script")?;
 

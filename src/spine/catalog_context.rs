@@ -181,7 +181,7 @@ pub(super) fn build_context_root_rows_with_preview(
         }
     }
 
-    rows.sort_by(|a, b| b.score.cmp(&a.score));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.score));
     rows
 }
 

@@ -1,11 +1,12 @@
 // ============================================================================
-// Legacy filesystem cache (kept for backward compat during migration)
+// Per-application filesystem icon cache
 // ============================================================================
 
 /// Get the icon cache directory path (~/.scriptkit/cache/app-icons/)
-fn get_icon_cache_dir() -> Option<PathBuf> {
+fn get_icon_cache_dir() -> Result<PathBuf> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let kit = PathBuf::from(shellexpand::tilde("~/.scriptkit").as_ref());
-    Some(kit.join("cache").join("app-icons"))
+    Ok(kit.join("cache").join("app-icons"))
 }
 
 /// Generate a unique cache key from an app path using a hash
@@ -20,34 +21,47 @@ fn hash_path(path: &Path) -> String {
 /// Cache invalidation is based on the app bundle's modification time.
 /// The cache file's mtime is set to match the app's mtime for easy comparison.
 #[cfg(target_os = "macos")]
-fn get_or_extract_icon(app_path: &Path) -> Option<Vec<u8>> {
+fn get_or_extract_icon(app_path: &Path) -> Result<Option<Vec<u8>>> {
     let start = Instant::now();
     let cache_dir = get_icon_cache_dir()?;
     let cache_key = hash_path(app_path);
     let cache_file = cache_dir.join(format!("{}.png", cache_key));
 
-    // Get app's modification time
-    let app_mtime = app_path.metadata().ok()?.modified().ok()?;
-
-    // Check if cache file exists and is valid
-    if cache_file.exists() {
-        if let Ok(cache_meta) = cache_file.metadata() {
-            if let Ok(cache_mtime) = cache_meta.modified() {
-                // Cache is valid if its mtime matches or is newer than app mtime
-                if cache_mtime >= app_mtime {
-                    // Load from cache
-                    if let Ok(png_bytes) = std::fs::read(&cache_file) {
+    let app_mtime = app_path
+        .metadata()
+        .with_context(|| format!("Reading application icon metadata: {}", app_path.display()))?
+        .modified()
+        .context("Reading application icon modification time")?;
+    match cache_file.metadata() {
+        Ok(metadata) => {
+            if metadata
+                .modified()
+                .context("Reading cached application icon modification time")?
+                >= app_mtime
+            {
+                match fs::read(&cache_file) {
+                    Ok(bytes) => {
                         ICONS_FROM_CACHE.fetch_add(1, Ordering::Relaxed);
-                        trace!(
-                            app = %app_path.display(),
-                            duration_ms = start.elapsed().as_millis(),
-                            source = "disk_cache",
-                            "Loaded icon"
-                        );
-                        return Some(png_bytes);
+                        trace!(app = %app_path.display(), duration_ms = start.elapsed().as_millis(), source = "disk_cache", "Loaded icon");
+                        return Ok(Some(bytes));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Reading cached application icon: {}", cache_file.display())
+                        })
                     }
                 }
             }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Reading cached application icon metadata: {}",
+                    cache_file.display()
+                )
+            })
         }
     }
 
@@ -55,10 +69,13 @@ fn get_or_extract_icon(app_path: &Path) -> Option<Vec<u8>> {
     // Note: Color channel swap (BGRA -> RGBA) is handled at decode time in
     // decode_png_to_render_image_with_rb_swap() for performance (no PNG re-encoding needed)
     let extract_start = Instant::now();
-    let png_bytes = extract_app_icon(app_path)?;
+    let Some(png_bytes) = extract_app_icon(app_path)? else {
+        return Ok(None);
+    };
     let extract_ms = extract_start.elapsed().as_millis();
 
-    // Save to cache
+    // Cache writes are optional acceleration; a write failure does not discard
+    // successfully read icon data or change the existing cache location/policy.
     if let Err(e) = std::fs::create_dir_all(&cache_dir) {
         warn!(
             error = %e,
@@ -94,7 +111,7 @@ fn get_or_extract_icon(app_path: &Path) -> Option<Vec<u8>> {
         }
     }
 
-    Some(png_bytes)
+    Ok(Some(png_bytes))
 }
 
 /// Get icon cache statistics
@@ -104,8 +121,8 @@ fn get_or_extract_icon(app_path: &Path) -> Option<Vec<u8>> {
 #[allow(dead_code)]
 pub fn get_icon_cache_stats() -> (usize, u64) {
     let cache_dir = match get_icon_cache_dir() {
-        Some(dir) => dir,
-        None => return (0, 0),
+        Ok(dir) => dir,
+        Err(_) => return (0, 0),
     };
 
     if !cache_dir.exists() {

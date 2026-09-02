@@ -206,10 +206,53 @@ impl DispatchPhase {
     }
 }
 
+/// An application publication attached to the notification that invalidated it.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedNotificationCause {
+    /// Application-defined publication category.
+    pub kind: &'static str,
+    /// Application publication sequence associated with this notification.
+    pub sequence: u64,
+    /// Notification epoch carrying this publication cause.
+    pub notification_epoch: u64,
+}
+
+/// Completion evidence for a guarded owned draw; scheduled never means forced.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug)]
+pub struct OwnedFrameCompletion {
+    /// Guarded draw generation that has completed.
+    pub generation: u64,
+    /// Whether invalidation scheduled this draw rather than forced capture.
+    pub scheduled: bool,
+    /// Invalidation epoch consumed by the completed draw.
+    pub invalidation_epoch: u64,
+    /// Notification epoch associated with the completed invalidation.
+    pub notification_epoch: u64,
+    /// Last observed-entity notification consumed by this draw, sampled before paint.
+    pub observed_notification_epoch: u64,
+    /// Publication cause sampled with the observed entity notification.
+    pub observed_notification_cause: Option<OwnedNotificationCause>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+struct OwnedInvalidations {
+    epoch: u64,
+    notification_epoch: u64,
+    observed_entity: Option<EntityId>,
+    observed_notification_epoch: u64,
+    observed_notification_cause: Option<OwnedNotificationCause>,
+}
+
 struct WindowInvalidatorInner {
     pub dirty: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
+    #[cfg(any(test, feature = "test-support"))]
+    owned: Option<OwnedInvalidations>,
 }
 
 #[derive(Clone)]
@@ -224,6 +267,8 @@ impl WindowInvalidator {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                owned: None,
             })),
         }
     }
@@ -233,10 +278,39 @@ impl WindowInvalidator {
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(owned) = inner.owned.as_mut() {
+                owned.epoch = owned
+                    .epoch
+                    .checked_add(1)
+                    .expect("owned invalidation overflow");
+                owned.notification_epoch = owned.epoch;
+                if owned.observed_entity == Some(entity) {
+                    owned.observed_notification_epoch = owned.epoch;
+                }
+            }
             cx.push_effect(Effect::Notify { emitter: entity });
             true
         } else {
             false
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_owned_notification_cause(
+        &self,
+        entity: EntityId,
+        kind: &'static str,
+        sequence: u64,
+    ) {
+        if let Some(owned) = self.inner.borrow_mut().owned.as_mut() {
+            if owned.observed_entity == Some(entity) {
+                owned.observed_notification_cause = Some(OwnedNotificationCause {
+                    kind,
+                    sequence,
+                    notification_epoch: owned.observed_notification_epoch,
+                });
+            }
         }
     }
 
@@ -245,7 +319,17 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
-        self.inner.borrow_mut().dirty = dirty
+        let mut inner = self.inner.borrow_mut();
+        inner.dirty = dirty;
+        #[cfg(any(test, feature = "test-support"))]
+        if dirty {
+            if let Some(owned) = inner.owned.as_mut() {
+                owned.epoch = owned
+                    .epoch
+                    .checked_add(1)
+                    .expect("owned invalidation overflow");
+            }
+        }
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -871,6 +955,57 @@ pub struct DebugBoundsEntry {
     pub clip_bounds: Bounds<Pixels>,
 }
 
+/// Application-owned metadata captured by an actual paint callback. Cached
+/// subtree replay keeps this payload with the scene instead of sampling a model.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug)]
+pub struct OwnedPaintBinding {
+    /// Application-defined category of the painted subject.
+    pub kind: &'static str,
+    /// Stable application identity of the painted subject.
+    pub id: SharedString,
+    /// Paint callback bounds before clipping.
+    pub bounds: Bounds<Pixels>,
+    /// Intersection of the paint bounds and clip bounds.
+    pub visible_bounds: Bounds<Pixels>,
+    /// Clip bounds captured for this paint callback.
+    pub clip_bounds: Bounds<Pixels>,
+    /// Shared semantic metadata retained with the painted scene.
+    pub metadata: Rc<serde_json::Value>,
+    retained_bytes: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+const MAX_OWNED_PAINT_BINDINGS: usize = 512;
+#[cfg(any(test, feature = "test-support"))]
+const MAX_OWNED_PAINT_BINDING_BYTES: usize = 512 * 1024;
+
+#[cfg(any(test, feature = "test-support"))]
+fn owned_metadata_size(value: &serde_json::Value) -> serde_json::Result<usize> {
+    // The budget is serialized evidence, not an assumed worst-case escape of
+    // every UTF-8 byte. Count through the serializer without retaining a copy.
+    struct ByteCount(usize);
+
+    impl std::io::Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|total| *total <= MAX_OWNED_PAINT_BINDING_BYTES)
+                .ok_or_else(|| std::io::Error::other("owned_paint_binding_overflow"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut bytes = ByteCount(0);
+    serde_json::to_writer(&mut bytes, value)?;
+    Ok(bytes.0)
+}
+
 /// Capture-only semantic category for a paint scope.
 ///
 /// These values intentionally stay small and transport-agnostic. Higher-level
@@ -979,6 +1114,16 @@ struct FidelityScope {
     metadata: Option<serde_json::Value>,
 }
 
+/// Required resources omitted from one completed owned-hidden paint frame.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OwnedRenderResourceStatus {
+    /// Resources still loading without a painted, explicitly declared replacement.
+    pub pending: u32,
+    /// Resources that failed to load or paint without an explicit replacement.
+    pub failed: u32,
+}
+
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
@@ -1001,6 +1146,14 @@ pub(crate) struct Frame {
     fidelity_paint_atoms: Vec<FidelityPaintAtom>,
     #[cfg(any(test, feature = "test-support"))]
     fidelity_scope_summaries: Vec<FidelityScopeSummary>,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_render_resources: OwnedRenderResourceStatus,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_paint_bindings: Vec<OwnedPaintBinding>,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_paint_binding_bytes: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_paint_binding_overflow: bool,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1033,6 +1186,10 @@ pub(crate) struct PaintIndex {
     fidelity_paint_atoms_index: usize,
     #[cfg(any(test, feature = "test-support"))]
     fidelity_scope_summaries_index: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_render_resources: OwnedRenderResourceStatus,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_paint_bindings_index: usize,
 }
 
 impl Frame {
@@ -1060,6 +1217,14 @@ impl Frame {
             fidelity_paint_atoms: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             fidelity_scope_summaries: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            owned_render_resources: OwnedRenderResourceStatus::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            owned_paint_bindings: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            owned_paint_binding_bytes: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            owned_paint_binding_overflow: false,
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1091,6 +1256,10 @@ impl Frame {
             self.debug_bounds_log.clear();
             self.fidelity_paint_atoms.clear();
             self.fidelity_scope_summaries.clear();
+            self.owned_render_resources = OwnedRenderResourceStatus::default();
+            self.owned_paint_bindings.clear();
+            self.owned_paint_binding_bytes = 0;
+            self.owned_paint_binding_overflow = false;
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1192,6 +1361,9 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
     rendered_frame_generation: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_completion_observer:
+        Option<Box<dyn FnMut(&Window, &App, OwnedFrameCompletion) -> Result<()>>>,
     #[cfg(any(test, feature = "test-support"))]
     fidelity_capture_target: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1382,6 +1554,11 @@ impl Window {
         options: WindowOptions,
         cx: &mut App,
     ) -> Result<Self> {
+        if let Some(guard) = cx.platform.owned_hidden_guard() {
+            if !matches!(options.window_bounds, Some(WindowBounds::Windowed(_))) {
+                return Err(guard.refuse("owned_hidden_explicit_windowed_bounds_required"));
+            }
+        }
         let WindowOptions {
             window_bounds,
             titlebar,
@@ -1714,7 +1891,9 @@ impl Window {
             platform_window.set_app_id(&app_id);
         }
 
-        platform_window.map_window().unwrap();
+        if platform_window.owned_hidden_guard().is_none() {
+            platform_window.map_window()?;
+        }
 
         Ok(Window {
             handle,
@@ -1740,6 +1919,8 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             rendered_frame_generation: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            owned_completion_observer: None,
             #[cfg(any(test, feature = "test-support"))]
             fidelity_capture_target: std::env::var("SCRIPT_KIT_FIDELITY_CAPTURE").ok(),
             #[cfg(any(test, feature = "test-support"))]
@@ -2240,6 +2421,11 @@ impl Window {
     /// If called from within a view, it will notify that view on the next frame. Otherwise, it will refresh the entire window.
     pub fn request_animation_frame(&self) {
         self.needs_present.set(true);
+        if self.is_owned_hidden() {
+            // The owned pump, not a native frame timer, advances animations.
+            // A render-time request must remain dirty for its next bounded draw.
+            self.invalidator.set_dirty(true);
+        }
         self.platform_window.request_frame();
         let entity = self
             .rendered_entity_stack
@@ -2367,6 +2553,7 @@ impl Window {
                         | "main-view-input-shell"
                         | "main-view-input-body"
                         | "native-main-window-footer-spacer"
+                        | "gpui-footer-overlay"
                 ))
     }
 
@@ -2574,6 +2761,10 @@ impl Window {
     pub fn rendered_frame_generation(&self) -> u64 {
         self.rendered_frame_generation
     }
+    /// Whether the latest completed frame still represents this window's current invalidation state.
+    pub fn rendered_frame_is_current(&self) -> bool {
+        self.rendered_frame_generation != 0 && !self.invalidator.is_dirty() && !self.removed
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
@@ -2590,13 +2781,268 @@ impl Window {
         });
     }
 
+    /// Whether the owned completion observer has requested paint evidence.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owned_frame_observation_active(&self) -> bool {
+        self.is_owned_hidden() && self.owned_completion_observer.is_some()
+    }
+
+    /// Record only at the real paint site; overflow invalidates frame evidence.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_owned_paint_binding(
+        &mut self,
+        kind: &'static str,
+        id: String,
+        bounds: Bounds<Pixels>,
+        metadata: impl Into<Rc<serde_json::Value>>,
+    ) {
+        if !self.owned_frame_observation_active() {
+            return;
+        }
+        self.invalidator.debug_assert_paint();
+        let metadata = metadata.into();
+        let Ok(metadata_bytes) = owned_metadata_size(&metadata) else {
+            // A serialization/budget refusal invalidates the completed frame;
+            // it must never publish a partial binding as successful evidence.
+            self.next_frame.owned_paint_binding_overflow = true;
+            return;
+        };
+        let retained_bytes = metadata_bytes
+            .saturating_add(id.len())
+            .saturating_add(kind.len())
+            .saturating_add(128);
+        let bytes = self
+            .next_frame
+            .owned_paint_binding_bytes
+            .saturating_add(retained_bytes);
+        if self.next_frame.owned_paint_bindings.len() >= MAX_OWNED_PAINT_BINDINGS
+            || bytes > MAX_OWNED_PAINT_BINDING_BYTES
+        {
+            self.next_frame.owned_paint_binding_overflow = true;
+            return;
+        }
+        let clip_bounds = self.content_mask().bounds;
+        self.next_frame.owned_paint_binding_bytes = bytes;
+        self.next_frame
+            .owned_paint_bindings
+            .push(OwnedPaintBinding {
+                kind,
+                id: id.into(),
+                bounds,
+                visible_bounds: bounds.intersect(&clip_bounds),
+                clip_bounds,
+                metadata,
+                retained_bytes,
+            });
+    }
+
+    /// Returns the completed frame's paint bindings, refusing overflowed evidence.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owned_paint_bindings(&self) -> Result<&[OwnedPaintBinding]> {
+        anyhow::ensure!(
+            !self.rendered_frame.owned_paint_binding_overflow,
+            "owned_paint_binding_overflow"
+        );
+        Ok(&self.rendered_frame.owned_paint_bindings)
+    }
+
+    /// Serialized metadata bytes plus conservative binding overhead, without a JSON copy.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owned_paint_binding_bytes(&self) -> usize {
+        self.rendered_frame.owned_paint_binding_bytes
+    }
+
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
     #[cfg(any(test, feature = "test-support"))]
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
+        if self.is_owned_hidden() {
+            let status = self.owned_render_resource_status();
+            anyhow::ensure!(
+                status.pending == 0 && status.failed == 0,
+                "owned_render_resources_incomplete: pending={} failed={}",
+                status.pending,
+                status.failed,
+            );
+        }
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
+    }
+
+    /// Required-resource omissions in the exact most recently completed frame.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owned_render_resource_status(&self) -> OwnedRenderResourceStatus {
+        self.rendered_frame.owned_render_resources
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_owned_resource_pending(&mut self) {
+        if self.is_owned_hidden() {
+            self.invalidator.debug_assert_paint();
+            self.next_frame.owned_render_resources.pending = self
+                .next_frame
+                .owned_render_resources
+                .pending
+                .checked_add(1)
+                .expect("owned resource pending count overflow");
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_owned_resource_failed(&mut self) {
+        if self.is_owned_hidden() {
+            self.invalidator.debug_assert_paint();
+            self.next_frame.owned_render_resources.failed = self
+                .next_frame
+                .owned_render_resources
+                .failed
+                .checked_add(1)
+                .expect("owned resource failure count overflow");
+        }
+    }
+
+    /// Arm a one-shot native readback fault on this guarded, owned-hidden window.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_owned_readback_fault(&mut self, fault: crate::OwnedReadbackFault) -> Result<()> {
+        anyhow::ensure!(self.is_owned_hidden(), "owned_hidden_window_required");
+        self.platform_window.arm_owned_readback_fault(fault)
+    }
+
+    /// Clear an unconsumed readback fault on this guarded, owned-hidden window.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_owned_readback_fault(&mut self) -> Result<()> {
+        anyhow::ensure!(self.is_owned_hidden(), "owned_hidden_window_required");
+        self.platform_window.clear_owned_readback_fault()
+    }
+
+    /// Exercise the owned native IME-position refusal without touching operator input.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn probe_owned_ime_position(&self) -> Result<()> {
+        anyhow::ensure!(self.is_owned_hidden(), "owned_hidden_window_required");
+        self.platform_window.update_ime_position(Bounds::default());
+        Ok(())
+    }
+
+    /// Exercise the owned native global-pointer refusal without reading operator state.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn probe_owned_global_pointer(&self) -> Result<Point<Pixels>> {
+        anyhow::ensure!(self.is_owned_hidden(), "owned_hidden_window_required");
+        Ok(self.platform_window.mouse_position())
+    }
+
+    /// Whether this exact native window belongs to the guarded non-presenting host.
+    pub fn is_owned_hidden(&self) -> bool {
+        self.platform_window.owned_hidden_guard().is_some()
+    }
+
+    /// Install read-only evidence extraction; this never invalidates the window.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observe_owned_frame_completion(
+        &mut self,
+        observed_entity: Option<EntityId>,
+        observer: impl FnMut(&Window, &App, OwnedFrameCompletion) -> Result<()> + 'static,
+    ) -> Result<()> {
+        anyhow::ensure!(self.is_owned_hidden(), "owned_hidden_window_required");
+        anyhow::ensure!(
+            self.owned_completion_observer.is_none(),
+            "owned_frame_observer_exists"
+        );
+        self.invalidator.inner.borrow_mut().owned = Some(OwnedInvalidations {
+            observed_entity,
+            ..Default::default()
+        });
+        self.owned_completion_observer = Some(Box::new(observer));
+        Ok(())
+    }
+
+    /// Retire evidence ownership without scheduling another frame.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_owned_frame_completion_observer(&mut self) {
+        self.owned_completion_observer = None;
+        self.invalidator.inner.borrow_mut().owned = None;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn draw_scheduled_owned_frame(&mut self, cx: &mut App) -> Result<()> {
+        anyhow::ensure!(
+            self.invalidator.is_dirty(),
+            "owned_scheduled_frame_not_invalidated"
+        );
+        self.draw_owned_frame_with_cause(cx, true, |_, _| Ok(()))
+    }
+
+    /// Complete real layout/paint and frame callbacks, clearing the draw arena even if extraction fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn draw_owned_frame<R>(
+        &mut self,
+        cx: &mut App,
+        extract: impl FnOnce(&Window, &App) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        self.draw_owned_frame_with_cause(cx, false, extract)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn draw_owned_frame_with_cause<R>(
+        &mut self,
+        cx: &mut App,
+        scheduled: bool,
+        extract: impl FnOnce(&Window, &App) -> Result<R>,
+    ) -> Result<R> {
+        anyhow::ensure!(self.is_owned_hidden(), "owned_hidden_window_required");
+        let callbacks = self.next_frame_callbacks.take();
+        for callback in callbacks {
+            callback(self, cx);
+        }
+        struct ClearArena(Option<ArenaClearNeeded>);
+        impl Drop for ClearArena {
+            fn drop(&mut self) {
+                if let Some(token) = self.0.take() {
+                    token.clear();
+                }
+            }
+        }
+        let (
+            invalidation_epoch,
+            notification_epoch,
+            observed_notification_epoch,
+            observed_notification_cause,
+        ) = self
+            .invalidator
+            .inner
+            .borrow()
+            .owned
+            .as_ref()
+            .map(|owned| {
+                (
+                    owned.epoch,
+                    owned.notification_epoch,
+                    owned.observed_notification_epoch,
+                    owned.observed_notification_cause,
+                )
+            })
+            .unwrap_or_default();
+        let clear = ClearArena(Some(self.draw(cx)));
+        self.complete_frame();
+        if let Some(mut observer) = self.owned_completion_observer.take() {
+            let observed = observer(
+                self,
+                cx,
+                OwnedFrameCompletion {
+                    generation: self.rendered_frame_generation,
+                    scheduled,
+                    invalidation_epoch,
+                    notification_epoch,
+                    observed_notification_epoch,
+                    observed_notification_cause,
+                },
+            );
+            self.owned_completion_observer = Some(observer);
+            observed?;
+        }
+        let result = extract(self, cx);
+        drop(clear);
+        result
     }
 
     /// Set the content size of the window.
@@ -2932,6 +3378,9 @@ impl Window {
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.rendered_frame_generation = self.rendered_frame_generation.wrapping_add(1);
+        if let Some(guard) = self.platform_window.owned_hidden_guard() {
+            guard.frame_completed();
+        }
         self.next_frame.clear();
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
@@ -2996,7 +3445,9 @@ impl Window {
 
     #[profiling::function]
     fn present(&self) {
-        self.platform_window.draw(&self.rendered_frame.scene);
+        if self.platform_window.owned_hidden_guard().is_none() {
+            self.platform_window.draw(&self.rendered_frame.scene);
+        }
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
@@ -3326,10 +3777,34 @@ impl Window {
             fidelity_paint_atoms_index: self.next_frame.fidelity_paint_atoms.len(),
             #[cfg(any(test, feature = "test-support"))]
             fidelity_scope_summaries_index: self.next_frame.fidelity_scope_summaries.len(),
+            #[cfg(any(test, feature = "test-support"))]
+            owned_render_resources: self.next_frame.owned_render_resources,
+            #[cfg(any(test, feature = "test-support"))]
+            owned_paint_bindings_index: self.next_frame.owned_paint_bindings.len(),
         }
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            // Prefix deltas belong to the reused paint span, not the whole old frame.
+            let pending = range.end.owned_render_resources.pending
+                - range.start.owned_render_resources.pending;
+            let failed =
+                range.end.owned_render_resources.failed - range.start.owned_render_resources.failed;
+            self.next_frame.owned_render_resources.pending = self
+                .next_frame
+                .owned_render_resources
+                .pending
+                .checked_add(pending)
+                .expect("owned resource pending count overflow");
+            self.next_frame.owned_render_resources.failed = self
+                .next_frame
+                .owned_render_resources
+                .failed
+                .checked_add(failed)
+                .expect("owned resource failure count overflow");
+        }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]
@@ -3369,6 +3844,30 @@ impl Window {
                 .debug_bounds
                 .insert(entry.selector.clone(), entry.bounds);
             self.next_frame.debug_bounds_log.push(entry);
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
+        if self.owned_frame_observation_active() {
+            self.next_frame.owned_paint_binding_overflow |=
+                self.rendered_frame.owned_paint_binding_overflow;
+            for binding in self.rendered_frame.owned_paint_bindings
+                [range.start.owned_paint_bindings_index..range.end.owned_paint_bindings_index]
+                .iter()
+                .cloned()
+            {
+                let bytes = self
+                    .next_frame
+                    .owned_paint_binding_bytes
+                    .saturating_add(binding.retained_bytes);
+                if self.next_frame.owned_paint_bindings.len() >= MAX_OWNED_PAINT_BINDINGS
+                    || bytes > MAX_OWNED_PAINT_BINDING_BYTES
+                {
+                    self.next_frame.owned_paint_binding_overflow = true;
+                    break;
+                }
+                self.next_frame.owned_paint_binding_bytes = bytes;
+                self.next_frame.owned_paint_bindings.push(binding);
+            }
         }
 
         #[cfg(any(test, feature = "test-support"))]
@@ -4391,16 +4890,21 @@ impl Window {
             }),
         };
 
-        let Some(tile) =
-            self.sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
-                    let Some((size, bytes)) = cx.svg_renderer.render_alpha_mask(&params, data)?
-                    else {
-                        return Ok(None);
-                    };
-                    Ok(Some((size, Cow::Owned(bytes))))
-                })?
+        let Some(tile) = self
+            .sprite_atlas
+            .get_or_insert_with(&params.clone().into(), &mut || {
+                let Some((size, bytes)) = cx.svg_renderer.render_alpha_mask(&params, data)? else {
+                    return Ok(None);
+                };
+                Ok(Some((size, Cow::Owned(bytes))))
+            })
+            .inspect_err(|_| {
+                #[cfg(any(test, feature = "test-support"))]
+                self.record_owned_resource_failed();
+            })?
         else {
+            #[cfg(any(test, feature = "test-support"))]
+            self.record_owned_resource_failed();
             return Ok(());
         };
         let content_mask = self.content_mask().scale(scale_factor);
@@ -4457,6 +4961,15 @@ impl Window {
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
+        if self.is_owned_hidden() {
+            let size = data.size(frame_index);
+            crate::validate_owned_image_size(size.width.0 as u32, size.height.0 as u32)
+                .inspect_err(|_| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.record_owned_resource_failed();
+                })?;
+        }
+
         let scale_factor = self.scale_factor();
         #[cfg(any(test, feature = "test-support"))]
         if self.fidelity_capture_active() {
@@ -4482,6 +4995,10 @@ impl Window {
                             .expect("It's the caller's job to pass a valid frame index"),
                     ),
                 )))
+            })
+            .inspect_err(|_| {
+                #[cfg(any(test, feature = "test-support"))]
+                self.record_owned_resource_failed();
             })?
             .expect("Callback above only returns Some");
         let content_mask = self.content_mask().scale(scale_factor);
@@ -5538,7 +6055,9 @@ impl Window {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 if let Some(bounds) = input_handler.selected_bounds(window, cx) {
-                    window.platform_window.update_ime_position(bounds);
+                    if !window.is_owned_hidden() {
+                        window.platform_window.update_ime_position(bounds);
+                    }
                 }
                 window.platform_window.set_input_handler(input_handler);
             }
@@ -6549,5 +7068,148 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
+    }
+}
+
+#[cfg(test)]
+mod owned_render_resource_tests {
+    use super::*;
+    use crate::TestAppContext;
+
+    #[test]
+    fn owned_metadata_budget_matches_serialized_utf8_and_escapes() {
+        let value = serde_json::json!({
+            "plain": "retained completed-frame evidence",
+            "escaped\"key": "\u{0000}\u{0008}\u{000c}\n\r\t\\\"",
+            "utf8": "café 東京",
+            "numbers": [i64::MIN, u64::MAX, -0.0, 1.0e-100],
+            "values": [null, true, false, [], {}],
+        });
+        assert_eq!(
+            owned_metadata_size(&value).unwrap(),
+            serde_json::to_vec(&value).unwrap().len(),
+        );
+    }
+
+    #[test]
+    fn owned_metadata_budget_accepts_exact_limit_and_refuses_next_byte() {
+        let mut value = serde_json::Value::String("a".repeat(MAX_OWNED_PAINT_BINDING_BYTES - 2));
+        assert_eq!(
+            owned_metadata_size(&value).unwrap(),
+            MAX_OWNED_PAINT_BINDING_BYTES,
+        );
+        let serde_json::Value::String(text) = &mut value else {
+            unreachable!();
+        };
+        text.push('a');
+        assert!(owned_metadata_size(&value).is_err());
+    }
+
+    #[test]
+    fn owned_metadata_budget_refuses_actual_escape_expansion() {
+        let mut value =
+            serde_json::Value::String("\u{0000}".repeat((MAX_OWNED_PAINT_BINDING_BYTES - 2) / 6));
+        assert_eq!(
+            owned_metadata_size(&value).unwrap(),
+            MAX_OWNED_PAINT_BINDING_BYTES,
+        );
+        let serde_json::Value::String(text) = &mut value else {
+            unreachable!();
+        };
+        text.push('\u{0000}');
+        assert!(owned_metadata_size(&value).is_err());
+    }
+
+    #[gpui::test]
+    fn cached_paint_keeps_only_its_resource_delta_across_frames(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| {
+            window.next_frame.owned_render_resources = OwnedRenderResourceStatus {
+                pending: 7,
+                failed: 11,
+            };
+            let start = window.paint_index();
+            window.next_frame.owned_render_resources = OwnedRenderResourceStatus {
+                pending: 9,
+                failed: 14,
+            };
+            let end = window.paint_index();
+            window.next_frame.owned_render_resources = OwnedRenderResourceStatus {
+                pending: 15,
+                failed: 17,
+            };
+            std::mem::swap(&mut window.rendered_frame, &mut window.next_frame);
+            window.next_frame.clear();
+
+            window.next_frame.owned_render_resources = OwnedRenderResourceStatus {
+                pending: 1,
+                failed: 2,
+            };
+            let replay_start = window.paint_index();
+            window.reuse_paint(start..end);
+            let replay_end = window.paint_index();
+            assert_eq!(
+                window.next_frame.owned_render_resources,
+                OwnedRenderResourceStatus {
+                    pending: 3,
+                    failed: 5
+                },
+            );
+            assert_eq!(
+                window.owned_render_resource_status(),
+                OwnedRenderResourceStatus {
+                    pending: 15,
+                    failed: 17
+                },
+            );
+
+            std::mem::swap(&mut window.rendered_frame, &mut window.next_frame);
+            window.next_frame.clear();
+            window.reuse_paint(replay_start..replay_end);
+            assert_eq!(
+                window.next_frame.owned_render_resources,
+                OwnedRenderResourceStatus {
+                    pending: 2,
+                    failed: 3
+                },
+            );
+
+            window.next_frame.clear();
+            assert_eq!(
+                window.next_frame.owned_render_resources,
+                OwnedRenderResourceStatus::default(),
+            );
+            std::mem::swap(&mut window.rendered_frame, &mut window.next_frame);
+            assert_eq!(
+                window.owned_render_resource_status(),
+                OwnedRenderResourceStatus::default(),
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn ordinary_windows_do_not_collect_owned_resources_or_arm_faults(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| {
+            assert!(!window.is_owned_hidden());
+            window.record_owned_resource_pending();
+            window.record_owned_resource_failed();
+            assert_eq!(
+                window.next_frame.owned_render_resources,
+                OwnedRenderResourceStatus::default(),
+            );
+            assert!(
+                window
+                    .arm_owned_readback_fault(crate::OwnedReadbackFault::Blank)
+                    .is_err()
+            );
+            assert!(
+                window
+                    .arm_owned_readback_fault(crate::OwnedReadbackFault::Failure)
+                    .is_err()
+            );
+            assert!(window.probe_owned_ime_position().is_err());
+            assert!(window.probe_owned_global_pointer().is_err());
+        });
     }
 }

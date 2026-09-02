@@ -107,6 +107,15 @@ pub struct ChoicesPopupState {
 ///
 /// Uses deferred initialization pattern: the InputState is created on first render
 /// when the Window reference is available, not at construction time.
+pub(crate) fn save_scratch_content(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(path)?;
+    }
+    std::fs::write(path, content)?;
+    crate::runtime_policy::record_completed_fixture_effect();
+    Ok(())
+}
+
 pub struct EditorPrompt {
     // Identity
     pub id: String,
@@ -148,11 +157,47 @@ pub struct EditorPrompt {
 
     // Choice dropdown popup state (shown when tabstop has choices)
     choices_popup: Option<ChoicesPopupState>,
+    autosave_task: Option<gpui::Task<()>>,
+    pub(crate) autosave_error: Option<String>,
 }
 
 // --- merged from part_001.rs ---
 // --- merged from part_001_impl/methods_000.rs ---
 impl EditorPrompt {
+    pub fn update_theme(&mut self, theme: Arc<Theme>, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
+    }
+
+    pub fn set_input(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_initialized(window, cx);
+        if let Some(state) = &self.editor_state {
+            state.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Retain the real two-second utility autosave lifecycle on this entity.
+    pub fn start_autosave(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.autosave_task = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let result = this.update(cx, |editor, cx| {
+                let content = editor.content(cx);
+                editor.autosave_error = save_scratch_content(&path, &content)
+                    .err()
+                    .map(|error| error.to_string());
+                if editor.autosave_error.is_some() {
+                    cx.notify();
+                }
+            });
+            if result.is_err() {
+                break;
+            }
+        }));
+    }
+
     /// Create a new EditorPrompt with explicit height
     ///
     /// This is the compatible constructor that matches the original EditorPrompt API.
@@ -198,6 +243,8 @@ impl EditorPrompt {
             choices_popup: None,
             needs_focus: true, // Auto-focus on first render
             needs_initial_tabstop_selection: false,
+            autosave_task: None,
+            autosave_error: None,
         }
     }
 
@@ -296,6 +343,8 @@ impl EditorPrompt {
             choices_popup: None,
             needs_focus: true, // Auto-focus on first render
             needs_initial_tabstop_selection: needs_initial_selection,
+            autosave_task: None,
+            autosave_error: None,
         }
     }
 
@@ -334,12 +383,16 @@ impl EditorPrompt {
 
         // Subscribe to editor changes
         let editor_sub = cx.subscribe_in(&editor_state, window, {
-            move |_this, _, ev: &InputEvent, _window, cx| match ev {
+            move |this, _, ev: &InputEvent, _window, cx| match ev {
                 InputEvent::Change => {
                     cx.notify();
                 }
-                InputEvent::PressEnter { secondary: _ } => {
-                    // Multi-line editor handles Enter internally for newlines
+                InputEvent::PressEnter { secondary } => {
+                    // Input owns plain Enter/newlines and consumes Cmd+Enter before
+                    // the parent key handler, so submit through its emitted event.
+                    if *secondary && !this.suppress_keys {
+                        this.submit(cx);
+                    }
                 }
                 InputEvent::PressTab { .. } => {}
                 InputEvent::SelectionChange => {}

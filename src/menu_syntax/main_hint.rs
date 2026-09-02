@@ -644,13 +644,13 @@ fn capture_composer_hint(
 ) -> Option<MenuSyntaxMainHintSnapshot> {
     let (target, invocation) = match ctx.mode.capture_for(ctx.raw_filter_text) {
         Some(invocation) => (invocation.target.as_str(), Some(invocation)),
-        None => match ctx.mode.incomplete_for(ctx.raw_filter_text) {
-            Some(incomplete) => match &incomplete.kind {
+        None => {
+            let incomplete = ctx.mode.incomplete_for(ctx.raw_filter_text)?;
+            match &incomplete.kind {
                 IncompleteKind::MissingCaptureBody(target) => (target.as_str(), None),
                 _ => return None,
-            },
-            None => return None,
-        },
+            }
+        }
     };
 
     let mut rows = Vec::new();

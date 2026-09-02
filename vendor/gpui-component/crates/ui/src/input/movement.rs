@@ -45,8 +45,10 @@ impl InputState {
         direction: Option<MoveDirection>,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.selection_revision_state();
         let offset = offset.clamp(0, self.text.len());
         self.selected_range = (offset..offset).into();
+        self.record_selection_change(previous);
         self.scroll_to(offset, direction, cx);
         self.pause_blink_cursor(cx);
         self.update_preferred_column();

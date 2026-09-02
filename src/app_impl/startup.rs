@@ -36,17 +36,6 @@ fn main_window_global_key_intent(
     None
 }
 
-#[inline]
-fn is_plain_platform_cmd_w(event: &gpui::KeystrokeEvent) -> bool {
-    let key = event.keystroke.key.as_str();
-    let modifiers = &event.keystroke.modifiers;
-    modifiers.platform
-        && !modifiers.shift
-        && !modifiers.alt
-        && !modifiers.control
-        && key.eq_ignore_ascii_case("w")
-}
-
 fn main_window_actions_key_intent(
     current_view: &AppView,
     event: &gpui::KeystrokeEvent,
@@ -115,294 +104,41 @@ impl ScriptListApp {
         }
     }
 
-    pub(crate) fn new(
+    pub(crate) fn from_initial_data(
         config: config::Config,
         bun_available: bool,
+        data: MainInitialData,
+        services: MainServices,
+        default_response_sender: mpsc::SyncSender<Message>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // The detached chat window code is compiled into the lib, which
-        // cannot name ScriptListApp; register the binary-side reattach hook
-        // it dispatches through.
-        crate::ai::agent_chat::ui::chat_window::register_reattach_into_main_hook(
-            Self::reattach_detached_chat_hook,
-        );
-        // PERF: Parallelize script + scriptlet loading to reduce startup wall time.
-        let load_start = std::time::Instant::now();
-        let (script_report, scriptlets, scripts_elapsed, scriptlets_elapsed) = std::thread::scope(
-            |scope| {
-                let scripts_handle = scope.spawn(|| {
-                    let start = std::time::Instant::now();
-                    let loaded = scripts::read_scripts_report();
-                    (loaded, start.elapsed())
-                });
-
-                let scriptlets_handle = scope.spawn(|| {
-                    let start = std::time::Instant::now();
-                    // Use load_scriptlets() to load from all plugins (plugins/*/scriptlets/*.md)
-                    // This includes built-in extensions like CleanShot and user extensions
-                    let loaded = scripts::load_scriptlets();
-                    (loaded, start.elapsed())
-                });
-
-                let (script_report, scripts_elapsed) = match scripts_handle.join() {
-                    Ok(result) => result,
-                    Err(_) => {
-                        logging::log(
-                            "PERF",
-                            "Script loading thread panicked; retrying read_scripts_report synchronously",
-                        );
-                        let retry_start = std::time::Instant::now();
-                        (scripts::read_scripts_report(), retry_start.elapsed())
-                    }
-                };
-
-                let (scriptlets, scriptlets_elapsed) = match scriptlets_handle.join() {
-                    Ok(result) => result,
-                    Err(_) => {
-                        logging::log(
-                            "PERF",
-                            "Scriptlet loading thread panicked; retrying load_scriptlets synchronously",
-                        );
-                        let retry_start = std::time::Instant::now();
-                        (scripts::load_scriptlets(), retry_start.elapsed())
-                    }
-                };
-
-                (
-                    script_report,
-                    scriptlets,
-                    scripts_elapsed,
-                    scriptlets_elapsed,
-                )
-            },
-        );
-
-        let scripts: Vec<std::sync::Arc<scripts::Script>> =
-            script_report.scripts.iter().cloned().collect();
-        let script_validation_report = Some(std::sync::Arc::new(
-            scripts::merge_scriptlet_validation_issues(&script_report.validation, &scriptlets),
-        ));
-
-        // Theme cache was initialized earlier in app startup before window creation.
-        // Reuse it here so ScriptListApp construction does not re-read theme files
-        // or re-run system appearance detection.
-        let theme_load_started = std::time::Instant::now();
-        let theme = std::sync::Arc::new(theme::get_cached_theme());
-        let theme_revision_seen = crate::theme::service::theme_revision();
-        logging::log(
-            "PERF",
-            &format!(
-                "Startup theme reuse: source=cached elapsed_ms={:.2}",
-                theme_load_started.elapsed().as_secs_f64() * 1000.0
-            ),
-        );
-        // Config is now passed in from main() to avoid duplicate load (~100-300ms savings)
-
-        // Load frecency data for suggested section tracking
-        let suggested_config = config.get_suggested();
-        let mut frecency_store = FrecencyStore::with_config(&suggested_config);
-        frecency_store.load().ok(); // Ignore errors - starts fresh if file doesn't exist
-
-        // Load built-in entries based on config, filtering out commands hidden via
-        // `hiddenCommands` or per-command `commands.*.hidden` overrides.
-        let builtin_entries: Vec<_> = builtins::get_builtin_entries(&config.get_builtins())
-            .into_iter()
-            .filter(|entry| !config.is_command_hidden(&entry.id))
-            .collect();
-
-        // Apps are loaded in the background to avoid blocking startup
-        // Start with empty list, will be populated asynchronously
-        let apps = Vec::new();
-
-        let total_elapsed = load_start.elapsed();
-        logging::log(
-            "PERF",
-            &format!(
-                "Startup loading: {:.2}ms total ({} scripts in {:.2}ms, {} scriptlets in {:.2}ms, apps loading in background)",
-                total_elapsed.as_secs_f64() * 1000.0,
-                scripts.len(),
-                scripts_elapsed.as_secs_f64() * 1000.0,
-                scriptlets.len(),
-                scriptlets_elapsed.as_secs_f64() * 1000.0
-            ),
-        );
-        logging::log(
-            "APP",
-            &format!(
-                "Loaded {} scripts from ~/.scriptkit/plugins/*/scripts",
-                scripts.len()
-            ),
-        );
-        logging::log(
-            "APP",
-            &format!(
-                "Loaded {} scriptlets from ~/.scriptkit/plugins/*/scriptlets",
-                scriptlets.len()
-            ),
-        );
-        logging::log(
-            "APP",
-            &format!("Loaded {} built-in features", builtin_entries.len()),
-        );
-        logging::log("APP", "Applications loading in background...");
-        logging::log("APP", "Loaded theme with system appearance detection");
-        logging::log(
-            "APP",
-            &format!(
-                "Loaded config: hotkey={:?}+{}, bun_path={:?}",
-                config.hotkey.modifiers, config.hotkey.key, config.bun_path
-            ),
-        );
-
-        // Load apps in background thread to avoid blocking startup
-        let app_launcher_enabled = config.get_builtins().app_launcher;
-        if app_launcher_enabled {
-            // Use an async channel so the UI task can await completion without polling.
-            let (tx, rx) =
-                async_channel::bounded::<(Vec<app_launcher::AppInfo>, std::time::Duration)>(1);
-
-            // Spawn background thread for app scanning
-            std::thread::spawn(move || {
-                let start = std::time::Instant::now();
-                let apps = app_launcher::scan_applications().clone();
-                let elapsed = start.elapsed();
-                if tx.send_blocking((apps, elapsed)).is_err() {
-                    logging::log(
-                        "APP",
-                        "Background app loading result dropped: receiver unavailable",
-                    );
-                }
-            });
-
-            // Event-driven receive: no timer wakeups while waiting for app scan completion.
-            cx.spawn(async move |this, cx| {
-                let Ok((apps, elapsed)) = rx.recv().await else {
-                    logging::log(
-                        "APP",
-                        "Background app loading failed to deliver result: channel closed",
-                    );
-                    return;
-                };
-
-                let app_count = apps.len();
-                let _ = cx.update(|cx| {
-                    this.update(cx, |app, cx| {
-                        app.apps = apps;
-                        // Invalidate caches since apps changed
-                        app.main_menu_result_caches.mark_apps_loaded();
-                        app.rebuild_root_windows_after_app_icon_cache_update(
-                            "apps_loaded_root_windows_icons",
-                            cx,
-                        );
-                        logging::log(
-                            "APP",
-                            &format!(
-                                "Background app loading complete: {} apps in {:.2}ms",
-                                app_count,
-                                elapsed.as_secs_f64() * 1000.0
-                            ),
-                        );
-                        // CRITICAL: Sync list state after cache invalidation
-                        // Without this, the GPUI list component doesn't know
-                        // about the new apps and may render stale item counts
-                        let old_count = app.main_list_state.item_count();
-                        app.sync_list_state();
-                        let new_count = app.main_list_state.item_count();
-                        app.validate_selection_bounds(cx);
-                        logging::log(
-                            "APP",
-                            &format!(
-                                "List state synced after app load: {} -> {} items (filter='{}')",
-                                old_count, new_count, app.computed_filter_text
-                            ),
-                        );
-                        cx.notify();
-                    })
-                });
-            })
-            .detach();
-        }
-
-        #[cfg(not(test))]
-        {
-            let share_rx = crate::script_sharing::spawn_clipboard_share_watcher();
-            cx.spawn(async move |this, cx| {
-                while let Ok(import) = share_rx.recv().await {
-                    tracing::info!(
-                        share_uri = %import.uri,
-                        title = %import.bundle.title,
-                        kind = ?import.bundle.kind,
-                        "clipboard_share_bundle_detected"
-                    );
-                    script_kit_gpui::request_show_main_window();
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(180))
-                        .await;
-
-                    let options = crate::confirm::ParentConfirmOptions {
-                        title: import.bundle.prompt_title().into(),
-                        body: import.bundle.prompt_body().into(),
-                        confirm_text: "Install".into(),
-                        cancel_text: "Ignore".into(),
-                        ..Default::default()
-                    };
-                    let trace_id = format!(
-                        "share-import-{}-{}",
-                        import.bundle.kind.display_name().to_lowercase(),
-                        import.bundle.title.to_lowercase().replace(' ', "-")
-                    );
-
-                    let confirmed =
-                        match crate::confirm::confirm_with_parent_dialog(cx, options, &trace_id)
-                            .await
-                        {
-                            Ok(confirmed) => confirmed,
-                            Err(error) => {
-                                tracing::error!(
-                                    ?error,
-                                    title = %import.bundle.title,
-                                    "clipboard_share_confirm_failed"
-                                );
-                                continue;
-                            }
-                        };
-                    if !confirmed {
-                        continue;
-                    }
-
-                    let install_result =
-                        crate::script_sharing::install_share_bundle(&import.bundle);
-                    let title = import.bundle.title.clone();
-                    let kind = import.bundle.kind.display_name().to_lowercase();
-                    let _ = cx.update(|cx| {
-                        this.update(cx, |app, cx| match install_result {
-                            Ok(outcome) => {
-                                app.refresh_scripts(cx);
-                                app.refresh_skills(cx);
-                                app.current_view = AppView::ScriptList;
-                                app.reset_main_menu_selection_user_moved();
-                                app.show_hud(
-                                    format!("Installed shared {} into {}", kind, outcome.plugin_id),
-                                    Some(2000),
-                                    cx,
-                                );
-                            }
-                            Err(error) => {
-                                app.show_error_toast(
-                                    format!(
-                                        "Failed to install shared {} '{}': {}",
-                                        kind, title, error
-                                    ),
-                                    cx,
-                                );
-                            }
-                        })
-                    });
-                }
-            })
-            .detach();
-        }
+        let MainInitialData {
+            scripts,
+            script_candidates,
+            scriptlets,
+            skills: plugin_skills,
+            script_validation_report,
+            source_terminals,
+            builtin_entries,
+            apps,
+            windows: initial_cached_windows,
+            windows_status: initial_root_windows_provider_status,
+            frecency_store,
+            input_history,
+            preferences,
+            launcher_context,
+            theme,
+            theme_revision: theme_revision_seen,
+            cwd: initial_spine_cwd,
+            cwd_label: initial_spine_cwd_label,
+            cwd_revision: initial_spine_cwd_revision,
+            agent_label: initial_spine_agent_label,
+            model_label: initial_spine_model_label,
+            background_effect,
+            background_effect_intensity,
+            reduced_motion,
+        } = data;
         logging::log("UI", "Script Kit logo SVG loaded for header rendering");
 
         let gpui_input_state = cx.new(|cx| {
@@ -445,6 +181,7 @@ impl ScriptListApp {
                     cx.notify();
                 }
                 InputEvent::Change => {
+                    this.note_main_input_changed(cx);
                     let current_value = this.gpui_input_state.read(cx).value().to_string();
 
                     if matches!(
@@ -568,7 +305,7 @@ impl ScriptListApp {
                         ),
                     );
 
-                    if !script_kit_gpui::is_main_window_visible() {
+                    if !crate::windows::accepts_main_window_input(window) {
                         logging::log("KEY", "Ignoring PressEnter: main window not visible");
                         return;
                     }
@@ -606,11 +343,7 @@ impl ScriptListApp {
                             "footer_shortcut",
                         ) {
                             // No visible descriptor: preserve the internal command path.
-                            if this.main_menu_fallback_state.is_active() {
-                                this.execute_selected_fallback(cx);
-                            } else {
-                                this.execute_selected(cx);
-                            }
+                            let _dispatch = this.execute_selected(cx);
                         }
                     }
                 }
@@ -625,7 +358,7 @@ impl ScriptListApp {
                         }
                     }
                 }
-                InputEvent::SelectionChange => {}
+                InputEvent::SelectionChange => this.note_main_input_changed(cx),
             }
         });
 
@@ -642,108 +375,51 @@ impl ScriptListApp {
         let (inline_chat_claude_code_tx, inline_chat_claude_code_rx) = mpsc::sync_channel(4);
         // Create channel for naming dialog completion signals
         let (naming_submit_tx, naming_submit_rx) = mpsc::sync_channel(4);
-        let default_response_sender = create_stdout_response_sender();
         // Discover plugin skills for main-menu search
-        let plugin_skills: Vec<std::sync::Arc<crate::plugins::PluginSkill>> = {
-            let skills = crate::plugins::discover_plugins()
-                .and_then(|index| crate::plugins::discover_plugin_skills(&index))
-                .unwrap_or_default();
-            skills.into_iter().map(std::sync::Arc::new).collect()
-        };
+        // The launcher catalogue is process-local; both constructors publish the same records.
         crate::ai::context_selector::publish_launcher_catalog(
             &scripts,
             &scriptlets,
             &plugin_skills,
         );
-        crate::dictation::hydrate_dictation_resource_from_history();
-        let window_search_test_provider =
-            std::env::var_os("SCRIPT_KIT_WINDOW_SEARCH_TEST_PROVIDER").is_some();
-        let initial_cached_windows = if window_search_test_provider {
-            crate::window_control::list_windows().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let initial_root_windows_provider_status = if window_search_test_provider {
-            crate::window_control::RootWindowsProviderStatus::Ready {
-                count: initial_cached_windows.len(),
-            }
-        } else {
-            crate::window_control::RootWindowsProviderStatus::Unknown
-        };
-        let root_search = RootSearchStore::with_root_windows(
+        let mut root_search = RootSearchStore::with_root_windows(
             &initial_cached_windows,
             &apps,
             initial_root_windows_provider_status,
         );
-
-        // Restore the persisted global working directory (footer cwd chip) so it
-        // survives app restarts; the user tends to stay in one directory. A
-        // restored cwd counts as an explicit pick (revision 1) so the agent
-        // launches there. Falls back to ~/.scriptkit (revision 0) when no valid
-        // persisted directory exists.
-        let (initial_spine_cwd, initial_spine_cwd_label, initial_spine_cwd_revision) = {
-            let persisted = crate::config::load_user_preferences()
-                .ai
-                .cwd
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_dir());
-            match persisted {
-                Some(path) => {
-                    let label = crate::file_search::shorten_path(&path.to_string_lossy())
-                        .trim_end_matches('/')
-                        .to_string();
-                    (Some(path), Some(label), 1_u64)
-                }
-                None => (
-                    dirs::home_dir().map(|h| h.join(".scriptkit")),
-                    Some("~/.scriptkit".to_string()),
-                    0_u64,
-                ),
-            }
-        };
-
-        // Prewarm the flow roster for the RESTORED effective cwd so flows
-        // are already in the main-menu corpus by the first open. Must run
-        // after the spine_cwd restore above — resolve_flow_cwd(None) would
-        // warm the wrong cache key when a persisted cwd exists.
-        {
-            let restored_cwd = initial_spine_cwd
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string());
-            crate::flows::catalog::flow_catalog()
-                .roster_for(&crate::flows::resolve_flow_cwd(restored_cwd));
+        root_search.install_script_catalogue_candidates(script_candidates);
+        for (source, terminal) in source_terminals {
+            let generation = root_search.allocate_named_provider_generation(source);
+            root_search.begin_named_provider(
+                source,
+                generation,
+                "",
+                "catalogue",
+                RootProviderPublicationPolicy::Visible,
+                false,
+            );
+            root_search.finish_named_provider(source, generation, terminal);
         }
-
-        // Push-driven roster arrival: rosters land on a background fetch
-        // thread; without this hook an idle open window never repaints when
-        // flows appear. The generation poll in filtering_cache stays as the
-        // fallback for the same signal.
-        #[cfg(not(test))]
-        {
-            let (roster_tx, roster_rx) = async_channel::bounded::<()>(4);
-            crate::flows::catalog::flow_catalog().set_notify_hook(move || {
-                let _ = roster_tx.try_send(());
-            });
-            cx.spawn(async move |this, cx| {
-                while roster_rx.recv().await.is_ok() {
-                    let _ = cx.update(|cx| {
-                        this.update(cx, |app, cx| {
-                            app.invalidate_filter_cache();
-                            app.invalidate_grouped_cache();
-                            cx.notify();
-                        })
-                    });
-                }
-            })
-            .detach();
-        }
-
-        // Resolve the persisted profile/model into header display labels so the
-        // selection (Shift+Tab Profile Switcher) is visible on first paint.
-        let (initial_spine_agent_label, initial_spine_model_label) =
-            Self::resolve_agent_model_footer_labels();
 
         let mut app = ScriptListApp {
+            main_services: services,
+            prompt_completion: None,
+            main_preferences: preferences,
+            main_revisions: MainRevisionFacts::default(),
+            main_revision_input_text: String::new(),
+            main_revision_input_selection: 0..0,
+            main_revision_route: (
+                AppView::ScriptList.app_view_variant(),
+                String::new(),
+                None,
+                0,
+            ),
+            kit_store_browse_state: KitStoreBrowseState::Ready,
+            main_footer_action_task: None,
+            owned_surface_subscriptions: Vec::new(),
+            owned_observed_surface_generation: None,
+            owned_child_semantic_value: None,
+            main_inline_semantic_token: None,
             scripts,
             scriptlets,
             skills: plugin_skills,
@@ -773,7 +449,7 @@ impl ScriptListApp {
             cached_current_app_entries: Vec::new(),
             current_app_commands_session: None,
             selected_index: 0,
-            main_menu_selection_user_moved: false,
+            main_menu_pointer_press: None,
             filter_text: String::new(),
             inline_calculator: None,
             gpui_input_state,
@@ -783,11 +459,12 @@ impl ScriptListApp {
             ghost_llm_generation: 0,
             ghost_llm_cancel: None,
             ghost_llm_cache: std::collections::VecDeque::new(),
-            launcher_context: Default::default(),
+            launcher_context,
             launcher_context_generation: 0,
             gpui_input_subscriptions: vec![gpui_input_subscription],
             bounds_subscription: None,     // Set later after window setup
             appearance_subscription: None, // Set later after window setup
+            frontmost_menu_subscription_task: None,
             suppress_filter_events: false,
             pending_programmatic_filter_echo: None,
             pending_filter_sync: false,
@@ -815,6 +492,7 @@ impl ScriptListApp {
             script_session: Arc::new(ParkingMutex::new(None)),
             arg_input: TextInputState::new(),
             arg_selected_index: 0,
+            arg_selection_revision: 0,
             prompt_receiver: None,
             response_sender: Some(default_response_sender.clone()),
             default_response_sender: Some(default_response_sender),
@@ -831,6 +509,7 @@ impl ScriptListApp {
             menu_syntax_form_field_bounds: Default::default(),
             list_scroll_handle: UniformListScrollHandle::new(),
             arg_list_scroll_handle: UniformListScrollHandle::new(),
+            arg_prompt_geometry: std::rc::Rc::new(std::cell::Cell::new(None)),
             clipboard_list_scroll_handle: UniformListScrollHandle::new(),
             emoji_scroll_handle: UniformListScrollHandle::new(),
             emoji_frequent_snapshot: Vec::new(),
@@ -864,6 +543,8 @@ impl ScriptListApp {
             file_search_actions_path: None,
             file_search_sort_mode: crate::actions::FileSearchSortMode::default(),
             file_search_gen: 0,
+            #[cfg(any(test, feature = "owned-ui-evaluation"))]
+            file_search_stream_state: None,
             file_search_cancel: None,
             file_search_display_indices: Vec::new(),
             file_search_selection_mode: FileSearchSelectionMode::AutoFirst,
@@ -942,8 +623,9 @@ impl ScriptListApp {
             input_mode: InputMode::Mouse,
             main_menu_fallback_state: MainMenuFallbackState::default(),
             theme_before_chooser: None,
-            background_effect: crate::effects::initial_background_effect(),
-            background_effect_intensity: crate::effects::initial_background_effect_intensity(),
+            theme_chooser_preview_revision: None,
+            background_effect,
+            background_effect_intensity,
             background_effect_started_at: None,
             _background_effect_ticker: None,
             main_list_loading_started_at: None,
@@ -986,9 +668,7 @@ impl ScriptListApp {
             // Navigation coalescing for rapid arrow key events
             nav_coalescer: NavCoalescer::new(),
             main_list_boundary_affordance:
-                crate::scrolling::boundary_affordance::BoundaryAffordanceState::new(
-                    crate::platform::prefers_reduced_motion(),
-                ),
+                crate::scrolling::boundary_affordance::BoundaryAffordanceState::new(reduced_motion),
             list_suppress_hover_until_pointer_move: false,
             menu_syntax_trigger_picker_suppress_next_launcher_click: false,
             menu_syntax_trigger_picker_enter_guard: None,
@@ -1019,6 +699,7 @@ impl ScriptListApp {
             alias_input_state: None,
             // Alias input entity - persisted to maintain focus
             alias_input_entity: None,
+            alias_input_subscription: None,
             pending_tab_ai_execution: None,
             tab_ai_save_offer_state: None,
             tab_ai_harness: None,
@@ -1047,13 +728,7 @@ impl ScriptListApp {
             agent_chat_surface_state:
                 crate::ai::agent_chat::ui::surface_state::AgentChatSurfaceState::Hidden,
             // Input history for shell-like up/down navigation
-            input_history: {
-                let mut history = input_history::InputHistory::new();
-                if let Err(e) = history.load() {
-                    tracing::warn!("Failed to load input history: {}", e);
-                }
-                history
-            },
+            input_history,
             // API key configuration state
             pending_api_key_config: None,
             // API key completion channel - for EnvPrompt callback to signal completion
@@ -1107,80 +782,9 @@ impl ScriptListApp {
         // not toast what startup deliberately kept silent; only conflicts
         // introduced by later file edits HUD.
         app.announced_registry_conflicts = conflicts.into_iter().collect();
-        // Build provider registry in background to avoid blocking UI when opening AI chat
-        {
-            let config_clone = app.config.clone();
-            let (tx, rx) = async_channel::bounded::<crate::ai::ProviderRegistry>(1);
+        app.flush_pending_main_menu_query(cx);
 
-            std::thread::spawn(move || {
-                let registry =
-                    crate::ai::ProviderRegistry::from_environment_with_config(Some(&config_clone));
-                if tx.send_blocking(registry).is_err() {
-                    logging::log(
-                        "APP",
-                        "Provider registry build result dropped: receiver unavailable",
-                    );
-                }
-            });
-
-            cx.spawn(async move |this, cx| {
-                let Ok(registry) = rx.recv().await else {
-                    logging::log(
-                        "APP",
-                        "Background provider registry build failed: channel closed",
-                    );
-                    return;
-                };
-
-                let provider_count = registry.provider_ids().len();
-                let _ = cx.update(|cx| {
-                    this.update(cx, |app, _cx| {
-                        app.cached_provider_registry = Some(registry);
-                        logging::log(
-                            "APP",
-                            &format!(
-                                "Background provider registry ready: {} providers",
-                                provider_count
-                            ),
-                        );
-                    })
-                });
-            })
-            .detach();
-        }
-
-        let app_entity_for_cmd_w = cx.entity().downgrade();
-        let cmd_w_interceptor = cx.intercept_keystrokes({
-            let app_entity = app_entity_for_cmd_w;
-            move |event, window, cx| {
-                if !is_plain_platform_cmd_w(event) {
-                    return;
-                }
-
-                let is_actions = crate::actions::is_actions_window(window);
-                if is_secondary_surface_window(window) {
-                    return;
-                }
-
-                // Actions popups hosted by secondary windows are not the main
-                // launcher's to close.
-                if is_actions && !crate::actions::is_actions_window_open_for_main() {
-                    return;
-                }
-
-                if !script_kit_gpui::is_main_window_visible() && !is_actions {
-                    return;
-                }
-
-                if let Some(app) = app_entity.upgrade() {
-                    app.update(cx, |this, cx| {
-                        this.close_main_window_from_top_level_cmd_w(window, cx);
-                        cx.stop_propagation();
-                    });
-                }
-            }
-        });
-        app.gpui_input_subscriptions.push(cmd_w_interceptor);
+        app.install_main_window_close_interceptor(cx);
 
         // Add Tab key interceptor for "Ask AI" feature and file search directory navigation
         // This fires BEFORE normal key handling, allowing us to intercept Tab
@@ -1191,7 +795,7 @@ impl ScriptListApp {
             move |event, window, cx| {
                 // When the main window is hidden (e.g. Notes/AI open), main-menu
                 // key interceptors must not consume keystrokes from secondary windows.
-                if !script_kit_gpui::is_main_window_visible() {
+                if !crate::windows::accepts_main_window_input(window) {
                     return;
                 }
 
@@ -1731,6 +1335,13 @@ impl ScriptListApp {
                                 cx.stop_propagation();
                                 return;
                             }
+                            if matches!(this.current_view, AppView::ScriptList)
+                                && !this.show_actions_popup
+                                && !crate::actions::is_actions_window_open()
+                            {
+                                this.set_main_menu_dispatch_observation(None);
+                                this.flush_pending_main_menu_query(cx);
+                            }
                             // Menu-syntax trigger picker owns Enter when it is
                             // visible on ScriptList — Accept the selected row
                             // the same way the Agent Chat composer picker does.
@@ -1776,11 +1387,7 @@ impl ScriptListApp {
                                     cx.stop_propagation();
                                     return;
                                 }
-                                if this.main_menu_fallback_state.is_active() {
-                                    this.execute_selected_fallback(cx);
-                                } else {
-                                    this.execute_selected(cx);
-                                }
+                                let _dispatch = this.execute_selected(cx);
                                 cx.stop_propagation();
                                 return;
                             }
@@ -1798,30 +1405,6 @@ impl ScriptListApp {
         });
         app.gpui_input_subscriptions.push(tab_interceptor);
 
-        // Prewarm Agent Chat config and the hidden Agent Chat connection so the first
-        // compatible Agent Chat submit can reuse an initialized runtime/session.
-        crate::ai::agent_chat::ui::prewarm_agent_config();
-
-        // Prewarm Agent Chat and the Tab AI harness asynchronously so AI-entry
-        // shortcuts do not pay subprocess/session startup cost on submit.
-        let app_entity_for_tab_ai_warm = cx.entity().downgrade();
-        cx.spawn(async move |_this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(1))
-                .await;
-            cx.update(|cx| {
-                let Some(app) = app_entity_for_tab_ai_warm.upgrade() else {
-                    return;
-                };
-                app.update(cx, |this, cx| {
-                    this.warm_agent_chat_on_startup(cx);
-                    this.warm_tab_ai_harness_on_startup(cx);
-                    this.warm_quick_terminal_pty(cx);
-                });
-            });
-        })
-        .detach();
-
         // Add arrow key interceptor for builtin views with Input components
         // This fires BEFORE Input component handles arrow keys, allowing list navigation
         let app_entity_for_arrows = cx.entity().downgrade();
@@ -1830,7 +1413,7 @@ impl ScriptListApp {
             move |event, window, cx| {
                 // When the main window is hidden (e.g. Notes/AI open), main-menu
                 // key interceptors must not consume keystrokes from secondary windows.
-                if !script_kit_gpui::is_main_window_visible() {
+                if !crate::windows::accepts_main_window_input(window) {
                     return;
                 }
 
@@ -2500,6 +2083,7 @@ impl ScriptListApp {
                                         cx.stop_propagation();
                                         return;
                                     }
+                                    this.flush_pending_main_menu_query(cx);
 
                                     // Main menu: handle list navigation + input history
                                     const HISTORY: &str = "HISTORY";
@@ -2692,7 +2276,7 @@ impl ScriptListApp {
             move |event, window, cx| {
                 // When the main window is hidden (e.g. Notes/AI open), main-menu
                 // key interceptors must not consume keystrokes from secondary windows.
-                if !script_kit_gpui::is_main_window_visible() {
+                if !crate::windows::accepts_main_window_input(window) {
                     return;
                 }
 
@@ -2873,7 +2457,7 @@ impl ScriptListApp {
 
                 // When the main window is hidden (e.g. Notes/AI open), main-menu
                 // key interceptors must not consume keystrokes from secondary windows.
-                if !script_kit_gpui::is_main_window_visible() {
+                if !crate::windows::accepts_main_window_input(window) {
                     tracing::debug!(
                         target: "script_kit::keyboard",
                         event = "actions_interceptor_main_window_hidden",

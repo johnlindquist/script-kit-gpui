@@ -19,6 +19,10 @@ esac
 if [[ $# -gt 1 ]]; then
 	usage
 fi
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" && "$MODE" == "--auto" ]]; then
+  log 'ERROR: agent provisioning requires explicit --repair (inspection never provisions)'
+  exit 78
+fi
 
 health_receipt() {
 	bun "${REPO_ROOT}/scripts/agentic/pi-sidecar-health.ts" "$1"

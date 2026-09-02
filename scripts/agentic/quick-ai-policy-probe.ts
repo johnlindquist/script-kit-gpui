@@ -137,7 +137,7 @@ try {
 		try {
 			recoveryState = await driver.request(
 				{ type: "getAgentChatState", target: { type: "id", id: "main" } },
-				{ expect: "agentChatStateResult", timeoutMs: 2500 },
+				{ expect: "agent_chatStateResult", timeoutMs: 2500 },
 			);
 		} catch {
 			await Bun.sleep(100);
@@ -232,7 +232,7 @@ try {
 	while (performance.now() < handoffDeadline) {
 		handoffState = await driver.request(
 			{ type: "getAgentChatState", target: { type: "id", id: "main" } },
-			{ expect: "agentChatStateResult", timeoutMs: 8000 },
+			{ expect: "agent_chatStateResult", timeoutMs: 8000 },
 		);
 		if (
 			handoffState?.uiVariant === "standard" &&

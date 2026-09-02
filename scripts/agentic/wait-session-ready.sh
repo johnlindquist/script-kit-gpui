@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Poll session app.log (and optional protocol bus) until ready or timeout.
+# Poll the owned session app.log until ready, dead, or timed out.
 #
 # Usage:
 #   wait-session-ready.sh <SESSION_NAME> [TIMEOUT_SEC]
 #
-# Exit 0: STARTUP_READY or APP_READY seen, or protocol bus has a stateResult.
-# Exit 1: timeout / not alive / empty log stall.
+# Exit 0: STARTUP_READY or APP_READY seen in a live session.
+# Exit 1: session missing or not alive. Exit 41: readiness timeout.
 # Exit 42: app.log stayed empty while process alive (stuck startup).
 set -euo pipefail
 
@@ -32,21 +32,26 @@ fi
 
 SDIR="$(session_sdir "$SESSION")"
 LOG="${SDIR}/app.log"
-BUS="${SDIR}/protocol-responses.ndjson"
 
 if [[ ! -d "$SDIR" ]]; then
   echo "[wait-session-ready] no session dir: ${SDIR}" >&2
   exit 1
 fi
+EXPECTED_GENERATION="$(cat "${SDIR}/generation" 2>/dev/null || true)"
+[[ -n "$EXPECTED_GENERATION" ]] || { echo '[wait-session-ready] missing session generation' >&2; exit 64; }
 
-deadline=$(( $(date +%s) + TIMEOUT_SEC ))
+deadline=$(( SECONDS + TIMEOUT_SEC ))
 last_size=0
 stall_loops=0
 ready_marker=""
 
 echo "[wait-session-ready] session=${SESSION} timeout=${TIMEOUT_SEC}s log=${LOG}" >&2
 
-while [[ $(date +%s) -lt $deadline ]]; do
+# Always inspect liveness once, even when the timeout expires during setup.
+while :; do
+  if [[ "$(cat "${SDIR}/generation" 2>/dev/null || true)" != "$EXPECTED_GENERATION" ]]; then
+    echo '[wait-session-ready] session generation changed' >&2; exit 64
+  fi
   if ! bash "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/session.sh" status "$SESSION" 2>/dev/null | grep -q '"alive":true'; then
     echo "[wait-session-ready] app process not alive" >&2
     bash "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/session.sh" status "$SESSION" >&2 || true
@@ -64,11 +69,6 @@ while [[ $(date +%s) -lt $deadline ]]; do
     exit 0
   fi
 
-  if [[ -f "$BUS" ]] && grep -q '"responseType":"stateResult"' "$BUS" 2>/dev/null; then
-    ready_marker="stateResult"
-    echo "[wait-session-ready] ok: stateResult on protocol bus" >&2
-    exit 0
-  fi
 
   size=0
   if [[ -f "$LOG" ]]; then
@@ -88,8 +88,13 @@ while [[ $(date +%s) -lt $deadline ]]; do
     pgrep -fl 'target/debug/script-kit-gpui' 2>/dev/null | sed 's/^/[wait-session-ready] proc> /' >&2 || true
     exit 42
   fi
+  [[ "$SECONDS" -lt "$deadline" ]] || break
 
-  sleep 2
+
+  remaining=$(( deadline - SECONDS ))
+  if [[ "$remaining" -gt 2 ]]; then remaining=2; fi
+  [[ "$remaining" -gt 0 ]] || break
+  sleep "$remaining"
 done
 
 echo "[wait-session-ready] timeout after ${TIMEOUT_SEC}s (log_bytes=${last_size})" >&2

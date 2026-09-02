@@ -1,76 +1,9 @@
+use super::launch_filter_policy::{
+    filter_change_flips_list_structure, menu_syntax_filter_only_escape_should_clear,
+};
 use super::*;
 
 const FILTER_COMPUTE_DEFER: std::time::Duration = std::time::Duration::from_millis(16);
-
-/// Leading characters that put the launcher list into a structurally
-/// different presentation (sigil hint surfaces, capture composer, command
-/// heads, spine projections, fallback "Use X with..." sections) rather than
-/// just narrowing the fuzzy rows.
-const LIST_STRUCTURE_SIGILS: &[char] = &['@', '/', ';', ':', '!', '~', '|', '>', '+', '.'];
-
-/// Which structural "family" of launcher list a filter query renders.
-#[derive(Debug, PartialEq, Eq)]
-enum FilterListFamily {
-    /// Empty query: default sections (Brain Inbox, Suggested, ...).
-    Default,
-    /// Sigil-headed query (`@`, `/`, `;`, ...): hint/fallback/projection
-    /// surfaces keyed to that sigil.
-    Sigil(char),
-    /// Menu-syntax qualifier head that owns the main list (`has:`, `t:`, ...).
-    QualifierOwned,
-    /// Plain fuzzy-filter text.
-    Plain,
-}
-
-fn filter_list_family(text: &str) -> FilterListFamily {
-    if text.is_empty() {
-        return FilterListFamily::Default;
-    }
-    if let Some(head) = text.trim_start().chars().next() {
-        if LIST_STRUCTURE_SIGILS.contains(&head) {
-            return FilterListFamily::Sigil(head);
-        }
-    }
-    if crate::menu_syntax::active_filter_head_owns_main_list(text) {
-        FilterListFamily::QualifierOwned
-    } else {
-        FilterListFamily::Plain
-    }
-}
-
-/// The input echoes every keystroke immediately, while the grouped list
-/// follows `computed_filter_text` after the coalescer defer. Within one
-/// list family a one-frame-stale list is imperceptible (fuzzy rows narrow
-/// slightly), but across families (default sections vs the `Use "@" with...`
-/// fallback vs a sigil-owned surface) the stale frame reads as a flash of
-/// the wrong screen. Those transitions must apply in the same frame as the
-/// input echo instead of waiting out `FILTER_COMPUTE_DEFER`.
-pub(crate) fn filter_change_flips_list_structure(old: &str, new: &str) -> bool {
-    filter_list_family(old) != filter_list_family(new)
-}
-
-pub(crate) fn menu_syntax_filter_only_escape_should_clear(
-    raw: &str,
-    mode: &crate::menu_syntax::MenuSyntaxMode,
-) -> bool {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if let Some(rest) = trimmed.strip_prefix(':') {
-        return !rest.chars().any(char::is_whitespace);
-    }
-
-    if crate::menu_syntax::active_filter_head_owns_main_list(trimmed) {
-        return true;
-    }
-
-    trimmed.split_whitespace().count() == 1
-        && mode
-            .advanced_query_for(trimmed)
-            .is_some_and(|query| query.free_text.trim().is_empty() && query.has_predicates())
-}
 
 impl ScriptListApp {
     #[inline]
@@ -100,12 +33,191 @@ impl ScriptListApp {
         }
     }
 
-    /// Single authoritative post-filter reconciliation path for ScriptList.
-    ///
-    /// Called after `computed_filter_text` changes (both debounced and immediate).
-    /// Syncs the GPUI list model, resets selection to the first selectable row,
-    /// resets the viewport to leading context, and rebuilds preflight — all
-    /// outside `render()`.
+    fn root_search_scope_for_input(&self, raw: &str) -> String {
+        let file_work = self.root_file_work_identity_for_input(raw);
+        self.root_search_scope_with_file_work(
+            raw,
+            file_work.as_ref().map(|(_, scope, _)| scope.as_str()),
+        )
+    }
+
+    fn root_search_scope_with_file_work(&self, raw: &str, file_scope: Option<&str>) -> String {
+        let advanced = self.menu_syntax_mode.advanced_query_for(raw);
+        let spine_owner = self
+            .spine_projection
+            .as_ref()
+            .filter(|_| self.spine_projection_owns_main_list())
+            .map(|projection| {
+                let head = self
+                    .spine_parse
+                    .segments
+                    .get(projection.active_segment_index)
+                    .and_then(|segment| segment.raw.split_once(':').map(|(head, _)| head));
+                (
+                    projection.active_segment_index,
+                    std::mem::discriminant(&projection.active_segment_kind),
+                    head,
+                )
+            });
+        use sha2::Digest;
+        let scope = format!("sources={:?};predicates={:?};spine={:?};files={:?};cwd={:?};config={:?};object={};trigger={}",
+            advanced.map(|query| &query.source_filters), advanced.map(|query| &query.predicates),
+            spine_owner, file_scope, self.spine_cwd,
+            self.config.unified_search, self.menu_syntax_object_selector_state.owns_main_list(),
+            self.menu_syntax_trigger_picker_state.owns_main_list());
+        format!("{:x}", sha2::Sha256::digest(scope.as_bytes()))
+    }
+
+    pub(super) fn main_menu_has_pending_source_publication(&self) -> bool {
+        matches!(
+            self.main_menu_result_caches.grouped_cache_key(),
+            crate::MAIN_MENU_RESULT_CACHE_UNINITIALIZED_KEY
+                | crate::MAIN_MENU_RESULT_CACHE_INVALIDATED_KEY
+                | crate::MAIN_MENU_RESULT_CACHE_APPS_LOADED_KEY
+        )
+    }
+
+    /// Accept intent before debounce without altering the displayed row snapshot.
+    pub(crate) fn accept_root_search_input_intent(&mut self, raw: &str) -> bool {
+        if !matches!(self.current_view, AppView::ScriptList) {
+            return false;
+        }
+        let file_work = self.root_file_work_identity_for_input(raw);
+        let compatible = file_work
+            .as_ref()
+            .map(|(query, scope, policy)| (query.as_str(), scope.as_str(), *policy));
+        let scope =
+            self.root_search_scope_with_file_work(raw, compatible.map(|(_, scope, _)| scope));
+        if !self
+            .root_search
+            .accept_query_intent(raw, &scope, compatible)
+        {
+            return false;
+        }
+        // Retire a deliberate anchor with the raw query, before deferred row computation.
+        // The old rows may remain painted, but no longer own the new query's selection.
+        self.reset_main_menu_selection_intent();
+        self.main_menu_result_caches.selection_cause = "query_pending";
+        self.main_menu_pointer_press = None;
+        self.invalidate_main_window_preflight();
+        self.mark_main_data_changed();
+        true
+    }
+
+    /// Deliberate input and route restoration resolve the current query before
+    /// choosing or dispatching a subject. Retired timers cannot consume this work.
+    pub(crate) fn flush_pending_main_menu_query(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.current_view, AppView::ScriptList) {
+            return;
+        }
+        let value = self.filter_text.clone();
+        self.set_menu_syntax_mode_from_filter(&value);
+        if self.spine_enabled && self.spine_parse.input != value {
+            self.set_spine_parse_from_filter_and_cursor(&value, value.len());
+        }
+        self.accept_root_search_input_intent(&value);
+        self.apply_filter_compute_now(value, cx);
+    }
+
+    /// Compiled source-change admissions invalidate the actual producer, never
+    /// replace grouped rows or reset the current selection/query intent.
+    pub(crate) fn apply_owned_search_source_change(
+        &mut self,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            crate::runtime_policy::is_owned_evaluation(),
+            "search_source_change_requires_owned_runtime"
+        );
+        use sk_protocol::command_contract::CommandSource;
+        let value = self.computed_filter_text.clone();
+        match source {
+            "tabs" => {
+                crate::browser_tabs::invalidate_owned_root_browser_tabs_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::BrowserTab);
+                self.maybe_start_root_browser_tabs_refresh_for_query(&value, cx);
+            }
+            "history" => {
+                crate::browser_history::invalidate_owned_root_browser_history_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::BrowserHistory);
+                self.maybe_start_root_browser_history_refresh_for_query(&value, cx);
+            }
+            "notes" => {
+                crate::notes::invalidate_owned_root_notes_search_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::Note);
+                self.maybe_start_root_notes_refresh_for_query(&value, cx);
+            }
+            "todos" => {
+                crate::menu_syntax::invalidate_owned_root_todos_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::Todo);
+                self.maybe_start_root_todos_refresh_for_query(&value, cx);
+            }
+            "clipboard" => {
+                crate::clipboard_history::invalidate_owned_root_clipboard_history_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::Clipboard);
+                self.maybe_start_root_clipboard_history_refresh_for_query(&value, cx);
+            }
+            "dictation" => {
+                crate::dictation::invalidate_owned_root_dictation_history_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::Dictation);
+                self.maybe_start_root_dictation_history_refresh_for_query(&value, cx);
+            }
+            "conversations" => {
+                crate::ai::agent_chat::ui::history::invalidate_owned_root_agent_chat_history_freshness()?;
+                self.root_search
+                    .invalidate_provider_request(CommandSource::Conversation);
+                self.maybe_start_root_agent_chat_history_refresh_for_query(&value, cx);
+            }
+            "brain-lexical" => {
+                self.root_search.invalidate_root_brain_lexical_freshness();
+                self.refresh_root_brain_lexical_for_query(&value, true, cx);
+            }
+            "brain-semantic" => {
+                self.root_search.invalidate_root_brain_semantic_freshness();
+                self.maybe_start_root_brain_semantic_search(&value, cx);
+            }
+            "brain-inbox" => {
+                self.root_search.invalidate_root_brain_inbox_freshness();
+                self.refresh_root_brain_inbox_if_stale(true, cx);
+            }
+            "files" | "directory" => self.refresh_root_file_source(cx),
+            "spine" => self.refresh_spine_file_source(cx),
+            "windows" => self.refresh_root_windows_source(cx),
+            "icons" => self.refresh_root_app_icons(cx),
+            "scripts" => self.refresh_scripts(cx),
+            "apps" => self.start_root_app_catalog(cx),
+            "skills" => self.refresh_skills(cx),
+            "validation" => self.refresh_root_validation(cx),
+            "flow-roster" => self.refresh_root_flow_roster(cx),
+            _ => anyhow::bail!("unknown_search_source_change"),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn start_owned_search_catalogues(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            crate::runtime_policy::is_owned_evaluation(),
+            "search_catalogues_require_owned_runtime"
+        );
+        self.refresh_scripts(cx);
+        self.refresh_skills(cx);
+        self.start_root_app_catalog(cx);
+        self.refresh_root_validation(cx);
+        self.refresh_root_flow_roster(cx);
+        Ok(())
+    }
+
+    /// Query owners commit inputs before invoking this explicit row publication.
     pub(crate) fn reconcile_script_list_after_filter_change(
         &mut self,
         reason: &'static str,
@@ -114,161 +226,226 @@ impl ScriptListApp {
         if !matches!(self.current_view, AppView::ScriptList) {
             return;
         }
-
-        // Filter changes intentionally restart from the first selectable row.
-        self.reset_main_menu_selection_user_moved();
-        self.snap_main_menu_selection_to_first();
-
-        // Keep GPUI's list model aligned with the newly computed grouped results.
-        // Filter changes may replace every row while preserving the same count,
-        // so force measured item rebuilding after the new selection is known.
+        match self.rebuild_main_menu_results_cache(cx) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(code) => {
+                self.main_menu_result_caches.publication_error = Some(code);
+                return;
+            }
+        }
+        self.reset_main_menu_selection_intent();
+        self.reconcile_main_menu_selection_intent();
+        self.main_menu_result_caches.selection_cause = "query_reset";
         self.begin_list_viewport_scroll(
             crate::scrolling::list_interaction::ListViewportInputSource::Filter,
             cx,
         );
         self.sync_list_state_for_filter_replacement(MainListReplacementPolicy::ResetToTop);
-        self.validate_selection_bounds(cx);
-
-        // Clear last_scrolled_index so the reveal is never skipped —
-        // filter changes always need a fresh scroll even if selected_index == 0.
-        self.last_scrolled_index = None;
-
-        // Preflight depends on filter, selection, and fallback state. Immediate
-        // typing paths finish their final state after reconciliation, so those
-        // callers own the single final rebuild.
-        let caller_rebuilds_preflight_after_final_state =
-            matches!(reason, "filter_immediate" | "set_filter_text_immediate");
-        if !caller_rebuilds_preflight_after_final_state {
-            self.rebuild_main_window_preflight_if_needed();
-        }
-
-        self.refresh_ghost_with_input(cx);
+        let sequence = self.finish_main_menu_publication(reason, None, cx);
+        cx.notify_with_owned_cause("mainSearchPublication", sequence);
     }
 
-    /// Reconcile ScriptList after async result providers refresh the current query.
-    ///
-    /// Unlike a real filter change, provider completions should keep the user's
-    /// current row selected when that row still exists in the refreshed list.
+    /// Capture committed interaction before accepted sources mutate, then publish once.
+    pub(crate) fn commit_main_menu_results_refresh(
+        &mut self,
+        reason: &'static str,
+        source: Option<(&'static str, u64)>,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, &mut Context<Self>) -> bool,
+    ) -> bool {
+        let interaction_before = self.main_menu_interaction_snapshot();
+        if !apply(self, cx) {
+            return false;
+        }
+        self.invalidate_filter_cache();
+        self.invalidate_grouped_cache();
+        if !matches!(self.current_view, AppView::ScriptList) || !self.root_search.query_is_current()
+        {
+            return false;
+        }
+        match self.rebuild_main_menu_results_cache(cx) {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(code) => {
+                tracing::warn!(target: "script_kit::selection", event = "main_menu_publication_rejected", reason, code);
+                self.main_menu_result_caches.publication_error = Some(code);
+                self.mark_main_presentation_changed();
+                cx.notify();
+                return false;
+            }
+        }
+        self.reconcile_script_list_after_results_refresh(reason, interaction_before, cx);
+        let sequence = self.finish_main_menu_publication(reason, source, cx);
+        cx.notify_with_owned_cause("mainSearchPublication", sequence);
+        true
+    }
+
+    /// Selection is resolved against the new committed projection before ListState replacement.
     pub(crate) fn reconcile_script_list_after_results_refresh(
         &mut self,
         reason: &'static str,
         interaction_before: MainMenuInteractionSnapshot,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.current_view, AppView::ScriptList) {
-            return;
-        }
-
+        let same_query =
+            interaction_before.selection.query_stamp == self.main_menu_committed_query_stamp();
+        self.main_menu_result_caches.selection_intent = if same_query {
+            interaction_before.selection.intent
+        } else {
+            MainMenuSelectionIntent::AutomaticTop
+        };
+        self.reconcile_main_menu_selection_intent();
+        let viewport = interaction_before.viewport;
+        let automatic = matches!(
+            self.main_menu_selection_intent(),
+            MainMenuSelectionIntent::AutomaticTop
+        );
+        let viewport_policy = viewport.intent.refresh_policy(
+            automatic,
+            same_query,
+            viewport.selected_was_within_safe_viewport,
+        );
+        let (policy, reveal) = match viewport_policy {
+            crate::scrolling::list_interaction::MainMenuRefreshViewportPolicy::ResetToTop => {
+                if !same_query {
+                    self.main_menu_result_caches.viewport_intent =
+                        MainMenuViewportIntent::FollowSelection;
+                }
+                (MainListReplacementPolicy::ResetToTop, false)
+            }
+            crate::scrolling::list_interaction::MainMenuRefreshViewportPolicy::Preserve {
+                reveal_selection,
+            } => (
+                MainListReplacementPolicy::PreserveViewport(viewport),
+                reveal_selection,
+            ),
+        };
         self.begin_list_viewport_scroll(
             crate::scrolling::list_interaction::ListViewportInputSource::Refresh,
             cx,
         );
-        self.sync_list_state_for_filter_replacement(MainListReplacementPolicy::PreserveViewport(
-            interaction_before.viewport,
-        ));
-
-        let restored = self.restore_main_menu_selection_from_snapshot(interaction_before.selection);
-        if !restored {
-            self.snap_main_menu_selection_to_first();
-            tracing::debug!(
-                target: "script_kit::selection",
-                event = "main_menu_refresh_snap_to_first_missing_identity",
-                reason,
-                selected_index = self.selected_index,
-            );
+        self.sync_list_state_for_filter_replacement(policy);
+        if reveal {
+            self.adjust_selected_item_above_footer_overlay(self.selected_index);
+            self.schedule_main_list_selection_reveal_above_footer(reason, cx);
         }
-        if restored {
-            tracing::debug!(
-                target: "script_kit::selection",
-                event = "main_menu_async_refresh_selection_reconciled",
-                reason,
-                selected_index = self.selected_index,
-            );
-        } else if self.selected_index == 0 {
-            tracing::warn!(
-                target: "script_kit::selection",
-                event = "main_menu_async_refresh_selected_first_without_restore",
-                reason,
-                selected_index = self.selected_index,
-            );
-        } else {
-            tracing::debug!(
-                target: "script_kit::selection",
-                event = "main_menu_async_refresh_selection_reconciled",
-                reason,
-                selected_index = self.selected_index,
-                restored = false,
-            );
-        }
-        self.validate_selection_bounds(cx);
+    }
 
+    fn finish_main_menu_publication(
+        &mut self,
+        reason: &'static str,
+        source: Option<(&'static str, u64)>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.invalidate_preview_cache();
+        self.invalidate_main_window_preflight();
+        self.mark_main_data_changed();
         self.rebuild_main_window_preflight_if_needed();
         self.refresh_ghost_with_input(cx);
+        let sequence = self.main_menu_last_publication().map_or(1, |stamp| {
+            stamp
+                .sequence
+                .checked_add(1)
+                .expect("main search publication sequence exhausted")
+        });
+        self.main_menu_result_caches.last_publication = Some(MainMenuPublicationStamp {
+            sequence,
+            reason,
+            source: source.map(|(source, _)| source),
+            source_generation: source.map(|(_, generation)| generation),
+            query: self.root_search.query_stamp(),
+            result_revision: self.main_menu_result_revision(),
+            selection_revision: self.main_menu_selection_revision(),
+            viewport_revision: self.main_menu_viewport_revision(),
+        });
+        sequence
     }
 
     fn apply_filter_compute_now(&mut self, value: String, cx: &mut Context<Self>) {
-        if self.computed_filter_text == value {
-            tracing::debug!(
-                target: "script_kit::filter",
-                event = "apply_filter_compute_exact_query_noop",
-                filter_len = value.len(),
-            );
+        if value != self.filter_text {
             return;
         }
-        if logging::filter_perf_trace_enabled() {
-            logging::log(
-                "FILTER_PERF",
-                &format!(
-                    "[2/5] APPLY_FILTER value={} len={}",
-                    logging::log_private_user_value(&value),
-                    value.len(),
-                ),
-            );
-        }
-        if self.computed_filter_text != value {
-            let update_start = std::time::Instant::now();
-            self.filter_coalescer.reset();
-            self.computed_filter_text = value.clone();
-            if crate::menu_syntax::active_filter_head_owns_main_list(&value) {
-                self.main_menu_fallback_state.clear();
-                self.invalidate_grouped_cache();
+        if !matches!(self.current_view, AppView::ScriptList) {
+            if self.computed_filter_text == value {
+                return;
             }
-            self.maybe_start_root_file_search(&value, cx);
-            self.maybe_start_root_brain_semantic_search(&value, cx);
-            self.refresh_root_brain_inbox_if_stale(false, cx);
-            self.maybe_start_root_notes_refresh_for_query(&value, cx);
-            self.maybe_start_root_todos_refresh_for_query(&value, cx);
-            self.maybe_start_root_windows_refresh_for_query(&value, cx);
-            self.maybe_start_root_browser_tabs_refresh_for_query(&value, cx);
-            self.maybe_start_root_browser_history_refresh_for_query(&value, cx);
-            self.maybe_start_root_clipboard_history_refresh_for_query(&value, cx);
-            self.maybe_start_root_dictation_history_refresh_for_query(&value, cx);
-            self.maybe_start_root_agent_chat_history_refresh_for_query(&value, cx);
-            self.reconcile_script_list_after_filter_change("filter_immediate", cx);
-            self.rebuild_main_window_preflight_if_needed();
+            self.filter_coalescer.reset();
+            self.computed_filter_text = value;
+            self.mark_main_data_changed();
             if self.filter_change_can_affect_window_size() {
                 self.update_window_size();
             }
-            let update_elapsed = update_start.elapsed();
-            if logging::filter_perf_trace_enabled()
-                || update_elapsed >= std::time::Duration::from_millis(8)
-            {
-                logging::log(
-                    "FILTER_PERF",
-                    &format!(
-                        "[3/5] APPLY_FILTER_DONE in {:.2}ms for {} ({} bytes)",
-                        update_elapsed.as_secs_f64() * 1000.0,
-                        logging::log_private_user_value(&value),
-                        value.len(),
-                    ),
-                );
-            }
             cx.notify();
+            return;
+        }
+        self.accept_root_search_input_intent(&value);
+        if self.computed_filter_text == value
+            && self.root_search.query_is_current()
+            && self.main_menu_committed_query_stamp() == self.root_search.computed_query_stamp()
+        {
+            if self.main_menu_has_pending_source_publication() {
+                self.commit_main_menu_results_refresh("source_invalidation", None, cx, |_, _| true);
+            }
+            return;
+        }
+        let started = std::time::Instant::now();
+        self.filter_coalescer.reset();
+        if !self.root_search.commit_query_inputs(
+            &value,
+            self.menu_syntax_mode.clone(),
+            self.spine_parse.clone(),
+            self.spine_projection.clone(),
+        ) {
+            return;
+        }
+        self.computed_filter_text = value.clone();
+        self.inline_calculator = crate::calculator::try_build(&value);
+        self.invalidate_filter_cache();
+        self.invalidate_grouped_cache();
+        if crate::menu_syntax::active_filter_head_owns_main_list(&value) {
+            self.main_menu_fallback_state.clear();
+        }
+        self.maybe_start_root_file_search(&value, cx);
+        self.refresh_root_brain_lexical_for_query(&value, false, cx);
+        self.maybe_start_root_brain_semantic_search(&value, cx);
+        self.refresh_root_brain_inbox_if_stale(false, cx);
+        self.maybe_start_root_notes_refresh_for_query(&value, cx);
+        self.maybe_start_root_todos_refresh_for_query(&value, cx);
+        self.maybe_start_root_windows_refresh_for_query(&value, cx);
+        self.maybe_start_root_browser_tabs_refresh_for_query(&value, cx);
+        self.maybe_start_root_browser_history_refresh_for_query(&value, cx);
+        self.maybe_start_root_clipboard_history_refresh_for_query(&value, cx);
+        self.maybe_start_root_dictation_history_refresh_for_query(&value, cx);
+        self.maybe_start_root_agent_chat_history_refresh_for_query(&value, cx);
+        self.maybe_start_spine_file_subsearch_for_current_projection(cx);
+        self.reconcile_script_list_after_filter_change("query_commit", cx);
+        if self.filter_change_can_affect_window_size() {
+            self.update_window_size();
+        }
+        if logging::filter_perf_trace_enabled()
+            || started.elapsed() >= std::time::Duration::from_millis(8)
+        {
+            tracing::debug!(target: "script_kit::filter", event = "query_committed",
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, filter_len = value.len());
         }
     }
 
     pub(crate) fn queue_filter_compute(&mut self, value: String, cx: &mut Context<Self>) {
-        if self.computed_filter_text == value {
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.accept_root_search_input_intent(&value);
+            if self.computed_filter_text == value
+                && self.root_search.query_is_current()
+                && self.main_menu_has_pending_source_publication()
+            {
+                self.apply_filter_compute_now(value, cx);
+                return;
+            }
+        }
+        if self.computed_filter_text == value
+            && (!matches!(self.current_view, AppView::ScriptList)
+                || self.root_search.query_is_current())
+        {
             tracing::debug!(
                 target: "script_kit::filter",
                 event = "queue_filter_compute_exact_query_noop",
@@ -283,27 +460,37 @@ impl ScriptListApp {
         // new text, so compute now instead of deferring. Same-family typing
         // keeps the coalescer so rapid keystrokes still skip intermediate
         // computes.
-        if filter_change_flips_list_structure(&self.computed_filter_text, &value) {
+        let root_scope_changed = matches!(self.current_view, AppView::ScriptList)
+            && self
+                .root_search
+                .computed_query_stamp()
+                .is_none_or(|computed| {
+                    let live = self.root_search.query_stamp();
+                    computed.lifetime != live.lifetime
+                        || computed.scope_revision != live.scope_revision
+                });
+        if root_scope_changed
+            || filter_change_flips_list_structure(&self.computed_filter_text, &value)
+        {
             self.filter_coalescer.reset();
             self.apply_filter_compute_now(value, cx);
             return;
         }
 
-        let should_spawn = self.filter_coalescer.queue(value);
-        if !should_spawn {
+        let Some(ticket) = self.filter_coalescer.queue(value) else {
             tracing::debug!(
                 target: "script_kit::filter",
                 event = "queue_filter_compute_coalesced",
             );
             return;
-        }
+        };
 
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FILTER_COMPUTE_DEFER).await;
 
             let _ = cx.update(|cx| {
                 this.update(cx, |app, cx| {
-                    let Some(latest) = app.filter_coalescer.take_latest() else {
+                    let Some(latest) = app.filter_coalescer.take_latest(ticket) else {
                         return;
                     };
                     app.apply_filter_compute_now(latest, cx);
@@ -326,9 +513,10 @@ impl ScriptListApp {
     /// Callers consuming `getState.inputValue` MUST handle payloads up
     /// to that cap. Pinned by
     /// `tests/stdin_setfilter_input_value_verbatim_contract.rs`.
-    pub(crate) fn set_filter_text_immediate(
+    pub(crate) fn set_filter_text_and_cursor_immediate(
         &mut self,
         text: String,
+        cursor_position: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -347,6 +535,7 @@ impl ScriptListApp {
         } else {
             text
         };
+        let cursor = self.clamp_filter_cursor_to_char_boundary(&text, cursor_position);
 
         self.pending_menu_syntax_ai_proposal = None;
 
@@ -357,8 +546,7 @@ impl ScriptListApp {
             self.gpui_input_state.update(cx, |state, cx| {
                 state.set_highlight_ranges_with_roles(Vec::new());
                 state.set_value(text.clone(), window, cx);
-                let len = text.len();
-                state.set_selection(len, len, window, cx);
+                state.set_selection(cursor, cursor, window, cx);
             });
             self.suppress_filter_events = false;
             self.pending_filter_sync = false;
@@ -366,16 +554,25 @@ impl ScriptListApp {
                 chat.set_input(text.clone(), cx);
                 chat.refresh_agent_chat_spine_from_composer(cx);
             });
+            self.note_main_input_changed(cx);
             cx.notify();
             return;
         }
 
         let input_already_matches = self.gpui_input_state.read(cx).value() == text;
+        let input_selection_matches =
+            self.gpui_input_state.read(cx).selection() == (cursor..cursor);
         if matches!(self.current_view, AppView::ScriptList)
             && self.filter_text == text
             && self.computed_filter_text == text
+            && self.root_search.query_is_current()
+            && self.root_search.accepted_scope() == self.root_search_scope_for_input(&text)
             && input_already_matches
+            && input_selection_matches
+            && self.root_search.computed_spine_parse() == &self.spine_parse
+            && self.root_search.computed_spine_projection() == self.spine_projection.as_ref()
             && !self.pending_filter_sync
+            && !self.main_menu_has_pending_source_publication()
         {
             self.pending_programmatic_filter_echo = None;
             tracing::debug!(
@@ -391,10 +588,13 @@ impl ScriptListApp {
         self.pending_programmatic_filter_echo = Some(text.clone());
         self.gpui_input_state.update(cx, |state, cx| {
             state.set_highlight_ranges_with_roles(Vec::new());
-            state.set_value(text.clone(), window, cx);
-            let len = text.len();
-            state.set_selection(len, len, window, cx);
+            if !input_already_matches {
+                state.set_value(text.clone(), window, cx);
+            }
+            state.set_selection(cursor, cursor, window, cx);
         });
+        // Change events are queued; bind input authority before the publication can paint.
+        self.note_main_input_changed(cx);
         // The input's highlight ranges were just cleared, so the render-side
         // cache must be invalidated too. Otherwise, when the recomputed ranges
         // happen to equal the cached ones (e.g. the `@file:` prefix accent is
@@ -457,7 +657,6 @@ impl ScriptListApp {
             return;
         }
 
-        let mut handler_form_owns_input = false;
         if !handled_by_subview && matches!(self.current_view, AppView::ScriptList) {
             if let Some(entry) = Self::special_entry_from_script_list_filter(&text) {
                 if self.route_script_list_special_entry(entry, &text, window, cx) {
@@ -466,8 +665,7 @@ impl ScriptListApp {
             }
             self.set_menu_syntax_mode_from_filter(&text);
             if self.spine_enabled {
-                self.set_spine_parse_from_filter_and_cursor(&text, text.len());
-                self.maybe_start_spine_file_subsearch_for_current_projection(cx);
+                self.set_spine_parse_from_filter_and_cursor(&text, cursor);
                 let has_cwd_segment = self.spine_parse.segments.iter().any(|s| {
                     matches!(s.kind, crate::spine::SpineSegmentKind::ProjectCwd { .. })
                         && matches!(
@@ -483,7 +681,8 @@ impl ScriptListApp {
                 // chip.
                 let _ = has_cwd_segment;
             }
-            handler_form_owns_input = self.menu_syntax_capture_form_owns_input_for(&text);
+            self.accept_root_search_input_intent(&text);
+            let handler_form_owns_input = self.menu_syntax_capture_form_owns_input_for(&text);
             self.sync_menu_syntax_form_inputs_from_filter(window, cx);
             let handler_form_field_owns_input =
                 self.menu_syntax_form_input_active && handler_form_owns_input;
@@ -523,59 +722,39 @@ impl ScriptListApp {
             || self.menu_syntax_capture_form_owns_input_for(&text)
             || crate::menu_syntax::active_filter_head_owns_main_list(&text)
         {
-            // Menu syntax owns the result list entirely — clear any stale
-            // fallback items so pressing Enter routes to execute_selected,
-            // not execute_selected_fallback. Also clear when the trigger
-            // picker is active for a partial trigger like `;t` (where
-            // `is_menu_syntax_for` still returns false because the parser
-            // doesn't yet recognize `;t` as a full target).
+            // Typed menu ownership suppresses unrelated launcher fallbacks.
+            // Dispatch resolves only the committed canonical row projection.
             self.main_menu_fallback_state.clear();
         }
 
-        self.computed_filter_text = text.clone();
-        self.filter_coalescer.reset();
-        self.maybe_start_root_file_search(&text, cx);
-        self.maybe_start_root_brain_semantic_search(&text, cx);
-        self.refresh_root_brain_inbox_if_stale(false, cx);
-        self.maybe_start_root_notes_refresh_for_query(&text, cx);
-        self.maybe_start_root_todos_refresh_for_query(&text, cx);
-        self.maybe_start_root_windows_refresh_for_query(&text, cx);
-        self.maybe_start_root_browser_tabs_refresh_for_query(&text, cx);
-        self.maybe_start_root_browser_history_refresh_for_query(&text, cx);
-        self.maybe_start_root_clipboard_history_refresh_for_query(&text, cx);
-        self.maybe_start_root_dictation_history_refresh_for_query(&text, cx);
-        self.maybe_start_root_agent_chat_history_refresh_for_query(&text, cx);
-        self.reconcile_script_list_after_filter_change("set_filter_text_immediate", cx);
-
-        // Update fallback state immediately based on filter results
-        // This ensures SimulateKey commands can check fallback state correctly
-        // NOTE: validate_selection_bounds already clears main_menu_fallback_state,
-        // but we need special handling for legacy SimulateKey compatibility.
-        // Skip when a subview handled the filter: `get_filtered_results_cached`
-        // and `collect_fallbacks` are ScriptList-only and would incorrectly
-        // flip a builtin subview into the script-list fallback mode.
-        if !handled_by_subview
-            && !text.is_empty()
-            && !handler_form_owns_input
-            && !self.menu_syntax_mode.is_menu_syntax_for(&text)
-            && !crate::menu_syntax::active_filter_head_owns_main_list(&text)
-            && self.menu_syntax_trigger_picker_state.snapshot.is_none()
-            && self.menu_syntax_object_selector_state.snapshot.is_none()
-        {
-            let results = self.get_filtered_results_cached();
-            if results.is_empty() {
-                // No matches - check if we should enter fallback mode
-                use crate::fallbacks::collect_fallbacks;
-                let fallbacks = collect_fallbacks(&text, self.scripts.as_slice());
-                if !fallbacks.is_empty() {
-                    self.main_menu_fallback_state.replace_items(fallbacks);
-                }
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.accept_root_search_input_intent(&text);
+            if self.root_search.query_is_current()
+                && (self.root_search.computed_spine_parse() != &self.spine_parse
+                    || self.root_search.computed_spine_projection()
+                        != self.spine_projection.as_ref())
+            {
+                self.commit_main_menu_results_refresh(
+                    "spine_cursor_projection",
+                    None,
+                    cx,
+                    |app, _cx| {
+                        app.root_search.commit_query_inputs(
+                            &text,
+                            app.menu_syntax_mode.clone(),
+                            app.spine_parse.clone(),
+                            app.spine_projection.clone(),
+                        )
+                    },
+                );
             }
+            self.apply_filter_compute_now(text.clone(), cx);
+        } else {
+            self.computed_filter_text = text.clone();
+            self.filter_coalescer.reset();
         }
 
-        // Single final preflight rebuild for immediate input changes. This must
-        // stay after fallback state updates so submit diagnostics/preflight see
-        // the final filter, selection, and fallback model.
+        // Preflight binds to the final committed input and row projection.
         self.rebuild_main_window_preflight_if_needed();
         if self.filter_change_can_affect_window_size() {
             self.update_window_size_deferred(window, cx);
@@ -936,26 +1115,43 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.spine_projection_owns_main_list() {
+        let inputs = self.root_search.computed_query_inputs();
+        if inputs.spine_parse.input != inputs.raw
+            || !self.spine_projection_owns_main_list_for(
+                &inputs.spine_parse,
+                inputs.spine_projection.as_ref(),
+            )
+        {
             return false;
         }
+        let Some(ResolvedMainMenuSelection::SearchResult { row, .. }) =
+            self.resolved_main_menu_selected_subject()
+        else {
+            return false;
+        };
+        if !row.eligibility.activatable {
+            return false;
+        }
+        let observation = MainMenuDispatchObservation {
+            query: self.root_search.query_stamp(),
+            stable_key: row.stable_key.clone(),
+            content_fingerprint: row.content_fingerprint.clone(),
+            status: "dispatchRequested",
+            reason: None,
+        };
         // Rich subsearch rows (files, clipboard, notes, scripts, history,
         // calendar, …) need interception: resolve them into compact
         // `@source:label` tokens + alias-registered context instead of
         // executing default launcher behavior (file-open, script-run,
         // note-open) while the user is mid-prompt.
         if let Some(outcome) = self.selected_spine_rich_subsearch_outcome() {
-            if let Some((token, part)) = outcome.alias {
-                let safe_token = logging::log_private_user_value(&token);
-                tracing::info!(
-                    target: "script_kit::spine",
-                    event = "spine_subsearch_alias_registered",
-                    token_bytes = safe_token.raw_bytes,
-                    token_sha256 = %safe_token.sha256,
-                );
-                self.spine_mention_aliases.insert(token, part);
-            }
-            return self.apply_spine_list_action(outcome.action, window, cx);
+            let handled = self.apply_spine_attachment_outcome(outcome, window, cx);
+            self.set_main_menu_dispatch_observation(Some(MainMenuDispatchObservation {
+                status: if handled { "completed" } else { "refused" },
+                reason: (!handled).then_some("main_menu_spine_action_refused"),
+                ..observation
+            }));
+            return handled;
         }
         let Some(row) = self.selected_spine_projection_row() else {
             tracing::debug!(
@@ -977,13 +1173,39 @@ impl ScriptListApp {
             row_title_sha256 = %safe_row_title.sha256,
             selected_index = self.selected_index,
         );
-        self.apply_spine_list_action(action, window, cx)
+        let handled = self.apply_spine_list_action(action, window, cx);
+        self.set_main_menu_dispatch_observation(Some(MainMenuDispatchObservation {
+            status: if handled { "completed" } else { "refused" },
+            reason: (!handled).then_some("main_menu_spine_action_refused"),
+            ..observation
+        }));
+        handled
+    }
+
+    fn apply_spine_attachment_outcome(
+        &mut self,
+        outcome: crate::spine::attach::SpineAttachOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some((token, part)) = outcome.alias {
+            let safe_token = logging::log_private_user_value(&token);
+            tracing::info!(
+                target: "script_kit::spine",
+                event = "spine_subsearch_alias_registered",
+                token_bytes = safe_token.raw_bytes,
+                token_sha256 = %safe_token.sha256,
+            );
+            self.spine_mention_aliases.insert(token, part);
+        }
+        self.apply_spine_list_action(outcome.action, window, cx)
     }
 
     fn selected_spine_rich_subsearch_outcome(
         &mut self,
     ) -> Option<crate::spine::attach::SpineAttachOutcome> {
-        let projection = self.spine_projection.as_ref()?;
+        let inputs = self.root_search.computed_query_inputs();
+        let projection = inputs.spine_projection.as_ref()?;
         let crate::spine::SpineSegmentKind::ContextMention {
             context_type,
             sub_query,
@@ -996,18 +1218,17 @@ impl ScriptListApp {
             sub_query.as_deref(),
         )?;
         let segment_index = projection.active_segment_index;
-        let segment_byte_range = self
+        let segment_byte_range = inputs
             .spine_parse
             .segments
             .get(segment_index)
             .map(|seg| seg.byte_range.clone())?;
 
-        let (grouped, flat) = self.get_grouped_results_cached();
-        let result_idx = match grouped.get(self.selected_index)? {
-            GroupedListItem::Item(idx) => *idx,
-            _ => return None,
+        let ResolvedMainMenuSelection::SearchResult { result, .. } =
+            self.resolved_main_menu_selected_subject()?
+        else {
+            return None;
         };
-        let result = flat.get(result_idx)?;
 
         let mut outcome = crate::spine::attach::attach_outcome_for_result(
             source,
@@ -1165,24 +1386,14 @@ impl ScriptListApp {
 
     /// Return the `SpineListRow` at the current `selected_index`, if any.
     pub(crate) fn selected_spine_projection_row(&mut self) -> Option<crate::spine::SpineListRow> {
-        let (grouped, flat) = self.get_grouped_results_cached();
-        let item = grouped.get(self.selected_index)?;
-        match item {
-            GroupedListItem::Item(result_idx) => {
-                if let Some(crate::scripts::SearchResult::SpineProjection(row)) =
-                    flat.get(*result_idx)
-                {
-                    if row.is_selectable {
-                        Some(row.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        let ResolvedMainMenuSelection::SearchResult {
+            result: scripts::SearchResult::SpineProjection(row),
+            ..
+        } = self.resolved_main_menu_selected_subject()?
+        else {
+            return None;
+        };
+        Some(row.clone())
     }
 
     /// Dispatch a `SpineListAction` from a selected row.
@@ -1338,13 +1549,9 @@ impl ScriptListApp {
                         self.open_quick_terminal(None, cx);
                         true
                     }
-                    '?' => {
-                        if self.has_actions() {
-                            self.toggle_actions(cx, window);
-                            true
-                        } else {
-                            false
-                        }
+                    '?' if self.has_actions() => {
+                        self.toggle_actions(cx, window);
+                        true
                     }
                     _ => false,
                 }
@@ -1368,6 +1575,39 @@ impl ScriptListApp {
                     cx,
                 );
                 true
+            }
+            SpineListAction::AcceptMenuSyntaxTrigger { row_id } => {
+                self.accept_menu_syntax_trigger_picker_row(row_id.as_ref(), Some(window), cx)
+            }
+            SpineListAction::AcceptMenuSyntaxObject { row_id } => {
+                self.accept_menu_syntax_object_selector_row(row_id.as_ref(), Some(window), cx)
+            }
+            SpineListAction::AttachContextResult { source } => {
+                let inputs = self.root_search.computed_query_inputs();
+                if inputs.spine_parse.input != inputs.raw
+                    || !self.spine_projection_owns_main_list_for(
+                        &inputs.spine_parse,
+                        inputs.spine_projection.as_ref(),
+                    )
+                {
+                    return false;
+                }
+                let Some(ResolvedMainMenuSelection::SearchResult {
+                    row,
+                    result: scripts::SearchResult::SpineProjection(selected),
+                }) = self.resolved_main_menu_selected_subject()
+                else {
+                    return false;
+                };
+                if !row.eligibility.activatable
+                    || !matches!(&selected.action, SpineListAction::AttachContextResult { source: owner } if owner == &source)
+                {
+                    return false;
+                }
+                let Some(outcome) = self.selected_spine_rich_subsearch_outcome() else {
+                    return false;
+                };
+                self.apply_spine_attachment_outcome(outcome, window, cx)
             }
             SpineListAction::Noop => false,
         }
@@ -1445,38 +1685,15 @@ impl ScriptListApp {
         true
     }
 
-    /// Set filter text and cursor position in one shot, then reparse spine.
-    pub(crate) fn set_filter_text_and_cursor_immediate(
+    /// Set filter text with the caret at the end through the cursor-aware owner.
+    pub(crate) fn set_filter_text_immediate(
         &mut self,
         text: String,
-        cursor_position: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Use existing set_filter_text_immediate to sync filter + input state.
-        self.set_filter_text_immediate(text.clone(), window, cx);
-
-        // Now reposition the cursor (set_filter_text_immediate places it at end).
-        let cursor = self.clamp_filter_cursor_to_char_boundary(&text, cursor_position);
-        self.suppress_filter_events = true;
-        self.gpui_input_state.update(cx, |state, cx| {
-            state.set_selection(cursor, cursor, window, cx);
-        });
-        self.suppress_filter_events = false;
-
-        // Reparse spine at the new cursor position before
-        // invalidation/reconciliation so sigil list state sees the correct
-        // projection.
-        if self.spine_enabled {
-            self.set_spine_parse_from_filter_and_cursor(&text, cursor);
-            self.maybe_start_spine_file_subsearch_for_current_projection(cx);
-        }
-
-        self.main_menu_fallback_state.clear();
-        self.invalidate_grouped_cache();
-        self.reconcile_script_list_after_filter_change("spine_segment_replace", cx);
-
-        cx.notify();
+        let cursor = text.len();
+        self.set_filter_text_and_cursor_immediate(text, cursor, window, cx);
     }
 
     /// Check if a byte range is valid for the given filter text.
@@ -1565,6 +1782,20 @@ mod tests {
         assert!(!should_clear(""));
     }
 
+    fn commit_selection_test_query(
+        app: &mut ScriptListApp,
+        query: &str,
+        cx: &mut Context<ScriptListApp>,
+    ) {
+        app.filter_text = query.to_string();
+        app.flush_pending_main_menu_query(cx);
+        assert!(app.root_search.query_is_current());
+        assert_eq!(
+            app.main_menu_committed_query_stamp(),
+            app.root_search.computed_query_stamp()
+        );
+    }
+
     #[gpui::test]
     fn query_change_discards_root_file_handoff_selection(cx: &mut gpui::TestAppContext) {
         let app = main_menu_selection_test_app(cx);
@@ -1579,31 +1810,23 @@ mod tests {
             app.scriptlets.clear();
             app.skills.clear();
             app.apps.clear();
-            app.computed_filter_text = old_query.to_string();
-            app.filter_text = old_query.to_string();
-            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(old_query);
-            app.root_search.root_file_search_mode =
-                Some(crate::file_search::RootFileSectionMode::GlobalQuery);
-            app.root_search.root_file_search_query = old_query.to_string();
-            app.root_search.root_file_search_loading = true;
-            app.root_search.root_file_provider_loading = true;
-            app.invalidate_grouped_cache();
-            app.get_grouped_results_cached();
+            commit_selection_test_query(app, old_query, cx);
 
-            app.selected_index = app
+            let handoff_index = app
                 .main_menu_result_caches
                 .grouped_index_for_stable_selection_key(handoff_key)
                 .expect("old query should include the Search Files handoff");
-            app.mark_main_menu_selection_user_moved();
+            assert!(app.select_main_menu_row(handoff_index, MainMenuSelectionOrigin::Keyboard, cx));
 
-            app.filter_text = new_query.to_string();
-            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(new_query);
-            app.apply_filter_compute_now(new_query.to_string(), cx);
+            commit_selection_test_query(app, new_query, cx);
 
             let selected_key = selected_main_menu_stable_key(app);
             let first_key = first_selectable_main_menu_stable_key(app);
             assert_eq!(app.computed_filter_text, new_query);
-            assert!(!app.main_menu_selection_user_moved);
+            assert!(matches!(
+                app.main_menu_selection_intent(),
+                MainMenuSelectionIntent::AutomaticAnchor { .. }
+            ));
             assert_eq!(selected_key, first_key);
             assert_eq!(app.main_list_state.logical_scroll_top().item_ix, 0);
             assert_eq!(
@@ -1633,13 +1856,13 @@ mod tests {
             app.scriptlets.clear();
             app.skills.clear();
             app.apps.clear();
-            app.apply_filter_compute_now("zzwp5clear".to_string(), cx);
+            commit_selection_test_query(app, "zzwp5clear", cx);
             app.main_list_state.scroll_to(gpui::ListOffset {
                 item_ix: 1,
                 offset_in_item: gpui::px(9.0),
             });
 
-            app.apply_filter_compute_now(String::new(), cx);
+            commit_selection_test_query(app, "", cx);
 
             assert_eq!(app.computed_filter_text, "");
             assert_eq!(
@@ -1653,7 +1876,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn lazy_same_query_refresh_preserves_offscreen_selection_and_viewport_anchor(
+    fn committed_same_query_refresh_preserves_offscreen_selection_and_viewport_anchor(
         cx: &mut gpui::TestAppContext,
     ) {
         let app = main_menu_selection_test_app(cx);
@@ -1664,9 +1887,8 @@ mod tests {
             app.scriptlets.clear();
             app.skills.clear();
             app.apps.clear();
-            app.apply_filter_compute_now("zzwp5refresh".to_string(), cx);
+            commit_selection_test_query(app, "zzwp5refresh", cx);
 
-            app.get_grouped_results_cached();
             let first = app
                 .main_menu_result_caches
                 .first_selectable_index()
@@ -1675,8 +1897,8 @@ mod tests {
                 .main_menu_result_caches
                 .last_selectable_index()
                 .expect("refresh fixture has a trailing selectable row");
-            app.selected_index = first;
-            app.mark_main_menu_selection_user_moved();
+            assert!(app.select_main_menu_row(first, MainMenuSelectionOrigin::Keyboard, cx));
+            app.begin_list_viewport_scroll(crate::scrolling::list_interaction::ListViewportInputSource::Wheel, cx);
             let selected_key_before = selected_main_menu_stable_key(app);
             app.main_list_state.scroll_to(gpui::ListOffset {
                 item_ix: last,
@@ -1695,17 +1917,14 @@ mod tests {
                     .selected_was_within_safe_viewport
             );
 
-            app.scripts.reverse();
-            app.invalidate_filter_cache();
-            app.invalidate_grouped_cache();
-            app.reconcile_script_list_after_results_refresh(
-                "test_lazy_same_query_refresh",
-                interaction_before,
-                cx,
-            );
+            assert!(app.commit_main_menu_results_refresh("test_same_query_refresh", None, cx, |app, _cx| {
+                app.scripts.reverse();
+                true
+            }));
 
             let viewport_after = app.main_menu_viewport_snapshot();
             assert_eq!(selected_main_menu_stable_key(app), selected_key_before);
+            assert!(matches!(app.main_menu_selection_intent(), MainMenuSelectionIntent::ExplicitAnchor { stable_key } if Some(stable_key) == selected_key_before.as_ref()));
             assert_eq!(
                 viewport_after.first_visible_keys.first(),
                 Some(&anchor_before)

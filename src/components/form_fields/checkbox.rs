@@ -11,6 +11,7 @@ pub struct FormCheckbox {
     colors: FormFieldColors,
     /// Whether the checkbox is checked
     checked: bool,
+    input_revision: u64,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Shared state for external access (stores "true" or "false")
@@ -32,6 +33,7 @@ impl FormCheckbox {
             field,
             colors,
             checked,
+            input_revision: 0,
             focus_handle: cx.focus_handle(),
             state,
         }
@@ -42,6 +44,23 @@ impl FormCheckbox {
         self.checked
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.input_revision
+    }
+
+    fn advance_input_revision(&mut self) {
+        assert!(
+            self.input_revision < u64::MAX,
+            "form input revision exhausted"
+        );
+        self.input_revision += 1;
+    }
+
+    pub(crate) fn update_colors(&mut self, colors: FormFieldColors, cx: &mut Context<Self>) {
+        self.colors = colors;
+        cx.notify();
+    }
+
     /// Get the field name
     pub fn name(&self) -> &str {
         &self.field.name
@@ -49,6 +68,7 @@ impl FormCheckbox {
 
     /// Toggle the checkbox state
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        self.advance_input_revision();
         self.checked = !self.checked;
         self.state.set_value(if self.checked {
             "true".to_string()
@@ -60,6 +80,9 @@ impl FormCheckbox {
 
     /// Set the checked state
     pub fn set_checked(&mut self, checked: bool, cx: &mut Context<Self>) {
+        if self.checked != checked {
+            self.advance_input_revision();
+        }
         self.checked = checked;
         self.state.set_value(if checked {
             "true".to_string()

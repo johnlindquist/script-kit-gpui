@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  cpSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -44,11 +45,16 @@ import {
   type SurfaceContractRegistry,
 } from "./devtools/surfaces.ts";
 import { prepareValidatedReceipt } from "./devtools/lib/receipt-schema.ts";
+import { createArtifactFixture } from "./agentic/build-artifact-fixture.ts";
+import { verifyImmutableArtifact } from "./agentic/build-artifact.ts";
+import { emptyOwnedCleanup } from "./agentic/artifact-lifecycle.ts";
 
-const SOURCE_SHA = "a".repeat(40);
+const SYNTHETIC_DESIGN_EXPORTER = syntheticDesignExporter();
+const SOURCE_SHA = SYNTHETIC_DESIGN_EXPORTER.verified.manifest.source.gitHead;
 const APPLE_TEAM_ID = "A1B2C3D4E5";
 const NOTARIZATION_ID = "12345678-1234-4123-a123-123456789abc";
 const TEMPORARY_DIRECTORIES: string[] = [];
+const TEMPORARY_ARTIFACT_DIRECTORIES: string[] = [];
 
 interface ReleaseFixture {
   root: string;
@@ -62,6 +68,7 @@ interface ReleaseFixture {
   designCssPath: string;
   designProofPath: string;
   manifestPath: string;
+  designExporterPath: string;
   gatePaths: Map<GateId, string>;
 }
 
@@ -366,9 +373,41 @@ function syntheticSigningRunner(
   return { status: 0, stdout: "accepted", stderr: "" };
 }
 
+function syntheticDesignExporter() {
+  const root = mkdtempSync(join(tmpdir(), "script-kit-release-exporter-fixture-"));
+  for (const path of GENERATED_BYTE_COMPARE_SOURCE_PATHS) {
+    const sourcePath = join(root, path);
+    mkdirSync(join(sourcePath, ".."), { recursive: true });
+    writeFileSync(sourcePath, `source:${path}`);
+  }
+  // Publish and verify one synthetic tool through the real V3 artifact protocol.
+  // This shell is never executed as exporter/runtime proof. Its cloned receipts
+  // below are isolated parser fixtures; real byte-comparison coverage lives in
+  // generated-byte-compare.test.ts and the separately executed exporter gate.
+  const artifact = createArtifactFixture(root, {
+    kind: "tool",
+    executable: "#!/bin/sh\n# Synthetic release receipt fixture only; never runtime proof.\nexit 0\n",
+  });
+  const verified = verifyImmutableArtifact(root, artifact.reference, {
+    kind: "tool",
+    packageName: "script-kit-gpui",
+    targetName: "export_design_tokens",
+    sourcePolicy: "current-content",
+  });
+  const sourceFingerprints = Object.fromEntries(
+    GENERATED_BYTE_COMPARE_SOURCE_PATHS.map((path) => [path, hash(readFileSync(join(root, path)))]),
+  );
+  return { root, artifact, verified, sourceFingerprints };
+}
+
 function makeFixture(): ReleaseFixture {
   const root = mkdtempSync(join(tmpdir(), "script-kit-release-evidence-"));
   TEMPORARY_DIRECTORIES.push(root);
+  // Keep source, immutable publication, and finalized task bytes together; each
+  // test mutates its own clone without changing the canonical synthetic owner.
+  cpSync(SYNTHETIC_DESIGN_EXPORTER.root, root, { recursive: true });
+  const designExporterPath = join(root, SYNTHETIC_DESIGN_EXPORTER.verified.manifest.binaryPath);
+  TEMPORARY_ARTIFACT_DIRECTORIES.push(join(designExporterPath, ".."));
 
   const appPath = join(root, "Script Kit.app");
   const executablePath = join(appPath, "Contents/MacOS/script-kit-gpui");
@@ -400,15 +439,6 @@ function makeFixture(): ReleaseFixture {
   mkdirSync(join(root, "design/mockups/generated"), { recursive: true });
   writeFileSync(designTokensPath, '{"synthetic":"canonical-design-token"}\n');
   writeFileSync(designCssPath, ':root { --synthetic: #00b3b3; }\n');
-  for (const path of GENERATED_BYTE_COMPARE_SOURCE_PATHS) {
-    const sourcePath = join(root, path);
-    mkdirSync(join(sourcePath, ".."), { recursive: true });
-    writeFileSync(sourcePath, `source:${path}`);
-  }
-  const designExporterPath = join(root,
-    "target-agent/pools/agent-debug/debug/export_design_tokens");
-  mkdirSync(join(designExporterPath, ".."), { recursive: true });
-  writeFileSync(designExporterPath, "synthetic-design-exporter", { mode: 0o755 });
   json(contractsPath, syntheticDirectMatrix().registry);
 
   const sdkTestsDirectory = join(root, "tests/sdk");
@@ -494,6 +524,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/devtools/focus.test.ts:",
     "scripts/devtools/scroll.test.ts:",
     "scripts/devtools/receipt-schema.test.ts:",
+    "scripts/devtools/receipt-artifact.test.ts:",
     "scripts/devtools/runtime-task-proof.test.ts:",
     "scripts/devtools/workflow-task-proof.test.ts:",
     "scripts/devtools/family-fixtures.test.ts:",
@@ -512,7 +543,7 @@ function makeFixture(): ReleaseFixture {
     " 355 pass",
     " 0 fail",
     " 1112 expect() calls",
-    "Ran 355 tests across 24 files. [8.20s]",
+    "Ran 355 tests across 25 files. [8.20s]",
   ].join("\n"));
 
   const designResultPath = join(root, "generated-design-contracts-result.json");
@@ -531,7 +562,7 @@ function makeFixture(): ReleaseFixture {
     designOutputs.map((output) => [output.path, output.checkedInSha256]),
   );
   json(designResultPath, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedBy: "scripts/devtools/generated-byte-compare.ts",
     taskId: "GOV-005",
     evidenceClass: "UNIT_BEHAVIOR",
@@ -541,13 +572,11 @@ function makeFixture(): ReleaseFixture {
       mode: "DECLARED_EXPORTER_SOURCE_OWNERS",
       sourceGraphExhaustive: false,
     },
-    sourceFingerprints: Object.fromEntries(
-      GENERATED_BYTE_COMPARE_SOURCE_PATHS.map((path) => [path, hash(`source:${path}`)]),
-    ),
+    sourceFingerprints: SYNTHETIC_DESIGN_EXPORTER.sourceFingerprints,
     binary: {
-      path: "target-agent/pools/agent-debug/debug/export_design_tokens",
-      sha256: hash("synthetic-design-exporter"),
-      sizeBytes: "synthetic-design-exporter".length,
+      ...SYNTHETIC_DESIGN_EXPORTER.verified.binary,
+      artifactReference: SYNTHETIC_DESIGN_EXPORTER.verified.reference,
+      source: SYNTHETIC_DESIGN_EXPORTER.verified.manifest.source,
     },
     outputHashes: designOutputHashes,
     generatedOutputHashes: designOutputHashes,
@@ -567,7 +596,7 @@ function makeFixture(): ReleaseFixture {
       isolatedTempOutput: true,
     },
     execution: { exitCode: 0, stdoutSha256: hash(""), stderrSha256: hash("") },
-    cleanup: { closed: true, survivors: [] },
+    cleanup: emptyOwnedCleanup(),
     disposition: "EVALUABLE_PASS",
     pass: true,
   });
@@ -767,8 +796,41 @@ function makeFixture(): ReleaseFixture {
     designCssPath,
     designProofPath: designResultPath,
     manifestPath,
+    designExporterPath,
     gatePaths,
   };
+}
+
+function bunJunitFixture(fixture: ReleaseFixture, repetitions = 1) {
+  // Synthetic parser fixtures follow Bun 1.3.14's native reporter shape. They
+  // are never retained as executed release proof or campaign evidence.
+  const legacy = readFileSync(join(fixture.root, "proof-result.log"), "utf8");
+  const files = legacy.split("\n").filter((line) => line.endsWith(".test.ts:")).map((line) => line.slice(0, -1));
+  const testsPerFile = repetitions * 2;
+  const suites = files.map((file, index) => {
+    const cases = Array.from({ length: repetitions }, (_, repetition) => [
+      `      <testcase name="passes &amp; checks &quot;identity&quot; (${repetition})" classname="proof contract" time="0.000545" file="${file}" line="28" assertions="2" />`,
+      `      <testcase name="executes without an assertion (${repetition})" classname="proof contract" time="0.000039" file="${file}" line="31" assertions="0" />`,
+    ].join("\n")).join("\n");
+    return [
+      `  <testsuite name="${file}" file="${file}" tests="${testsPerFile}" assertions="${testsPerFile}" failures="0" skipped="0" time="0" hostname="fixture.invalid">`,
+      ...(index === 0 ? [
+        `    <testsuite name="proof contract" file="${file}" line="27" tests="${testsPerFile}" assertions="${testsPerFile}" failures="0" skipped="0" time="0" hostname="fixture.invalid">`,
+        cases,
+        "    </testsuite>",
+      ] : [cases]),
+      "  </testsuite>",
+    ].join("\n");
+  });
+  const count = files.length * testsPerFile;
+  const summary = ` ${count} pass\n 0 fail\n ${count} expect() calls\nRan ${count} tests across ${files.length} files. [8.20s]\n`;
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuites name="bun test" tests="${count}" assertions="${count}" failures="0" skipped="0" time="0.015283">`,
+    ...suites,
+    "</testsuites>",
+  ].join("\n");
+  return { files, suites, summary, xml, count, legacy };
 }
 
 function options(fixture: ReleaseFixture): ManifestOptions {
@@ -805,9 +867,17 @@ function verificationOptions(
 }
 
 afterEach(() => {
+  for (const path of TEMPORARY_ARTIFACT_DIRECTORIES.splice(0)) {
+    chmodSync(path, 0o700);
+  }
   for (const path of TEMPORARY_DIRECTORIES.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
+});
+
+afterAll(() => {
+  SYNTHETIC_DESIGN_EXPORTER.artifact.dispose();
+  rmSync(SYNTHETIC_DESIGN_EXPORTER.root, { recursive: true, force: true });
 });
 
 describe("fail-closed release evidence", () => {
@@ -829,7 +899,7 @@ describe("fail-closed release evidence", () => {
     expect(manifest.bundle.executable.sha256).toBe(hash("application-binary"));
     expect(manifest.bundle.sidecar.sha256).toBe(hash("pi-sidecar-binary"));
     expect(manifest.sdk.version).toBe("0.2.0");
-    expect(manifest.surface_contracts.schema_version).toBe(1);
+    expect(manifest.surface_contracts.schema_version).toBe(2);
     expect(manifest.verification.visibility).toEqual({
       journeys: "hidden_only",
       paintedOutput: "owner_authorized_visible",
@@ -864,7 +934,7 @@ describe("fail-closed release evidence", () => {
     expect(manifest.verification.gates.find((gate) => gate.gateId === "privacy-fixtures")?.result)
       .toEqual({ passed: 1, failed: 0, skipped: 0 });
     expect(manifest.verification.gates.find((gate) => gate.gateId === "proof-contracts")?.result)
-      .toEqual({ passed: 355, failed: 0, skipped: 0, files: 24, assertions: 1112 });
+      .toEqual({ passed: 355, failed: 0, skipped: 0, files: 25, assertions: 1112 });
     const directMatrix = manifest.verification.gates.find((gate) =>
       gate.gateId === "packaged-direct-matrix")?.result;
     expect(directMatrix?.rawEvidenceSha256).toBe(hash(readFileSync(
@@ -1062,6 +1132,7 @@ describe("fail-closed release evidence", () => {
       "scripts/devtools/focus.test.ts",
       "scripts/devtools/scroll.test.ts",
       "scripts/devtools/receipt-schema.test.ts",
+      "scripts/devtools/receipt-artifact.test.ts",
       "scripts/devtools/runtime-task-proof.test.ts",
       "scripts/devtools/workflow-task-proof.test.ts",
       "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
@@ -1071,6 +1142,105 @@ describe("fail-closed release evidence", () => {
       expect(() => buildGateReceipt({
         gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
       })).toThrow(`missing its required directly executed fixture suite: ${suite}`);
+    }
+  });
+
+  test("native Bun JUnit proves executed files without passing console headings", () => {
+    const fixture = makeFixture();
+    const { xml, summary, count, files } = bunJunitFixture(fixture);
+    const resultPath = join(fixture.root, "junit-proof.log");
+    for (const report of [
+      xml,
+      `[verify] BEGIN bun-junit\n${xml}\n[verify] END bun-junit\n`,
+      `[verify] BEGIN bun-junit\n${xml}\n[verify] END bun-junit\n[verify] PASS proof-contracts\n`,
+    ]) {
+      const log = summary + report;
+      writeFileSync(resultPath, log);
+      const receipt = buildGateReceipt({
+        gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+      });
+      expect(receipt.result).toEqual({ passed: count, failed: 0, skipped: 0, files: files.length, assertions: count });
+    }
+  });
+
+  test("JUnit requires its own passing required files even when legacy headings claim them", () => {
+    const fixture = makeFixture();
+    const { xml, summary, files, legacy } = bunJunitFixture(fixture);
+    const resultPath = join(fixture.root, "missing-junit-file.log");
+    const omitted = files[0];
+    const wrongFile = xml.replaceAll(omitted, "scripts/unrelated.test.ts");
+    writeFileSync(resultPath, `${legacy.slice(0, legacy.indexOf(" 355 pass"))}${summary}${wrongFile}`);
+    expect(() => buildGateReceipt({
+      gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+    })).toThrow(`missing its required directly executed fixture suite: ${omitted}`);
+  });
+
+  test("JUnit rejects empty required files despite consistent global totals", () => {
+    const fixture = makeFixture();
+    const { xml, summary, suites, files, count } = bunJunitFixture(fixture);
+    const emptySuite = suites[0].replace(/tests="2"/g, 'tests="0"').replace(/assertions="2"/g, 'assertions="0"')
+      .replace(/^.*<testcase[^\n]*\n/gm, "");
+    const resultPath = join(fixture.root, "empty-junit-file.log");
+    writeFileSync(resultPath, summary.replaceAll(String(count), String(count - 2)) +
+      xml.replace(`tests="${count}" assertions="${count}"`, `tests="${count - 2}" assertions="${count - 2}"`)
+        .replace(suites[0], emptySuite));
+    expect(() => buildGateReceipt({
+      gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+    })).toThrow(`file executed no passing testcases: ${files[0]}`);
+  });
+
+  test("JUnit rejects malformed, stale, failing, skipped, duplicate, and mismatched execution evidence", () => {
+    const fixture = makeFixture();
+    const { xml, summary, suites, files, count, legacy } = bunJunitFixture(fixture);
+    const resultPath = join(fixture.root, "invalid-junit-proof.log");
+    const invalidReports: Array<[string, string]> = [
+      ["missing declaration", xml.replace(/^<\?xml[^\n]*\n/, "")],
+      ["duplicate root", `${xml}\n${xml}`],
+      ["unclosed root", xml.replace("</testsuites>", "")],
+      ["wrong producer", xml.replace('name="bun test"', 'name="another runner"')],
+      ["invalid root count", xml.replace(`tests="${count}"`, 'tests="not-a-number"')],
+      ["root test mismatch", xml.replace(`tests="${count}"`, `tests="${count + 1}"`)],
+      ["root assertion mismatch", xml.replace(`assertions="${count}"`, `assertions="${count + 1}"`)],
+      ["root failure", xml.replace('failures="0"', 'failures="1"')],
+      ["root skip", xml.replace('skipped="0"', 'skipped="1"')],
+      ["absent file", xml.replace(suites[0], "")],
+      ["duplicate file", xml.replace(suites[1], suites[0])],
+      ["missing file attribute", xml.replace(`file="${files[0]}"`, "")],
+      ["mismatched nested file", xml.replace('name="proof contract" file="' + files[0], 'name="proof contract" file="' + files[1])],
+      ["suite test mismatch", xml.replace('tests="2"', 'tests="3"')],
+      ["suite assertion mismatch", xml.replace('assertions="2"', 'assertions="3"')],
+      ["suite failure", xml.replace('tests="2" assertions="2" failures="0"', 'tests="2" assertions="2" failures="1"')],
+      ["skipped-only file", xml.replace('tests="2" assertions="2" failures="0" skipped="0"', 'tests="2" assertions="0" failures="0" skipped="2"')],
+      ["unclosed suite", xml.replace("    </testsuite>", "")],
+      ["no testcase execution", xml.replace(/^.*<testcase[^\n]*\n/gm, "")],
+      ["missing testcase", xml.replace(/<testcase[^>]+\/>/, "")],
+      ["mismatched testcase file", xml.replace(`time="0.000545" file="${files[0]}"`, `time="0.000545" file="${files[1]}"`)],
+      ["failing testcase", xml.replace('assertions="2" />', 'assertions="2"><failure message="failed" /></testcase>')],
+      ["skipped testcase", xml.replace('assertions="2" />', 'assertions="2"><skipped /></testcase>')],
+      ["invalid entity", xml.replace("passes &amp; checks", "passes &unknown; checks")],
+      ["extra XML", `${xml}\n<testsuite />`],
+    ];
+    for (const [reason, report] of invalidReports) {
+      writeFileSync(resultPath, summary + report);
+      expect(() => buildGateReceipt({
+        gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+      }), reason).toThrow();
+    }
+    for (const report of ["", "not XML", xml, `${xml}\n[verify] END bun-junit\n[verify] BEGIN bun-junit\n${xml}`]) {
+      // A declared reporter cannot fall back to otherwise valid legacy proof.
+      writeFileSync(resultPath, `${legacy}\n[verify] BEGIN bun-junit\n${report}\n`);
+      expect(() => buildGateReceipt({
+        gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+      })).toThrow();
+    }
+    for (const staleSummary of [
+      summary.replaceAll(String(count), String(count + 1)),
+      summary.replace(`across ${files.length} files`, `across ${files.length + 1} files`),
+    ]) {
+      writeFileSync(resultPath, staleSummary + xml);
+      expect(() => buildGateReceipt({
+        gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+      })).toThrow("console summary");
     }
   });
 
@@ -1155,6 +1325,7 @@ describe("fail-closed release evidence", () => {
     const original = JSON.parse(readFileSync(path, "utf8"));
 
     for (const invalid of [
+      { schemaVersion: 1 },
       { sourceSha: "b".repeat(40) },
       { evidenceClass: "STATIC_INVENTORY" },
       { provesRuntimeBehavior: true },
@@ -1171,6 +1342,32 @@ describe("fail-closed release evidence", () => {
         repositoryRoot: fixture.root,
       })).toThrow("exact-source non-GUI exporter byte equality");
     }
+
+    for (const invalid of [
+      { artifactReference: undefined },
+      { manifestSha256: "f".repeat(64) },
+      { sourceCommit: "b".repeat(40) },
+      { source: { ...original.binary.source, compilerInputSha256: "not-a-digest" } },
+    ]) {
+      json(path, { ...original, binary: { ...original.binary, ...invalid } });
+      expect(() => buildGateReceipt({
+        gateId: "generated-design-contracts", evidenceClass: "UNIT_BEHAVIOR",
+        sourceSha: SOURCE_SHA, resultPath: path, repositoryRoot: fixture.root,
+      })).toThrow("explicit V3 artifact and truthful recorded source identity");
+    }
+
+    json(path, {
+      ...original,
+      binary: {
+        ...original.binary,
+        manifestSha256: "f".repeat(64),
+        artifactReference: { ...original.binary.artifactReference, manifestSha256: "f".repeat(64) },
+      },
+    });
+    expect(() => buildGateReceipt({
+      gateId: "generated-design-contracts", evidenceClass: "UNIT_BEHAVIOR",
+      sourceSha: SOURCE_SHA, resultPath: path, repositoryRoot: fixture.root,
+    })).toThrow("exporter manifest fingerprint changed");
 
     json(path, { ...original, binary: { ...original.binary, path: "script-kit-gpui" } });
     expect(() => buildGateReceipt({
@@ -1213,7 +1410,9 @@ describe("fail-closed release evidence", () => {
       { safety: { ...original.safety, capturesScreen: true } },
       { safety: { ...original.safety, accessesNetwork: true } },
       { execution: { ...original.execution, exitCode: 1 } },
-      { cleanup: { closed: true, survivors: ["stray-exporter"] } },
+      { cleanup: { ...original.cleanup, survivors: ["stray-exporter"] } },
+      ...["closed", "processExited", "processGroupExited", "streamsDrained", "logWriterClosed", "referencesFinalized"]
+        .map((field) => ({ cleanup: { ...original.cleanup, [field]: false } })),
     ]) {
       json(path, { ...original, ...invalid });
       expect(() => buildGateReceipt({
@@ -1244,7 +1443,7 @@ describe("fail-closed release evidence", () => {
       .toThrow("raw exporter evidence is missing");
   });
 
-  test("downstream raw-proof verification rechecks all six current exporter-source owners", () => {
+  test("downstream raw-proof verification rejects changed exporter-source bytes", () => {
     const fixture = makeFixture();
     const sourcePath = GENERATED_BYTE_COMPARE_SOURCE_PATHS[2];
     writeFileSync(join(fixture.root, sourcePath), "stale or tampered owner source");
@@ -1256,7 +1455,8 @@ describe("fail-closed release evidence", () => {
   test("downstream publication revalidates raw proof without requiring the original exporter binary", () => {
     const fixture = makeFixture();
     json(fixture.manifestPath, buildReleaseManifest(options(fixture)));
-    rmSync(join(fixture.root, "target-agent/pools/agent-debug/debug/export_design_tokens"));
+    chmodSync(join(fixture.designExporterPath, ".."), 0o700);
+    rmSync(fixture.designExporterPath);
 
     const manifest = verifyReleaseManifest(verificationOptions(fixture));
     expect(manifest.design_contracts.raw_evidence.sha256)
@@ -1473,7 +1673,7 @@ describe("fail-closed release evidence", () => {
   test("direct runtime proof rejects foreign authoritative generated-contract bytes", () => {
     const fixture = makeFixture();
     const path = join(fixture.root, "packaged-direct-matrix-result.json");
-    writeFileSync(fixture.contractsPath, '{"schemaVersion":1,"entries":[]}\n');
+    writeFileSync(fixture.contractsPath, '{"schemaVersion":2,"entries":[]}\n');
 
     expect(() => buildGateReceipt({
       gateId: "packaged-direct-matrix",
@@ -2162,6 +2362,153 @@ describe("fail-closed release evidence", () => {
   });
 });
 
+describe("owned native Bun JUnit capture", () => {
+  function runProofVerify(mode: "pass" | "missing" | "empty" | "fail" | "nonblocking", capture = true, sharedTemporaryRoot?: string) {
+    const fixture = makeFixture();
+    const reporter = bunJunitFixture(fixture, mode === "nonblocking" ? 256 : 1);
+    const logPath = join(fixture.root, "captured-proof.log");
+    const callPath = join(fixture.root, "bun-call.json");
+    const temporaryRoot = sharedTemporaryRoot ?? join(fixture.root, "temporary");
+    mkdirSync(temporaryRoot, { recursive: true });
+    // An unrelated old report must neither satisfy this run nor be removed.
+    const stalePath = join(temporaryRoot, "bun.xml");
+    writeFileSync(stalePath, reporter.xml);
+    const cargoPath = join(fixture.root, "fake-cargo");
+    writeFileSync(cargoPath, '#!/bin/sh\nprintf "nested-child-output\\n"\n', { mode: 0o755 });
+    writeFileSync(join(fixture.root, "bun"), `#!${process.execPath}
+import { existsSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args[0] !== "test") process.exit(0);
+const reporterIndex = args.indexOf("--reporter-outfile");
+const destination = args[reporterIndex + 1];
+if (reporterIndex < 0 || !destination?.startsWith(${JSON.stringify(`${temporaryRoot}/`)})) process.exit(97);
+writeFileSync(${JSON.stringify(callPath)}, JSON.stringify({
+  args, destination, existed: existsSync(destination),
+  inheritedLog: process.env.SCRIPT_KIT_VERIFY_TEST_LOG ?? null,
+  inheritedReceipt: process.env.SCRIPT_KIT_VERIFY_RECEIPT ?? null,
+}));
+console.log("before-nested-verifier");
+const nested = spawnSync("bash", ["scripts/verify.sh", "--skip-bundle", "--only", "test-compile"], {
+  env: process.env, encoding: "utf8",
+});
+process.stdout.write(nested.stdout);
+if (nested.status !== 0) process.exit(nested.status ?? 98);
+console.log("after-nested-verifier");
+process.stdout.write(${JSON.stringify(reporter.summary)});
+if (${JSON.stringify(mode)} === "empty") writeFileSync(destination, "");
+if (${JSON.stringify(mode)} === "pass" || ${JSON.stringify(mode)} === "fail" || ${JSON.stringify(mode)} === "nonblocking") {
+  writeFileSync(destination, ${JSON.stringify(reporter.xml)});
+}
+if (${JSON.stringify(mode)} === "nonblocking") {
+  // Explicitly model a producer leaving its shared stdout nonblocking. A
+  // short Bun run alone does not reliably reproduce that inherited state.
+  const flags = spawnSync("python3", ["-c", "import os; os.set_blocking(1, False)"], {
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  if (flags.status !== 0) process.exit(flags.status ?? 98);
+}
+process.exit(${mode === "fail" ? 73 : 0});
+`, { mode: 0o755 });
+    const result = Bun.spawnSync({
+      cmd: ["bash", "scripts/verify.sh", "--skip-bundle", "--only", "proof-contracts"],
+      cwd: resolve(import.meta.dir, ".."),
+      env: {
+        ...process.env,
+        PATH: `${fixture.root}:${process.env.PATH ?? ""}`,
+        TMPDIR: temporaryRoot,
+        SCRIPT_KIT_CARGO: cargoPath,
+        SCRIPT_KIT_REQUIRE_CLEAN_SOURCE: "0",
+        SCRIPT_KIT_VERIFY_TEST_LOG: capture ? logPath : "",
+        SCRIPT_KIT_VERIFY_RECEIPT: "",
+        SCRIPT_KIT_SDK_TEST_RECEIPT: "",
+      },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const call = JSON.parse(readFileSync(callPath, "utf8")) as {
+      args: string[]; destination: string; existed: boolean;
+      inheritedLog: string | null; inheritedReceipt: string | null;
+    };
+    return {
+      ...result, reporter, call, temporaryRoot, stalePath,
+      output: `${result.stdout.toString()}${result.stderr.toString()}`,
+      log: capture ? readFileSync(logPath, "utf8") : undefined,
+    };
+  }
+
+  test("retains actual reporter bytes after successful child exit without leaking parent destinations", () => {
+    const result = runProofVerify("pass");
+    expect(result.exitCode).toBe(0);
+    expect(result.call.args.slice(0, 6)).toEqual([
+      "test", "--isolate", "--timeout", "30000", "--reporter=junit", "--reporter-outfile",
+    ]);
+    const suites = result.call.args.slice(7);
+    expect(suites).toHaveLength(54);
+    expect(new Set(suites).size).toBe(54);
+    expect(suites.every((suite) => suite.startsWith("./") && suite.endsWith(".test.ts"))).toBe(true);
+    for (const file of result.reporter.files) expect(suites).toContain(`./${file}`);
+    expect(result.call.existed).toBe(false);
+    expect(result.call.inheritedLog).toBeNull();
+    expect(result.call.inheritedReceipt).toBeNull();
+    expect(result.log).toContain("before-nested-verifier\n");
+    expect(result.log).toContain("nested-child-output\n");
+    expect(result.log).toContain("after-nested-verifier\n");
+    expect(result.log).toContain(result.reporter.summary);
+    expect(result.log).toEndWith(`[verify] BEGIN bun-junit\n${result.reporter.xml}\n[verify] END bun-junit\n`);
+    expect(result.log!.indexOf(result.reporter.xml)).toBeGreaterThan(result.log!.indexOf(result.reporter.summary));
+    expect(readdirSync(result.temporaryRoot)).toEqual(["bun.xml"]);
+    expect(readFileSync(result.stalePath, "utf8")).toBe(result.reporter.xml);
+  });
+
+  test("emits the producer XML to normal output with a unique cleaned destination per run", () => {
+    const first = runProofVerify("pass", false);
+    const second = runProofVerify("pass", false, first.temporaryRoot);
+    for (const result of [first, second]) {
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain(`[verify] BEGIN bun-junit\n${result.reporter.xml}\n[verify] END bun-junit`);
+      expect(readdirSync(result.temporaryRoot)).toEqual(["bun.xml"]);
+    }
+    expect(first.call.destination).not.toBe(second.call.destination);
+  });
+
+  test.each([true, false])("copies large native-shaped XML byte-exactly after inherited nonblocking stdout (capture=%s)", (capture) => {
+    const result = runProofVerify("nonblocking", capture);
+    const expected = Buffer.from(result.reporter.xml);
+    expect(expected.byteLength).toBeGreaterThan(1024 * 1024);
+    expect(result.exitCode).toBe(0);
+    const begin = Buffer.from("[verify] BEGIN bun-junit\n");
+    const end = Buffer.from("\n[verify] END bun-junit\n");
+    for (const output of [result.stdout, ...(capture ? [Buffer.from(result.log!)] : [])]) {
+      const start = output.indexOf(begin);
+      const finish = output.indexOf(end);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(finish).toBeGreaterThan(start);
+      expect(Buffer.compare(output.subarray(start + begin.length, finish), expected)).toBe(0);
+    }
+    expect(readdirSync(result.temporaryRoot)).toEqual(["bun.xml"]);
+    expect(readFileSync(result.stalePath, "utf8")).toBe(result.reporter.xml);
+  });
+
+  test.each(["missing", "empty"] as const)("refuses %s reporter output instead of reusing stale XML", (mode) => {
+    const result = runProofVerify(mode);
+    expect(result.exitCode).toBe(65);
+    expect(result.output).toContain("REFUSED missing or empty native Bun JUnit reporter");
+    expect(result.log).not.toContain("BEGIN bun-junit");
+    expect(readdirSync(result.temporaryRoot)).toEqual(["bun.xml"]);
+    expect(readFileSync(result.stalePath, "utf8")).toBe(result.reporter.xml);
+  });
+
+  test("preserves failed child status and never appends its reporter", () => {
+    const result = runProofVerify("fail");
+    expect(result.exitCode).toBe(73);
+    expect(result.output).toContain("FAIL proof-contracts (exit 73)");
+    expect(result.log).toContain(result.reporter.summary);
+    expect(result.log).not.toContain("BEGIN bun-junit");
+    expect(result.log).not.toContain(result.reporter.xml);
+    expect(readdirSync(result.temporaryRoot)).toEqual(["bun.xml"]);
+  });
+});
+
 describe("nonintrusive executed Rust verification", () => {
   function runVerify(args: string[], extraEnv: Record<string, string> = {}) {
     const fixture = makeFixture();
@@ -2389,6 +2736,8 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/scroll.ts",
     "scripts/devtools/scroll.test.ts",
     "scripts/devtools/lib/receipt-schema.ts",
+    "scripts/devtools/lib/receipt-artifact.ts",
+    "scripts/devtools/receipt-artifact.test.ts",
     "scripts/devtools/receipt-schema.test.ts",
     "scripts/devtools/lib/runtime-task-proof.ts",
     "scripts/devtools/runtime-task-proof.test.ts",
@@ -2563,7 +2912,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/design-conflicts.ts",
     "scripts/devtools/generated-byte-compare.ts",
     "scripts/devtools/generated-byte-compare.test.ts",
-    "scripts/devtools/alpha-byte-contract-harness.rs",
+    "src/theme/alpha.rs",
   ])("committed-source mode rejects an untracked required contract: %s", (requiredArtifact) => {
     const result = runVerify(["--only", "test"], {
       SCRIPT_KIT_REQUIRE_CLEAN_SOURCE: "1",
@@ -2585,7 +2934,8 @@ describe("nonintrusive CI release ownership and publication graph", () => {
     jobs: Record<string, {
       "runs-on": string;
       needs?: string | string[];
-      steps?: Array<{ name?: string; uses?: string; run?: string; if?: string }>;
+      env?: Record<string, string>;
+      steps?: Array<{ name?: string; uses?: string; run?: string; if?: string; env?: Record<string, string>; "continue-on-error"?: boolean }>;
     }>;
   } {
     return Bun.YAML.parse(readFileSync(
@@ -2611,29 +2961,51 @@ describe("nonintrusive CI release ownership and publication graph", () => {
     }
   });
 
-  test("only the two isolated hidden-frame CI commands opt into application launch", () => {
-    const authorizedLaunches: Array<{ workflow: string; job: string; step: string }> = [];
+  test("only the two owned hidden-frame CI commands consume immutable artifacts without launch opt-ins", () => {
+    const ownedFrames: Array<{ workflow: string; job: string; step: string; artifact: string }> = [];
     for (const name of ["ci", "release", "perf-gates"] as const) {
-      for (const [job, definition] of Object.entries(workflow(name).jobs)) {
-        for (const step of definition.steps ?? []) {
-          if (!step.run?.includes("SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1")) continue;
-          expect(step.run).toContain("root-search-frame-stability.ts");
+      const workflowDefinition = workflow(name);
+      for (const [job, definition] of Object.entries(workflowDefinition.jobs)) {
+        const steps = definition.steps ?? [];
+        for (const [index, step] of steps.entries()) {
+          const environment = { ...workflowDefinition.env, ...definition.env, ...step.env };
+          expect(environment.SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH).toBe("0");
+          expect(step.run ?? "").not.toMatch(/SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH\s*=\s*["']?(?:1|true)\b/i);
+          if (!step.run?.includes("bun scripts/agentic/root-search-frame-stability.ts")) continue;
+          const executesFrame = step.run.replace(/\\\r?\n/g, " ").split("\n").some((command) =>
+            /^\s*bun\s+scripts\/agentic\/root-search-frame-stability\.ts(?:\s|$)/.test(command) &&
+            !/(?:^|\s)--describe-contract(?:\s|$)/.test(command));
+          if (!executesFrame) continue;
           expect(step.run).not.toContain("--include-system");
-          authorizedLaunches.push({ workflow: name, job, step: step.name ?? "unnamed" });
+          expect(step.run).not.toContain("--binary");
+          expect(step.run).toContain("--receipt");
+          const artifact = step.run.match(/--artifact\s+(\S+)/)?.[1];
+          expect(artifact).toBeDefined();
+          const producer = name === "release" ? "publish-signed-bundle" : "app-build";
+          expect(steps.slice(0, index).some((prior) =>
+            prior.run?.includes(`build-ops act ${producer}`) &&
+            prior.run.includes(`--artifact-out ${artifact}`))).toBe(true);
+          expect(steps.slice(0, index).some((prior) =>
+            prior.run?.includes("build-ops act app-build") &&
+            prior.run.includes("--features owned-ui-evaluation"))).toBe(true);
+          if (name === "release") expect(step.run).toContain("--packaged");
+          ownedFrames.push({ workflow: name, job, step: step.name ?? "unnamed", artifact: artifact! });
         }
       }
     }
 
-    expect(authorizedLaunches).toEqual([
+    expect(ownedFrames).toEqual([
       {
         workflow: "release",
         job: "sign-notarize-macos",
         step: "Prove the exact signed packaged binary without showing a window",
+        artifact: ".test-output/release/signed.reference.json",
       },
       {
         workflow: "perf-gates",
         job: "root-frame-identity",
         step: "Run hidden-window semantic frame-identity gate",
+        artifact: ".test-output/perf-gates/app.reference.json",
       },
     ]);
   });
@@ -2641,10 +3013,20 @@ describe("nonintrusive CI release ownership and publication graph", () => {
   test("macOS proof job executes real platform fixtures without hidden skips", () => {
     const proof = workflow("release").jobs["validate-proof-contracts"];
     expect(proof["runs-on"]).toBe("macos-14");
-    expect(proof.steps?.some((step) =>
-      step.uses?.startsWith("dtolnay/rust-toolchain@"))).toBe(true);
-    expect(proof.steps?.some((step) =>
-      step.run?.includes("--only proof-contracts"))).toBe(true);
+    const steps = proof.steps ?? [];
+    const installIndex = steps.findIndex((step) =>
+      step.run === "bash scripts/install-root-rust-toolchain.sh");
+    const bunIndex = steps.findIndex((step) => step.uses?.startsWith("oven-sh/setup-bun@"));
+    const proofIndex = steps.findIndex((step) =>
+      step.run === "bash scripts/verify.sh --skip-bundle --only proof-contracts");
+    expect(installIndex).toBeGreaterThanOrEqual(0);
+    expect(bunIndex).toBeGreaterThanOrEqual(0);
+    expect(proofIndex).toBeGreaterThan(installIndex);
+    expect(proofIndex).toBeGreaterThan(bunIndex);
+    for (const index of [installIndex, bunIndex, proofIndex]) {
+      expect(steps[index]?.if).toBeUndefined();
+      expect(steps[index]?.["continue-on-error"]).not.toBe(true);
+    }
   });
 
   test("publication is downstream of exact packaged journey readiness and a blocked scorecard", () => {

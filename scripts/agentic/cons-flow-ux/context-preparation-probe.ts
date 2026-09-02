@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { mkdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -16,10 +17,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 
 assertNoninteractiveVisualProbe("cons-flow-ux.context-preparation");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-safe001/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const artifactDir = resolve(
   ".artifacts/consistency/cons-flow-ux/safe001-canonical-v2/SAFE-001",
 );
@@ -93,17 +91,15 @@ let receipt: Json = {
   binarySha256: sha256(binary),
 };
 
-const driver = await Driver.launch({
-  binary,
-  sessionName: "safe001-context-preparation",
-  sandboxHome: true,
-  env: {
-    SCRIPT_KIT_TEST_STATUS: "1",
-    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-  },
-  readyTimeoutMs: 30_000,
-  defaultTimeoutMs: 15_000,
-});
+const driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+sessionName: "safe001-context-preparation",
+sandboxHome: true,
+env: {
+  SCRIPT_KIT_TEST_STATUS: "1",
+  SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+},
+readyTimeoutMs: 30_000,
+defaultTimeoutMs: 15_000, });
 
 try {
   driver.send({

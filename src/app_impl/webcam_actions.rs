@@ -2,6 +2,9 @@ use super::*;
 
 impl ScriptListApp {
     pub(crate) fn webcam_photo_directory() -> std::path::PathBuf {
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            return policy.root().join("webcam-photos");
+        }
         if let Some(home) = dirs::home_dir() {
             let desktop = home.join("Desktop");
             if desktop.exists() {
@@ -159,12 +162,27 @@ impl ScriptListApp {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn capture_webcam_photo(&mut self, cx: &mut Context<Self>) -> bool {
-        let pixel_buffer = match &self.current_view {
-            AppView::WebcamView { entity } => entity.read(cx).pixel_buffer.clone(),
-            _ => None,
+        let (pixel_buffer, prompt_id) = match &self.current_view {
+            AppView::WebcamView { entity } => {
+                let prompt = entity.read(cx);
+                (prompt.pixel_buffer.clone(), Some(prompt.base.id.clone()))
+            }
+            _ => (None, None),
         };
+        let binding = self.prompt_completion.as_ref().filter(|binding| Some(binding.instance().id.as_str()) == prompt_id.as_deref()).cloned();
+        if let Some(binding) = &binding {
+            let state = binding.observation();
+            if state.retired || state.completed {
+                self.show_error_toast("webcam_prompt_already_completed", cx);
+                return false;
+            }
+        } else if crate::runtime_policy::is_owned_evaluation() {
+            self.show_error_toast("webcam_completion_missing", cx);
+            return false;
+        }
 
         let Some(pixel_buffer) = pixel_buffer else {
+            if let Some(binding) = &binding { binding.record_error(crate::prompt_completion::SubmissionError::InvalidInput); }
             cx.notify();
             self.show_error_toast("No camera frame available yet", cx);
             return false;
@@ -173,6 +191,7 @@ impl ScriptListApp {
         let png_data = match Self::encode_webcam_frame_to_png(&pixel_buffer) {
             Ok(data) => data,
             Err(e) => {
+                if let Some(binding) = &binding { binding.record_error(crate::prompt_completion::SubmissionError::InvalidInput); }
                 tracing::error!(error = %e, "Failed to capture webcam photo");
                 cx.notify();
                 self.show_error_toast(format!("Failed to capture photo: {}", e), cx);
@@ -181,10 +200,32 @@ impl ScriptListApp {
         };
 
         let save_dir = Self::webcam_photo_directory();
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            if let Err(error) = policy.require_owned_path(&save_dir).map_err(|error| error.to_string())
+                .and_then(|_| std::fs::create_dir_all(&save_dir).map_err(|error| error.to_string())) {
+                if let Some(binding) = &binding { binding.record_error(crate::prompt_completion::SubmissionError::StorageFailure); }
+                self.show_error_toast(error.to_string(), cx);
+                return false;
+            }
+        }
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
 
         match Self::save_private_webcam_photo_at(&save_dir, &timestamp, &png_data) {
             Ok(save_path) => {
+                if let Some(binding) = &binding {
+                    let outcome = crate::prompt_completion::PromptOutcome::Submitted(
+                        crate::protocol::SubmitValue::Text(save_path.to_string_lossy().into_owned()),
+                    );
+                    if let Err(error) = binding.try_complete(outcome) {
+                        self.show_error_toast(error.to_string(), cx);
+                        return false;
+                    }
+                }
+                if crate::runtime_policy::is_owned_evaluation() {
+                    self.mark_main_data_changed();
+                    cx.notify();
+                    return true;
+                }
                 let safe_path =
                     crate::logging::log_private_user_value(&save_path.display().to_string());
                 tracing::info!(
@@ -213,6 +254,7 @@ impl ScriptListApp {
                 true
             }
             Err(error) => {
+                if let Some(binding) = &binding { binding.record_error(crate::prompt_completion::SubmissionError::StorageFailure); }
                 tracing::error!(reason = ?error.kind(), "Failed to save private webcam photo");
                 cx.notify();
                 self.show_error_toast(
@@ -273,7 +315,7 @@ impl ScriptListApp {
                 );
 
                 if self.capture_webcam_photo(cx) {
-                    self.hide_main_and_reset(cx);
+                    if !crate::runtime_policy::is_owned_evaluation() { self.hide_main_and_reset(cx); }
                     crate::action_helpers::DispatchOutcome::success()
                         .with_trace_id(dctx.trace_id.clone())
                         .with_detail("webcam_capture")
@@ -295,6 +337,18 @@ impl ScriptListApp {
                     "Webcam action triggered"
                 );
 
+                let binding = self.prompt_completion.as_ref().filter(|binding| matches!(&self.current_view, AppView::WebcamView { entity } if entity.read(cx).base.id == binding.instance().id));
+                if let Some(binding) = binding {
+                    if let Err(error) = binding.try_complete(crate::prompt_completion::PromptOutcome::Cancelled) {
+                        return crate::action_helpers::DispatchOutcome::error(crate::action_helpers::ERROR_ACTION_FAILED, error.to_string());
+                    }
+                    binding.retire();
+                }
+                if crate::runtime_policy::is_owned_evaluation() {
+                    self.mark_main_data_changed();
+                    cx.notify();
+                    return crate::action_helpers::DispatchOutcome::success().with_trace_id(dctx.trace_id.clone()).with_detail("webcam_close");
+                }
                 cx.notify();
                 self.show_hud("Webcam closed".to_string(), Some(HUD_SHORT_MS), cx);
                 self.hide_main_and_reset(cx);

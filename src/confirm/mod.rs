@@ -20,7 +20,7 @@
 //! ```
 
 pub(crate) mod parent_dialog;
-mod window;
+pub(crate) mod window;
 
 // Used by include!() code in app_actions/handle_action/scripts.rs — clippy
 // cannot trace usage through include!() and reports a false-positive dead_code
@@ -43,8 +43,6 @@ pub(crate) use parent_dialog::{
 };
 
 #[allow(unused_imports)]
-pub(crate) use window::close_confirm_window;
-#[allow(unused_imports)]
 pub(crate) use window::close_parent_action_dialog_programmatically;
 #[allow(unused_imports)]
 pub(crate) use window::consume_main_window_key_while_confirm_open;
@@ -60,5 +58,7 @@ pub(crate) use window::send_confirm_result;
 pub(crate) use window::{
     batch_select_confirm_button_by_semantic_id, batch_select_confirm_button_by_value,
 };
+#[allow(unused_imports)]
+pub(crate) use window::{close_confirm_window, close_owned_confirm_window};
 #[allow(unused_imports)]
 pub(crate) use window::{get_confirm_popup_snapshot, ConfirmPopupSnapshot};

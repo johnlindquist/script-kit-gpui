@@ -186,8 +186,8 @@ const CONCURRENCY = positiveSafeInteger(
   'SDK_TEST_CONCURRENCY',
   NONINTERACTIVE ? 2 : 4,
 );
-if (CONCURRENCY > 8) {
-  refuseRunner('SDK_TEST_CONCURRENCY exceeds the eight-worker safety ceiling');
+if (CONCURRENCY > (NONINTERACTIVE ? 2 : 8)) {
+  refuseRunner(`SDK_TEST_CONCURRENCY exceeds the ${NONINTERACTIVE ? 'two' : 'eight'}-worker safety ceiling`);
 }
 
 if (NONINTERACTIVE && INCLUDE_SYSTEM) {

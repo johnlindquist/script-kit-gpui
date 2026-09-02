@@ -126,7 +126,11 @@ impl ScriptListApp {
         // Load alias overrides from ~/.scriptkit/aliases.json
         // These provide aliases for built-ins, apps, and other commands
         // that don't have their own alias metadata
-        if let Ok(alias_overrides) = crate::aliases::load_alias_overrides() {
+        let alias_overrides = match self.main_services.owned_sources() {
+            Some(sources) => Some(sources.alias_overrides.clone()),
+            None => crate::aliases::load_alias_overrides().ok(),
+        };
+        if let Some(alias_overrides) = alias_overrides {
             let mut alias_overrides: Vec<_> = alias_overrides.into_iter().collect();
             alias_overrides.sort_by(|(left_id, _), (right_id, _)| {
                 let left_is_exact = left_id.contains(":source-sha256-");
@@ -339,8 +343,8 @@ impl ScriptListApp {
 
         // Reset view
         self.editor_escape_armed_at = None;
-        self.current_view = AppView::ScriptList;
-        self.reset_main_menu_selection_user_moved();
+        self.transition_current_view_and_rekey_main_automation_surface(AppView::ScriptList);
+        self.reset_main_menu_selection_intent();
         self.set_main_window_mode_state_only(MainWindowMode::Mini, cx, "reset_to_script_list");
         // A full reset lands on the launcher root, so there is nowhere left to
         // "go back" to. A stale `opened_from_main_menu` here makes the next
@@ -396,7 +400,7 @@ impl ScriptListApp {
 
         // Clear arg prompt state
         self.arg_input.clear();
-        self.arg_selected_index = 0;
+        self.set_arg_selected_index(0);
         // P0: Reset arg scroll handle
         self.arg_list_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -432,6 +436,7 @@ impl ScriptListApp {
         if let Ok(mut guard) = self.close_path_actions.lock() {
             *guard = false;
         }
+        self.flush_pending_main_menu_query(cx);
 
         logging::log(
             "UI",
@@ -455,14 +460,16 @@ impl ScriptListApp {
             return;
         }
 
+        self.reset_main_menu_selection_intent();
         // Invalidate cache to ensure fresh data
         self.invalidate_grouped_cache();
+        self.flush_pending_main_menu_query(cx);
         self.sync_list_state();
 
         // Reset selection to first item
-        self.selected_index = 0;
         self.hovered_index = None; // Reset hover state to prevent stale highlight on reopen
         self.validate_selection_bounds(cx);
+        self.reset_main_menu_viewport_intent();
 
         // Scroll to top
         self.main_list_state.scroll_to(ListOffset {

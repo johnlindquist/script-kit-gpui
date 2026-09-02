@@ -77,6 +77,17 @@ pub(crate) fn prepare_private_sqlite(db_path: &Path) -> std::io::Result<()> {
 /// private `0600` primary and inspecting both existing private sidecars.
 pub(crate) fn open_private_sqlite(db_path: &Path) -> anyhow::Result<Connection> {
     prepare_private_sqlite(db_path).context("Prepare owner-only private SQLite files")?;
+    let sqlite_path = private_sqlite_open_path(db_path)?;
+    Connection::open_with_flags(
+        sqlite_path,
+        OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .context("Open private SQLite database without following symbolic links")
+}
+
+/// Resolve an existing private database for a no-follow open without creating
+/// files or changing permissions. Read-only connections share this path check.
+pub(crate) fn private_sqlite_open_path(db_path: &Path) -> anyhow::Result<std::path::PathBuf> {
     let file_name = db_path
         .file_name()
         .context("Private SQLite path must name a database file")?;
@@ -84,18 +95,27 @@ pub(crate) fn open_private_sqlite(db_path: &Path) -> anyhow::Result<Connection> 
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::symlink_metadata(parent).context("Inspect private SQLite parent")?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "private SQLite parent must be a non-symlink directory"
+    );
+    for suffix in ["", "-wal", "-shm"] {
+        let exists =
+            crate::atomic_file::inspect_private_file(&sqlite_path_with_suffix(db_path, suffix))
+                .context("Inspect private SQLite file without following symbolic links")?;
+        anyhow::ensure!(
+            !suffix.is_empty() || exists,
+            "private SQLite database is missing"
+        );
+    }
     // SQLite's NOFOLLOW rejects macOS's ordinary `/var` -> `/private/var`
     // ancestor alias too. Resolve only the already-verified parent; the
     // actual private database filename still receives no-follow protection.
-    let sqlite_path = parent
+    Ok(parent
         .canonicalize()
         .context("Resolve verified private SQLite parent")?
-        .join(file_name);
-    Connection::open_with_flags(
-        sqlite_path,
-        OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .context("Open private SQLite database without following symbolic links")
+        .join(file_name))
 }
 
 /// Recheck the main database and any sidecars materialized by WAL mode.
@@ -193,6 +213,50 @@ mod tests {
     }
 
     #[test]
+    fn readonly_path_resolves_ancestor_alias_without_mutating_private_files() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = dir.path().join("owner");
+        std::fs::create_dir_all(owner.join("db")).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&owner, &alias).unwrap();
+        let db = alias.join("db/private.sqlite");
+        open_private_sqlite(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE private_content (body TEXT); INSERT INTO private_content VALUES ('owned');")
+            .unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let path = private_sqlite_open_path(&db).expect("resolve ordinary ancestor alias");
+        assert_eq!(
+            path,
+            owner.canonicalize().unwrap().join("db/private.sqlite")
+        );
+        let reader = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .expect("open resolved read-only path");
+        let body: String = reader
+            .query_row("SELECT body FROM private_content", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(body, "owned");
+        assert!(reader.execute("DELETE FROM private_content", []).is_err());
+        assert_eq!(
+            std::fs::metadata(&db).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+
+        let missing = alias.join("db/missing.sqlite");
+        assert!(private_sqlite_open_path(&missing).is_err());
+        assert!(
+            !missing.exists(),
+            "read-only path resolution must not create a database"
+        );
+    }
+
+    #[test]
     fn private_sqlite_rejects_primary_symlinks_without_exposing_foreign_content() {
         use std::os::unix::fs::symlink;
 
@@ -206,6 +270,7 @@ mod tests {
         symlink(&foreign, &db).expect("plant private SQLite symlink");
 
         assert!(open_private_sqlite(&db).is_err());
+        assert!(private_sqlite_open_path(&db).is_err());
         assert!(harden_sqlite_permissions(&db).is_err());
         assert_eq!(std::fs::read(&foreign).unwrap(), original);
         assert_eq!(
@@ -228,6 +293,7 @@ mod tests {
             symlink(&foreign, &sidecar).expect("plant hostile SQLite sidecar");
 
             assert!(open_private_sqlite(&db).is_err());
+            assert!(private_sqlite_open_path(&db).is_err());
             assert!(
                 !db.exists(),
                 "hostile sidecar must prevent primary creation"
@@ -250,6 +316,7 @@ mod tests {
         symlink(&foreign, &planted).expect("plant SQLite parent symlink");
 
         assert!(open_private_sqlite(&planted.join("private.sqlite")).is_err());
+        assert!(private_sqlite_open_path(&planted.join("private.sqlite")).is_err());
         assert!(!foreign.join("private.sqlite").exists());
     }
 }

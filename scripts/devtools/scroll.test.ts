@@ -257,6 +257,7 @@ class CapturingProtocol extends ProtocolCore {
         this.handleResponse({
           type: "stateResult",
           requestId: payload.requestId,
+          protocolVersion: payload.protocolVersion,
           activeListScroll: { surface: "tips", implementation: "uniform_list" },
         });
         return;
@@ -264,6 +265,7 @@ class CapturingProtocol extends ProtocolCore {
       this.handleResponse({
         type: "simulateGpuiEventResult",
         requestId: payload.requestId,
+        protocolVersion: payload.protocolVersion,
         success: true,
       });
     });
@@ -273,7 +275,9 @@ class CapturingProtocol extends ProtocolCore {
     return true;
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    this.failAllPending(new Error("scroll test closed"));
+  }
 }
 
 test("typed scroll-wheel helper emits the exact pixel-only phased wire event without injecting input", () => {
@@ -351,9 +355,14 @@ test("strict operator safety refuses a real scroll transport before its first wr
 
 test("typed active-list helper reads the canonical state field", async () => {
   const protocol = new CapturingProtocol();
-  const receipt = await protocol.getActiveListScroll();
-  expect(receipt.surface).toBe("tips");
-  expect(receipt.implementation).toBe("uniform_list");
+  try {
+    const receipt = await protocol.getActiveListScroll();
+    expect(receipt.surface).toBe("tips");
+    expect(receipt.implementation).toBe("uniform_list");
+    expect(protocol.stats.responsesMatched).toBe(1);
+  } finally {
+    await protocol.close();
+  }
 });
 
 test("an intentionally offscreen selected row keeps viewport measurement valid", () => {

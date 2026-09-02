@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { deflateSync } from "node:zlib";
 
 test(
   "await-response emits a byte-complete large JSON envelope through command substitution",
@@ -32,6 +33,7 @@ test(
       const response = {
         type: responseType,
         requestId,
+        protocolVersion: 2,
         payload,
       };
       writeFileSync(
@@ -40,6 +42,7 @@ test(
           kind: "protocolResponse",
           requestId,
           responseType,
+          protocolVersion: 2,
           response,
         })}\n`,
       );
@@ -124,3 +127,53 @@ printf '%s\n' "$captured"
     }
   },
 );
+
+async function queryEncodedFixture(source: "log" | "bus", corrupt?: (record: Record<string, unknown>) => void) {
+  const root = mkdtempSync(join(tmpdir(), "sk-await-encoded-response-"));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const session = "encoded-output"; const requestId = "encoded-response";
+    const sessionDir = join(root, session); mkdirSync(sessionDir);
+    const response = { type: "stateResult", protocolVersion: 2, requestId, payload: "response metadata ".repeat(16_384) };
+    const decoded = Buffer.from(JSON.stringify(response)); const compressed = deflateSync(decoded, { level: 1 });
+    const encoded: Record<string, unknown> = { type: "encodedResponse", version: 1, encoding: "zlib-json-base64-v1",
+      requestId, protocolVersion: 2, responseType: response.type, decodedBytes: decoded.length,
+      compressedBytes: compressed.length, payload: compressed.toString("base64") };
+    corrupt?.(encoded);
+    const record = (value: unknown) => source === "log" ? value : {
+      kind: "protocolResponse", requestId, protocolVersion: 2, responseType: response.type, response: value,
+    };
+    // A later valid record must not repair malformed encoded evidence for this same request.
+    const lines = [JSON.stringify(record(encoded)), ...(corrupt ? [JSON.stringify(record(response))] : [])];
+    writeFileSync(join(sessionDir, source === "log" ? "app.log" : "protocol-responses.ndjson"), lines.join("\n") + "\n");
+    const child = Bun.spawn({
+      cmd: [process.execPath, resolve(import.meta.dir, "../scripts/agentic/await-response.ts"),
+        "--session", session, "--request-id", requestId, "--expect", "stateResult", "--timeout", "1000"],
+      env: { ...process.env, SCRIPT_KIT_SESSION_DIR: root, SCRIPT_KIT_ALLOW_LOG_RPC_FALLBACK: source === "log" ? "1" : "0" },
+      stdout: "pipe", stderr: "pipe",
+    });
+    // A kill deadline for a real subprocess, not a readiness wait; fake time cannot stop a hung helper.
+    timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    return { stdout, stderr, exitCode, response, session };
+  } finally {
+    clearTimeout(timer);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test.each(["log", "bus"] as const)("await-response normalizes encoded %s records before exact terminal matching", async source => {
+  const result = await queryEncodedFixture(source);
+  expect(result.exitCode).toBe(0); expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 1, status: "ok", session: result.session,
+    requestId: result.response.requestId, responseType: "stateResult", response: result.response });
+});
+
+test.each(["log", "bus"] as const)("await-response refuses malformed encoded %s evidence instead of accepting a later legacy record", async source => {
+  const result = await queryEncodedFixture(source, record => { record.version = 2; });
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr).toContain("response_encoding_invalid_header");
+  expect(result.stdout).not.toContain('"status":"ok"');
+});

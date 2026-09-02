@@ -200,29 +200,27 @@ export function workflowTaskProofErrors(receipt: JsonObject): string[] {
 
   const repository = object(receipt.repository);
   const binary = object(receipt.binary);
-  const provenance = object(binary.provenance);
+  const artifactReference = object(binary.artifactReference);
   const rootTransaction = object(receipt.transaction);
   const binaryPath = typeof binary.path === "string" ? binary.path : "";
-  const manifestPath = typeof provenance.path === "string" ? provenance.path : "";
-  const isolatedManifest = binaryPath.replace(/\/[^/]+$/, "/manifest.json");
+  const manifestPath = typeof artifactReference.manifestPath === "string" ? artifactReference.manifestPath : "";
   if (
     !fingerprint(binary.sha256) || binary.sha256 !== rootTransaction.binarySha256 ||
-    binary.sourceCommit !== repository.gitCommit ||
-    !(binaryPath.startsWith("target-agent/artifacts/") ||
-      binaryPath.startsWith("target-agent/runtime/")) ||
-    binaryPath.split("/").includes("..") ||
-    !(manifestPath === `${binaryPath}.provenance.json` || manifestPath === isolatedManifest) ||
-    !fingerprint(provenance.sha256) ||
-    !fingerprint(provenance.compilerInputSha256) ||
-    typeof provenance.builtGitHead !== "string" ||
-    !/^[a-f0-9]{40}$/.test(provenance.builtGitHead) ||
-    typeof provenance.profile !== "string" ||
-    typeof provenance.requiresExactGitHead !== "boolean" ||
-    (provenance.profile === "release" || provenance.requiresExactGitHead === true) &&
-      provenance.builtGitHead !== binary.sourceCommit
+    typeof binary.sourceCommit !== "string" || !/^[a-f0-9]{40,64}$/.test(binary.sourceCommit) ||
+    typeof repository.gitCommit !== "string" || !/^[a-f0-9]{40,64}$/.test(repository.gitCommit) ||
+    typeof binary.sourceDirty !== "boolean" ||
+    !Number.isSafeInteger(binary.sizeBytes) || Number(binary.sizeBytes) <= 0 ||
+    !/^target-agent\/artifacts\/[A-Za-z0-9][A-Za-z0-9._-]*\/manifest\.json$/.test(manifestPath) ||
+    !fingerprint(artifactReference.manifestSha256) ||
+    binary.manifestPath !== manifestPath || binary.manifestSha256 !== artifactReference.manifestSha256 ||
+    !binaryPath.startsWith(manifestPath.slice(0, -"manifest.json".length)) ||
+    binaryPath.includes("\\") || binaryPath.split("/").some((part) => !part || part === "." || part === "..") ||
+    binary.provenance !== undefined
   ) {
-    errors.push("workflow proof requires one exact source-bound binary, reviewed build provenance, and root transaction");
+    errors.push("workflow proof requires one exact source-bound binary, explicit immutable artifact reference, and root transaction");
   }
+  // Build source and observation HEAD remain distinct; the producer and auditor independently
+  // verify current-content compatibility through the explicit immutable artifact reference.
 
   const safety = object(proof.safety);
   if (

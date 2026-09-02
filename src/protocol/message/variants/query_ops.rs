@@ -21,6 +21,8 @@ macro_rules! protocol_message_variants_query_ops {
         #[serde(rename = "requestId")]
         request_id: String,
         files: Vec<FileSearchResultEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     // ============================================================
@@ -832,6 +834,9 @@ macro_rules! protocol_message_variants_query_ops {
         /// Optional window target (defaults to focused window).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<AutomationWindowTarget>,
+        /// Original authority, rechecked before each effect; never advanced by the batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected: Option<crate::protocol::AutomationTargetIdentitySnapshot>,
     },
 
     /// Result of a batch execution.
@@ -889,6 +894,23 @@ macro_rules! protocol_message_variants_query_ops {
         target: Option<AutomationWindowTarget>,
         /// The event to simulate.
         event: SimulatedGpuiEvent,
+        /// Absolute sender deadline. Expired queued work must never mutate a window.
+        #[serde(rename = "deadlineUnixMs", default, skip_serializing_if = "Option::is_none")]
+        deadline_unix_ms: Option<u64>,
+        /// Optional optimistic owner snapshot, revalidated immediately before input delivery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected: Option<AutomationTargetIdentitySnapshot>,
+        /// Exact retained completed geometry used to derive a coordinate event.
+        /// Required for owned coordinate input and revalidated at delivery.
+        #[serde(rename = "expectedFrame", default, skip_serializing_if = "Option::is_none")]
+        expected_frame: Option<crate::protocol::CompletedFrameIdentity>,
+    },
+
+    /// Cancel a queued simulation. The original request receives the sole terminal reply.
+    #[serde(rename = "cancelGpuiEvent")]
+    CancelGpuiEvent {
+        #[serde(rename = "requestId")]
+        request_id: String,
     },
 
     /// Result of a GPUI event simulation.
@@ -925,6 +947,9 @@ macro_rules! protocol_message_variants_query_ops {
         /// True when GPUI scheduled dispatch for a later update.
         #[serde(rename = "dispatchScheduled", default)]
         dispatch_scheduled: bool,
+        /// Whether execution crossed the current GPUI update boundary.
+        #[serde(rename = "wasDeferred", default)]
+        was_deferred: bool,
         /// Raw dispatch does not prove a specific UI handler fired.
         #[serde(
             rename = "activationProof",

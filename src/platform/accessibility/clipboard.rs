@@ -21,6 +21,7 @@ struct PasteboardRepresentation {
 }
 
 pub fn capture_general_pasteboard_snapshot() -> Result<PasteboardSnapshot> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     #[cfg(target_os = "macos")]
     {
         PasteboardSnapshot::capture()
@@ -33,6 +34,7 @@ pub fn capture_general_pasteboard_snapshot() -> Result<PasteboardSnapshot> {
 }
 
 pub fn restore_general_pasteboard_snapshot(snapshot: &PasteboardSnapshot) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     #[cfg(target_os = "macos")]
     {
         snapshot.restore()
@@ -409,6 +411,7 @@ const KEY_C: core_graphics::event::CGKeyCode = 8;
 
 #[cfg(target_os = "macos")]
 fn simulate_command_key(key: core_graphics::event::CGKeyCode) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)?;
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -439,6 +442,7 @@ fn read_plain_text_from_pasteboard() -> Result<String> {
 }
 
 pub fn write_plain_text_to_pasteboard(text: &str) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     if text.is_empty() {
         return Ok(());
     }
@@ -514,6 +518,7 @@ unsafe fn release_objects(objects: &[cocoa::base::id]) {
 }
 
 pub fn general_pasteboard_change_count() -> Result<i64> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     #[cfg(target_os = "macos")]
     {
         use cocoa::appkit::NSPasteboard;

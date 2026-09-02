@@ -6,6 +6,9 @@ use crate::config::SuggestedConfig;
 use crate::frecency::FrecencyStore;
 use crate::list_item::GroupedListItem;
 
+use super::super::command_contract::{
+    record_main_menu_ranking_sections, MainMenuRankingEvidence, MainMenuRankingEvidenceMap,
+};
 use super::super::types::SearchResult;
 use super::DEFAULT_SUGGESTED_ITEMS;
 
@@ -106,14 +109,123 @@ pub struct FlowDiscoveryNote {
     pub detail: Option<String>,
 }
 
+#[cfg(test)]
+mod deterministic_tie_tests {
+    use super::*;
+    use crate::scripts::{AppMatch, MatchIndices, Script, ScriptMatch, ScriptMatchKind};
+    use std::sync::Arc;
+
+    fn app(path: &str) -> SearchResult {
+        SearchResult::App(AppMatch {
+            app: crate::app_launcher::AppInfo {
+                name: "Editor".into(),
+                path: path.into(),
+                bundle_id: None,
+                icon: None,
+            },
+            score: 0,
+            match_evidence: None,
+        })
+    }
+    fn ordered_keys(grouped: &[GroupedListItem], results: &[SearchResult]) -> Vec<String> {
+        grouped
+            .iter()
+            .filter_map(|row| match row {
+                GroupedListItem::Item(i) => results[*i].stable_selection_key(),
+                _ => None,
+            })
+            .collect()
+    }
+    #[test]
+    fn alphabetical_and_equal_frecency_groups_break_ties_by_source_identity() {
+        let entries = [
+            app("/Applications/A/Editor.app"),
+            app("/Applications/B/Editor.app"),
+        ];
+        for suggested in [false, true] {
+            let mut store = FrecencyStore::new();
+            if suggested {
+                // Future timestamps avoid dependence on the test machine clock.
+                store.record_use_at("/Applications/A/Editor.app", u64::MAX);
+                store.record_use_at("/Applications/B/Editor.app", u64::MAX);
+            }
+            let config = SuggestedConfig {
+                enabled: suggested,
+                max_items: 10,
+                min_score: 0.0,
+                ..Default::default()
+            };
+            let mut expected = entries
+                .iter()
+                .map(|row| row.stable_selection_key().unwrap())
+                .collect::<Vec<_>>();
+            expected.sort();
+            for order in [[0, 1], [1, 0]] {
+                let input = order.into_iter().map(|i| entries[i].clone()).collect();
+                let (grouped, results) =
+                    build_grouped_view_results(input, &store, &config, None, None);
+                assert_eq!(ordered_keys(&grouped, &results), expected);
+            }
+        }
+    }
+    #[test]
+    fn same_label_plugin_sections_are_ordered_by_owner_not_hashmap_iteration() {
+        let script = |plugin: &str| {
+            SearchResult::Script(ScriptMatch {
+                script: Arc::new(Script {
+                    name: "Open".into(),
+                    path: format!("/plugins/{plugin}/open.ts").into(),
+                    plugin_id: plugin.into(),
+                    plugin_title: Some("Shared title".into()),
+                    ..Default::default()
+                }),
+                score: 0,
+                filename: "open.ts".into(),
+                match_indices: MatchIndices::default(),
+                match_kind: ScriptMatchKind::Name,
+                content_match: None,
+                match_evidence: None,
+            })
+        };
+        let entries = [script("alpha"), script("beta")];
+        let expected = entries
+            .iter()
+            .map(|row| row.stable_selection_key().unwrap())
+            .collect::<Vec<_>>();
+        for order in [[0, 1], [1, 0]] {
+            let input = order.into_iter().map(|i| entries[i].clone()).collect();
+            let (grouped, results) = build_grouped_view_results(
+                input,
+                &FrecencyStore::new(),
+                &SuggestedConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                None,
+                None,
+            );
+            assert_eq!(ordered_keys(&grouped, &results), expected);
+        }
+    }
+}
+
 pub(super) fn build_grouped_view_results(
     results: Vec<SearchResult>,
     frecency_store: &FrecencyStore,
     suggested_config: &SuggestedConfig,
     flow_discovery: Option<&FlowDiscoveryNote>,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) -> (Vec<GroupedListItem>, Vec<SearchResult>) {
     // Grouped view mode: create SUGGESTED and plugin-based sections
     let mut grouped = Vec::new();
+    let stable_keys: Vec<_> = results
+        .iter()
+        .map(SearchResult::stable_selection_key)
+        .collect();
+    let lowercase_names: Vec<_> = results
+        .iter()
+        .map(|result| result.name().to_lowercase())
+        .collect();
 
     // Get suggested items from frecency store (respecting config)
     let suggested_items = if suggested_config.enabled {
@@ -192,8 +304,14 @@ pub(super) fn build_grouped_view_results(
     let excluded_commands = &suggested_config.excluded_commands;
 
     for (idx, result) in results.iter().enumerate() {
+        if let (Some(ranking), Some(key)) = (ranking.as_deref_mut(), &stable_keys[idx]) {
+            ranking.insert(key.clone(), MainMenuRankingEvidence::active(result));
+        }
         if let Some(path) = get_result_path(result) {
             let score = frecency_store.get_score(&path);
+            if let (Some(ranking), Some(key)) = (ranking.as_deref_mut(), &stable_keys[idx]) {
+                ranking.entry(key.clone()).or_default().frecency_score = Some(score);
+            }
 
             // Check if this builtin should be excluded from SUGGESTED
             // (e.g., "Quit Script Kit" shouldn't appear in suggested even if it has frecency)
@@ -297,7 +415,11 @@ pub(super) fn build_grouped_view_results(
     }
 
     // Sort suggested items by frecency score (highest first)
-    suggested_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    suggested_indices.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| stable_keys[a.0].cmp(&stable_keys[b.0]))
+    });
 
     // Limit suggested items to max_items from config
     suggested_indices.truncate(suggested_config.max_items);
@@ -311,6 +433,11 @@ pub(super) fn build_grouped_view_results(
             for (idx, result) in results.iter().enumerate() {
                 first_index_by_name
                     .entry(default_suggested_lookup_name(result))
+                    .and_modify(|existing| {
+                        if stable_keys[idx] < stable_keys[*existing] {
+                            *existing = idx;
+                        }
+                    })
                     .or_insert(idx);
             }
 
@@ -336,7 +463,11 @@ pub(super) fn build_grouped_view_results(
 
     // Sort each section alphabetically by name (case-insensitive)
     let sort_alphabetically = |indices: &mut Vec<usize>| {
-        indices.sort_by_cached_key(|&idx| results[idx].name().to_lowercase());
+        indices.sort_by(|&a, &b| {
+            lowercase_names[a]
+                .cmp(&lowercase_names[b])
+                .then_with(|| stable_keys[a].cmp(&stable_keys[b]))
+        });
     };
 
     // Sort items within each plugin section: skills first, then scripts, then scriptlets,
@@ -345,12 +476,10 @@ pub(super) fn build_grouped_view_results(
         section.indices.sort_by(|a, b| {
             let type_a = plugin_section_type_order(&results[*a]);
             let type_b = plugin_section_type_order(&results[*b]);
-            type_a.cmp(&type_b).then_with(|| {
-                results[*a]
-                    .name()
-                    .to_lowercase()
-                    .cmp(&results[*b].name().to_lowercase())
-            })
+            type_a
+                .cmp(&type_b)
+                .then_with(|| lowercase_names[*a].cmp(&lowercase_names[*b]))
+                .then_with(|| stable_keys[*a].cmp(&stable_keys[*b]))
         });
         let skill_count = section
             .indices
@@ -375,7 +504,8 @@ pub(super) fn build_grouped_view_results(
         .keys()
         .filter(|k| k.as_str() != "main")
         .collect();
-    other_plugin_keys.sort_by_cached_key(|k| plugin_groups[*k].label.to_lowercase());
+    other_plugin_keys
+        .sort_by_cached_key(|key| (plugin_groups[*key].label.to_lowercase(), (*key).clone()));
 
     // Build grouped list in order: Flows, Suggested, Main, Commands, other
     // kits, Apps. Flows lead — they are the primary launcher experience
@@ -529,6 +659,28 @@ pub(super) fn build_grouped_view_results(
         total_grouped = grouped.len(),
         "Grouped view: created plugin-based sections (scripts, scriptlets, skills grouped by plugin)"
     );
+
+    record_main_menu_ranking_sections(ranking.as_deref_mut(), &grouped, &results);
+    if let Some(ranking) = ranking {
+        for &(index, _) in &suggested_indices {
+            if let Some(key) = &stable_keys[index] {
+                let facts = ranking.entry(key.clone()).or_default();
+                facts.budget_limit = Some(suggested_config.max_items);
+                facts.admitted_count = Some(suggested_indices.len());
+                facts.pin_reason = Some("frecency-suggestion");
+            }
+        }
+        for &index in &default_suggested_indices {
+            if let Some(key) = &stable_keys[index] {
+                ranking.entry(key.clone()).or_default().pin_reason = Some("default-suggestion");
+            }
+        }
+        for &index in &flows_indices {
+            if let Some(key) = &stable_keys[index] {
+                ranking.entry(key.clone()).or_default().pin_reason = Some("flow-primary-section");
+            }
+        }
+    }
 
     (grouped, results)
 }

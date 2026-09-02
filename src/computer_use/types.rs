@@ -1,4 +1,4 @@
-use crate::protocol::{AutomationWindowTarget, PixelProbe};
+use crate::protocol::{AutomationTargetIdentitySnapshot, AutomationWindowTarget, PixelProbe};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,10 +29,14 @@ pub struct ComputerUseCaptureNativeWindowArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComputerUseCaptureRenderWindowArgs {
     pub target: AutomationWindowTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<AutomationTargetIdentitySnapshot>,
     #[serde(rename = "hiDpi", default)]
     pub hi_dpi: bool,
     #[serde(default)]
     pub include_image: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<crate::protocol::PixelProbe>,
 }
 
 #[cfg(test)]
@@ -120,8 +124,35 @@ mod tests {
             .expect("capture render window args");
 
         assert_eq!(parsed.target, AutomationWindowTarget::Focused);
+        assert_eq!(parsed.expected, None);
         assert!(!parsed.hi_dpi);
         assert!(!parsed.include_image);
+    }
+
+    #[test]
+    fn capture_render_window_args_preserve_exact_expected_identity() {
+        let wire = serde_json::json!({
+            "target": { "type": "instance", "id": "main", "generation": 7 },
+            "expected": {
+                "windowId": "main", "windowGeneration": 7,
+                "appViewVariant": "ScriptList", "targetGeneration": 1,
+                "surfaceGeneration": 2, "dataGeneration": 3,
+                "presentationRevision": 4, "themeRevision": 5, "frameGeneration": 6
+            },
+            "hiDpi": true, "includeImage": true
+        });
+        let parsed: ComputerUseCaptureRenderWindowArgs =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.expected.as_ref().unwrap().frame_generation, Some(6));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        let request: crate::computer_use::runtime_bridge::ComputerUseCaptureRenderWindowRequest =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            request.expected.as_ref().unwrap().window_generation,
+            Some(7)
+        );
+        assert!(request.hi_dpi && request.include_image);
+        assert!(request.correlation_id.is_empty());
     }
 
     #[test]

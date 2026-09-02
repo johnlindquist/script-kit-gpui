@@ -230,6 +230,13 @@ impl<'a, T: 'static> Context<'a, T> {
         self.app.notify(self.entity_state.entity_id);
     }
 
+    /// Notify normally, retaining a causal publication identity in owned frames.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn notify_with_owned_cause(&mut self, kind: &'static str, sequence: u64) {
+        self.app
+            .notify_with_owned_cause(self.entity_state.entity_id, kind, sequence);
+    }
+
     /// Spawn the future returned by the given function.
     /// The function is provided a weak handle to the entity owned by this context and a context that can be held across await points.
     /// The returned task must be held or detached.

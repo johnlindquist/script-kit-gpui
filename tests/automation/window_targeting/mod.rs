@@ -28,6 +28,7 @@ fn make_info(prefix: &str, id: &str, kind: AutomationWindowKind) -> AutomationWi
         semantic_surface: None,
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,
@@ -93,6 +94,7 @@ fn simulate_gpui_event_dispatches_to_target_window() {
             request_id,
             target,
             event,
+            ..
         } => {
             assert_eq!(request_id, "gpui-target-1");
             let target = target.expect("target should be present");
@@ -348,6 +350,7 @@ fn window_bounds_survive_registry_round_trip() {
             height: 800.0,
         }),
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,

@@ -70,6 +70,16 @@ mod visual_test_context;
 /// The duration for which futures returned from [Context::on_app_quit] can run before the application fully quits.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Effects and real entity lifetimes processed within one owned work budget.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OwnedEffectProgress {
+    /// Queued app effects executed by this bounded flush.
+    pub effects_executed: usize,
+    /// Zero-reference entities removed through their real release callbacks.
+    pub entities_released: usize,
+}
+
 /// Temporary(?) wrapper around [`RefCell<App>`] to help us debug any double borrows.
 /// Strongly consider removing after stabilization.
 #[doc(hidden)]
@@ -1072,6 +1082,15 @@ impl App {
         options: crate::WindowOptions,
         build_root_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
     ) -> anyhow::Result<WindowHandle<V>> {
+        self.open_window_fallible(options, |window, cx| Ok(build_root_view(window, cx)))
+    }
+
+    /// Open a real window with a fallible root constructor, rolling back its lifetime on error.
+    pub fn open_window_fallible<V: 'static + Render>(
+        &mut self,
+        options: crate::WindowOptions,
+        build_root_view: impl FnOnce(&mut Window, &mut App) -> anyhow::Result<Entity<V>>,
+    ) -> anyhow::Result<WindowHandle<V>> {
         self.update(|cx| {
             let id = cx.windows.insert(None);
             let handle = WindowHandle::new(id);
@@ -1080,6 +1099,14 @@ impl App {
                     cx.window_update_stack.push(id);
                     let root_view = build_root_view(&mut window, cx);
                     cx.window_update_stack.pop();
+                    let root_view = match root_view {
+                        Ok(root) => root,
+                        Err(error) => {
+                            cx.windows.remove(id);
+                            drop(window);
+                            return Err(error);
+                        }
+                    };
                     window.root.replace(root_view.into());
                     window.defer(cx, |window: &mut Window, cx| window.appearance_changed(cx));
 
@@ -1099,10 +1126,14 @@ impl App {
                             "open_window called during an in-progress window draw; \
                              skipping eager first draw to protect the element arena"
                         );
-                    } else {
+                    } else if cx.platform.owned_hidden_guard().is_none() {
                         let clear = window.draw(cx);
                         clear.clear();
                     }
+                    // Owned windows remain dirty until the bounded pump or an
+                    // explicit qualified draw spends their frame budget. In
+                    // particular, a cleanup task may create a window without
+                    // bypassing a zero remaining draw allowance.
 
                     cx.window_handles.insert(id, window.handle);
                     cx.windows.get_mut(id).unwrap().replace(Box::new(window));
@@ -1402,40 +1433,15 @@ impl App {
     /// such as notifying observers, emitting events, etc. Effects can themselves
     /// cause effects, so we continue looping until all effects are processed.
     fn flush_effects(&mut self) {
+        // Owned hosts are advanced only through the explicitly budgeted pump.
+        if self.platform.owned_hidden_guard().is_some() {
+            return;
+        }
         loop {
-            self.release_dropped_entities();
+            self.release_dropped_entities(usize::MAX);
             self.release_dropped_focus_handles();
             if let Some(effect) = self.pending_effects.pop_front() {
-                match effect {
-                    Effect::Notify { emitter } => {
-                        self.apply_notify_effect(emitter);
-                    }
-
-                    Effect::Emit {
-                        emitter,
-                        event_type,
-                        event,
-                    } => self.apply_emit_effect(emitter, event_type, &*event),
-
-                    Effect::RefreshWindows => {
-                        self.apply_refresh_effect();
-                    }
-
-                    Effect::NotifyGlobalObservers { global_type } => {
-                        self.apply_notify_global_observers_effect(global_type);
-                    }
-
-                    Effect::Defer { callback } => {
-                        self.apply_defer_effect(callback);
-                    }
-                    Effect::EntityCreated {
-                        entity,
-                        tid,
-                        window,
-                    } => {
-                        self.apply_entity_created_effect(entity, tid, window);
-                    }
-                }
+                self.apply_effect(effect);
             } else {
                 #[cfg(any(test, feature = "test-support"))]
                 for window in self
@@ -1462,16 +1468,75 @@ impl App {
         }
     }
 
+    fn apply_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::Notify { emitter } => self.apply_notify_effect(emitter),
+            Effect::Emit {
+                emitter,
+                event_type,
+                event,
+            } => self.apply_emit_effect(emitter, event_type, &*event),
+            Effect::RefreshWindows => self.apply_refresh_effect(),
+            Effect::NotifyGlobalObservers { global_type } => {
+                self.apply_notify_global_observers_effect(global_type)
+            }
+            Effect::Defer { callback } => self.apply_defer_effect(callback),
+            Effect::EntityCreated {
+                entity,
+                tid,
+                window,
+            } => self.apply_entity_created_effect(entity, tid, window),
+        }
+    }
+
+    /// Bound queued effects and entity releases together, without implicit drawing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flush_owned_effects(&mut self, max_steps: usize) -> anyhow::Result<OwnedEffectProgress> {
+        anyhow::ensure!(
+            self.platform.owned_hidden_guard().is_some(),
+            "owned_hidden_context_required"
+        );
+        anyhow::ensure!(!self.flushing_effects, "owned_effect_flush_reentrant");
+        let mut progress = OwnedEffectProgress::default();
+        if max_steps == 0 {
+            return Ok(progress);
+        }
+        self.flushing_effects = true;
+        while progress.effects_executed + progress.entities_released < max_steps {
+            let remaining = max_steps - progress.effects_executed - progress.entities_released;
+            progress.entities_released += self.release_dropped_entities(remaining);
+            self.release_dropped_focus_handles();
+            if progress.effects_executed + progress.entities_released == max_steps {
+                break;
+            }
+            let Some(effect) = self.pending_effects.pop_front() else {
+                break;
+            };
+            self.apply_effect(effect);
+            progress.effects_executed += 1;
+        }
+        if self.pending_effects.is_empty() {
+            self.event_arena.clear();
+        }
+        self.flushing_effects = false;
+        Ok(progress)
+    }
+
     /// Repeatedly called during `flush_effects` to release any entities whose
     /// reference count has become zero. We invoke any release observers before dropping
     /// each entity.
-    fn release_dropped_entities(&mut self) {
-        loop {
-            let dropped = self.entities.take_dropped();
-            if dropped.is_empty() {
+    fn release_dropped_entities(&mut self, max_entities: usize) -> usize {
+        let mut released = 0;
+        while released < max_entities {
+            let count = self
+                .entities
+                .pending_dropped_count()
+                .min(max_entities - released);
+            if count == 0 {
                 break;
             }
-
+            let dropped = self.entities.take_dropped(count);
+            released += count;
             for (entity_id, mut entity) in dropped {
                 self.observers.remove(&entity_id);
                 self.event_listeners.remove(&entity_id);
@@ -1480,6 +1545,7 @@ impl App {
                 }
             }
         }
+        released
     }
 
     /// Repeatedly called during `flush_effects` to handle a focused handle being dropped.
@@ -2294,6 +2360,28 @@ impl App {
 
     /// Tell GPUI that an entity has changed and observers of it should be notified.
     pub fn notify(&mut self, entity_id: EntityId) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.notify_inner(entity_id, None);
+        #[cfg(not(any(test, feature = "test-support")))]
+        self.notify_inner(entity_id);
+    }
+
+    /// Annotate owned evidence while taking the identical production notify path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn notify_with_owned_cause(
+        &mut self,
+        entity_id: EntityId,
+        kind: &'static str,
+        sequence: u64,
+    ) {
+        self.notify_inner(entity_id, Some((kind, sequence)));
+    }
+
+    fn notify_inner(
+        &mut self,
+        entity_id: EntityId,
+        #[cfg(any(test, feature = "test-support"))] owned_cause: Option<(&'static str, u64)>,
+    ) {
         let window_invalidators = mem::take(
             self.window_invalidators_by_entity
                 .entry(entity_id)
@@ -2307,7 +2395,15 @@ impl App {
             }
         } else {
             for invalidator in window_invalidators.values() {
-                invalidator.invalidate_view(entity_id, self);
+                let notified = invalidator.invalidate_view(entity_id, self);
+                #[cfg(any(test, feature = "test-support"))]
+                if notified {
+                    if let Some((kind, sequence)) = owned_cause {
+                        invalidator.record_owned_notification_cause(entity_id, kind, sequence);
+                    }
+                }
+                #[cfg(not(any(test, feature = "test-support")))]
+                let _ = notified;
             }
         }
 
@@ -2677,6 +2773,42 @@ mod test {
     use std::{cell::RefCell, rc::Rc};
 
     use crate::{AppContext, TestAppContext};
+
+    #[test]
+    fn failed_root_construction_rolls_back_window_registration() {
+        struct Root;
+        impl crate::Render for Root {
+            fn render(
+                &mut self,
+                _: &mut crate::Window,
+                _: &mut crate::Context<Self>,
+            ) -> impl crate::IntoElement {
+                crate::div()
+            }
+        }
+        let cx = TestAppContext::single();
+        cx.update(|cx| {
+            let before = cx.windows().len();
+            let result = cx
+                .open_window_fallible::<Root>(crate::WindowOptions::default(), |_, _| {
+                    Err(anyhow::anyhow!("fixture_constructor_failed"))
+                });
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("fixture_constructor_failed")
+            );
+            assert_eq!(cx.windows().len(), before);
+            let handle = cx
+                .open_window(crate::WindowOptions::default(), |_, cx| cx.new(|_| Root))
+                .unwrap();
+            assert_eq!(cx.windows().len(), before + 1);
+            handle
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+    }
 
     #[test]
     fn test_gpui_borrow() {

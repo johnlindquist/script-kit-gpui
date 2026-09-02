@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
@@ -15,9 +16,7 @@ assertNoninteractiveVisualProbe("cons-flow-ux.notes-today");
 type Obj = Record<string, any>;
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../../..");
-const BINARY =
-  process.env.PROBE_BINARY ??
-  join(PROJECT_ROOT, "target-agent/artifacts/cons-flow-c09/script-kit-gpui");
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_PATH = join(PROJECT_ROOT, ".test-output", "cons-flow-c09", "notes-today-receipt.json");
 const scenarios = [
   {

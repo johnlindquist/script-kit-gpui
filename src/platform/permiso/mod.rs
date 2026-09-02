@@ -28,6 +28,7 @@ impl Drop for PermisoHandle {
 
 impl PermisoAssistant {
     pub fn present(panel: PermisoPanel) -> anyhow::Result<PermisoHandle> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)?;
         present_settings_url(panel)?;
         let controller = overlay_window::OverlayController::present(panel)?;
         Ok(PermisoHandle {
@@ -48,6 +49,7 @@ impl PermisoAssistant {
 
 #[cfg(target_os = "macos")]
 pub fn present_settings_url(panel: PermisoPanel) -> anyhow::Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)?;
     use cocoa::base::{id, nil};
     use objc::{class, msg_send, sel, sel_impl};
     use std::ffi::CString;

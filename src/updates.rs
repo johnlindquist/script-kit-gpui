@@ -75,6 +75,7 @@ impl ReleaseNotReadyReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateFailure {
+    PolicyRefused(crate::runtime_policy::EffectRefusal),
     InvalidCurrentVersion,
     InvalidReleaseTag,
     GitHubRateLimited,
@@ -87,6 +88,7 @@ pub enum UpdateFailure {
 impl UpdateFailure {
     fn message(&self) -> &'static str {
         match self {
+            Self::PolicyRefused(refusal) => refusal.code,
             Self::InvalidCurrentVersion => "invalid current app version",
             Self::InvalidReleaseTag => "invalid release tag",
             Self::GitHubRateLimited => "GitHub rate limited the update check",
@@ -157,12 +159,25 @@ impl UpdateState {
 }
 
 /// Spawn a background HTTP fetch and update `state` when the response arrives.
-/// Calls `on_complete` once after the shared state has settled. The callback
-/// runs on a worker thread, not the GPUI main thread.
+/// Calls `on_complete` once after the shared state has settled. Refusal completes
+/// synchronously without a worker; permitted checks complete on a worker thread.
 pub fn check_now<F>(state: Arc<RwLock<UpdateState>>, kind: CheckKind, on_complete: F)
 where
     F: FnOnce() + Send + 'static,
 {
+    if let Err(refusal) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        if let Ok(mut guard) = state.write() {
+            *guard = UpdateState::Error {
+                message: refusal.to_string(),
+                failure: UpdateFailure::PolicyRefused(refusal),
+            };
+        }
+        on_complete();
+        return;
+    }
+
     let previous = {
         let Ok(mut guard) = state.write() else {
             on_complete();
@@ -220,6 +235,12 @@ fn current_check_kind(state: &Arc<RwLock<UpdateState>>) -> Option<CheckKind> {
 }
 
 fn fetch_latest_decision() -> UpdateDecision {
+    if let Err(refusal) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        return UpdateDecision::Failed(UpdateFailure::PolicyRefused(refusal));
+    }
+
     let agent = ureq::Agent::config_builder()
         .https_only(true)
         .timeout_global(Some(Duration::from_secs(10)))
@@ -267,6 +288,7 @@ fn fetch_latest_decision() -> UpdateDecision {
 
     let manifest = match fetch_json(&agent, manifest_url) {
         Ok(json) => json,
+        Err(failure @ UpdateFailure::PolicyRefused(_)) => return UpdateDecision::Failed(failure),
         Err(_) => {
             return UpdateDecision::ReleaseNotReady {
                 version,
@@ -281,6 +303,8 @@ fn fetch_latest_decision() -> UpdateDecision {
 }
 
 fn fetch_json(agent: &ureq::Agent, url: &str) -> Result<serde_json::Value, UpdateFailure> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+        .map_err(UpdateFailure::PolicyRefused)?;
     let response = agent
         .get(url)
         .header("User-Agent", USER_AGENT)
@@ -334,13 +358,18 @@ fn decision_to_state(
                 }
             }
         }
-        UpdateDecision::Failed(failure) => match kind {
-            CheckKind::Automatic => previous,
-            CheckKind::Manual => UpdateState::Error {
-                message: failure.message().to_string(),
-                failure,
-            },
-        },
+        UpdateDecision::Failed(failure) => {
+            if matches!(kind, CheckKind::Automatic)
+                && !matches!(failure, UpdateFailure::PolicyRefused(_))
+            {
+                previous
+            } else {
+                UpdateState::Error {
+                    message: failure.message().to_string(),
+                    failure,
+                }
+            }
+        }
     }
 }
 
@@ -872,6 +901,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn policy_refusal_surfaces_error_for_every_check_kind() {
+        let refusal = crate::runtime_policy::EffectRefusal {
+            code: crate::runtime_policy::ExternalEffect::Provider.code(),
+        };
+        for kind in [CheckKind::Automatic, CheckKind::Manual] {
+            assert_eq!(
+                decision_to_state(
+                    UpdateDecision::Failed(UpdateFailure::PolicyRefused(refusal)),
+                    kind,
+                    UpdateState::UpToDate,
+                ),
+                UpdateState::Error {
+                    message: refusal.to_string(),
+                    failure: UpdateFailure::PolicyRefused(refusal),
+                },
+            );
+        }
     }
 
     #[test]

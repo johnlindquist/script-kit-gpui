@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 
 impl ScriptListApp {
     /// Show the naming dialog for creating a new script or extension.
@@ -43,18 +42,16 @@ impl ScriptListApp {
         template: Option<prompts::TemplateSelection>,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) = crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage) {
+            self.show_error_toast(error.to_string(), cx);
+            return;
+        }
         let (target_directory, extension) = match target {
             prompts::NamingTarget::Script => (script_creation::scripts_dir(), "ts"),
             prompts::NamingTarget::Extension => (script_creation::scriptlets_dir(), "md"),
         };
 
         let id = format!("naming-{}", target.as_str());
-        let sender = self.naming_submit_sender.clone();
-
-        let on_submit: prompts::SubmitCallback =
-            Arc::new(move |_id: String, value: Option<String>| {
-                let _ = sender.try_send(value);
-            });
 
         let mut config = prompts::NamingPromptConfig::new(target, target_directory, extension)
             .placeholder(format!("My Cool {}", target.display_name()))
@@ -63,18 +60,16 @@ impl ScriptListApp {
             config = config.template(selection.id, selection.label);
         }
 
-        let theme = self.theme.clone();
-        let entity = cx.new(|cx| {
-            prompts::NamingPrompt::new(id.clone(), config, cx.focus_handle(), on_submit, theme)
+        use crate::design_evaluation::prompt_fixtures::{PromptSeed, PromptSeedCommon, NamingPromptSeed};
+        let seed = PromptSeed::Naming(NamingPromptSeed {
+            common: PromptSeedCommon::naming(id, self.naming_submit_sender.clone()),
+            config, input: String::new(),
         });
-
-        self.current_view = AppView::NamingPrompt {
-            id: id.clone(),
-            entity,
-        };
+        if let Err(error) = self.construct_prompt_seed(seed, cx) {
+            self.show_error_toast(error.to_string(), cx);
+            return;
+        }
         self.opened_from_main_menu = true;
-        self.pending_focus = Some(FocusTarget::NamingPrompt);
-        cx.notify();
 
         logging::log(
             "NAMING",

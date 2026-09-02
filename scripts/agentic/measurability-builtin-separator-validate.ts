@@ -6,19 +6,18 @@
  * non-zero window-relative bounds; firstRowY = separator.y + separator.height
  * matches the rendered first list row (ListItem[0]).
  *
- * Hidden-window only. Fresh artifact recommended:
- *   SCRIPT_KIT_AGENT_ARTIFACT_NAME=monkey-grok-measurability \
- *     ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
- *   SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/monkey-grok-measurability/script-kit-gpui \
+ * Hidden-window only. Publish and name the exact artifact:
+ *   bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out .test-output/measurability.reference.json
+ *   SCRIPT_KIT_ARTIFACT_REFERENCE=.test-output/measurability.reference.json \
  *     bun scripts/agentic/measurability-builtin-separator-validate.ts
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Driver, type Json } from "../devtools/driver";
+import { runtimeArtifactFromEnvironment } from "../devtools/lib/runtime-task-proof.ts";
 
-const BINARY =
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-  join(process.cwd(), "target-agent/artifacts/monkey-grok-measurability/script-kit-gpui");
+const artifact = runtimeArtifactFromEnvironment();
+const BINARY = process.env.SCRIPT_KIT_GPUI_BINARY ?? artifact.executablePath;
 const OUT = join(
   process.cwd(),
   process.env.MEASURABILITY_OUT ?? ".test-output/measurability-builtin-separator",
@@ -86,6 +85,7 @@ const receipt: Json = {
   schemaVersion: 1,
   tool: "measurability-builtin-separator-validate",
   binary: BINARY,
+  artifact: artifact.reference,
   eps: EPS,
   separatorId: SEPARATOR_ID,
   surfaces: [] as Json[],
@@ -95,6 +95,7 @@ const receipt: Json = {
 
 const d = await Driver.launch({
   binary: BINARY,
+  immutableArtifact: artifact.reference,
   sandboxHome: true,
   sessionName: `measurability-${process.pid}`,
   readyTimeoutMs: 25_000,

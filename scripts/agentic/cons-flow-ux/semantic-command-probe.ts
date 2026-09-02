@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -18,10 +19,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 
 assertNoninteractiveVisualProbe("cons-flow-ux.semantic-command");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-c04/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const runDir = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ??
     ".artifacts/consistency/cons-flow-ux/c04-semantic-commands-v1",
@@ -155,23 +153,21 @@ async function runScenario(
   let targetObservation: RuntimeTargetObservation | null = null;
   let result: Json = { name, status: "FAILED" };
   try {
-    driver = await Driver.launch({
-      binary,
-      sessionName: `cons-flow-c04-${name}`,
-      sandboxHome: true,
-      seedAgentAuth,
-      sharedModels: false,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1",
-        SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-        SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-        SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-        ...env,
-      },
-      readyTimeoutMs: 30_000,
-      defaultTimeoutMs: 15_000,
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+    sessionName: `cons-flow-c04-${name}`,
+    sandboxHome: true,
+    seedAgentAuth,
+    sharedModels: false,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1",
+      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+      ...env,
+    },
+    readyTimeoutMs: 30_000,
+    defaultTimeoutMs: 15_000, });
     await driver.waitForSettle();
     result = { name, status: "PASS", ...(await body(driver)) };
     targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });

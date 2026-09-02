@@ -11,6 +11,7 @@ pub struct OverlayController {
 
 impl OverlayController {
     pub fn present(panel: PermisoPanel) -> anyhow::Result<Self> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)?;
         let _target = settings_window_snapshot();
         Ok(Self {
             panel,

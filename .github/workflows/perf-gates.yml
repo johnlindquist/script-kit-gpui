@@ -37,6 +37,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  RUST_TEST_THREADS: "2"
+  CMAKE_BUILD_PARALLEL_LEVEL: "1"
+  SDK_TEST_CONCURRENCY: "2"
   SCRIPT_KIT_NONINTERACTIVE: "1"
   SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0"
   SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0"
@@ -54,7 +58,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -86,15 +91,16 @@ jobs:
             ./scripts/agentic/ai-phase-trace-report.test.ts
 
       - name: Build stable root frame gate artifact
-        env:
-          SCRIPT_KIT_AGENT_ARTIFACT_NAME: root-frame-gate
-        run: ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
+        run: |
+          mkdir -p .test-output/perf-gates
+          bun scripts/devtools/devtools.ts build-ops act app-build \
+            --features owned-ui-evaluation \
+            --artifact-out .test-output/perf-gates/app.reference.json
 
       - name: Run hidden-window semantic frame-identity gate
         run: |
-          SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1 \
-            bun scripts/agentic/root-search-frame-stability.ts \
-            --binary target-agent/artifacts/root-frame-gate/script-kit-gpui \
+          bun scripts/agentic/root-search-frame-stability.ts \
+            --artifact .test-output/perf-gates/app.reference.json \
             --receipt .test-output/perf-gates/root-search-frame-stability.json
 
       - name: Upload hidden semantic frame-identity receipt

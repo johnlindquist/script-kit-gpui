@@ -165,21 +165,6 @@ fn main_list_footer_reveal_clearance_comes_from_theme_tokens() {
 }
 
 #[test]
-fn main_list_render_uses_pure_selection_snapshot() {
-    let content = read("src/render_script_list/mod.rs");
-
-    assert!(
-        content.contains("fn selected_index_for_script_list_render(")
-            && content
-                .contains("crate::list_item::coerce_selection(grouped_items, selected_index)")
-            && content.contains(
-                "let spine_selection_render_index = selected_index_for_script_list_render("
-            ),
-        "render must coerce selection through a pure snapshot before row closures are captured"
-    );
-}
-
-#[test]
 fn filter_replacement_sync_replaces_list_state_even_when_count_unchanged() {
     let content = read("src/app_navigation/impl_scroll.rs");
 

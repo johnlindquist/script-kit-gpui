@@ -571,8 +571,13 @@ impl ScriptListApp {
                 return;
             };
             let query_value = query.clone();
-            let results = Self::resolve_file_search_results(&query_value);
-            self.update_file_search_results(results);
+            match Self::resolve_file_search_results(&query_value) {
+                Ok(results) => self.update_file_search_results(results),
+                Err(error) => {
+                    self.show_error_toast(format!("File search failed: {error}"), cx);
+                    return;
+                }
+            }
         }
 
         let next_index = preferred_path
@@ -648,8 +653,13 @@ impl ScriptListApp {
                 return;
             };
             let query_value = query.clone();
-            let results = Self::resolve_file_search_results(&query_value);
-            self.update_file_search_results(results);
+            match Self::resolve_file_search_results(&query_value) {
+                Ok(results) => self.update_file_search_results(results),
+                Err(error) => {
+                    self.show_error_toast(format!("File search failed: {error}"), cx);
+                    return;
+                }
+            }
         }
 
         let next_index = self

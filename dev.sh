@@ -24,12 +24,53 @@
 
 set -e
 
+# --- Flags and authorization: finish parsing before installing cleanup traps ---
+dev_sh_usage() {
+    sed -n '/^# Flags:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+SCRIPT_KIT_DEV_TAKEOVER="${SCRIPT_KIT_DEV_TAKEOVER:-0}"
+DEV_SH_MODE="run"
+DEV_SH_HELP=0
+for arg in "$@"; do
+    case "$arg" in
+        --takeover|--force|-f) mode="takeover" ;;
+        --stop) mode="stop" ;;
+        --status) mode="status" ;;
+        -h|--help) DEV_SH_HELP=1; continue ;;
+        *)
+            echo "[dev.sh] ERROR unknown flag: $arg" >&2
+            dev_sh_usage >&2
+            exit 64
+            ;;
+    esac
+    if [[ "$DEV_SH_MODE" != "run" && "$DEV_SH_MODE" != "$mode" ]]; then
+        echo "[dev.sh] ERROR conflicting modes: $DEV_SH_MODE and $mode" >&2
+        dev_sh_usage >&2
+        exit 64
+    fi
+    DEV_SH_MODE="$mode"
+done
+if [[ "$DEV_SH_HELP" == "1" ]]; then
+    dev_sh_usage
+    exit 0
+fi
+if [[ "$DEV_SH_MODE" != "status" && ( "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" || ! -t 0 || ! -t 2 ) ]]; then
+    echo "[dev.sh] REFUSED: watcher start/stop/takeover/recovery requires an interactive human terminal" >&2
+    exit 78
+fi
+if [[ "$DEV_SH_MODE" == "takeover" ]]; then
+    SCRIPT_KIT_DEV_TAKEOVER=1
+    DEV_SH_MODE="run"
+fi
+
 # --- Signal cleanup: one Ctrl+C must stop cargo-watch and all helper children ---
 SCRIPT_KIT_DEV_CACHE_PID=""
 SCRIPT_KIT_DEV_WATCHDOG_PID=""
 DEV_SH_CLEANED_UP=0
 DEV_SH_EXIT_CODE=0
 SCRIPT_KIT_DEV_LOCK_DIR=""
+# Cleanup may remove only a stamp created by this invocation, never an inherited path.
+SCRIPT_KIT_DEV_STAMP_FILE=""
 dev_sh_pid_alive() {
     local pid="$1"
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
@@ -42,21 +83,23 @@ dev_sh_lock_key() {
         printf '%s' "$root" | md5 -q
     fi
 }
-# Guard against PID reuse: a lock is only "live" if the recorded pid is both
-# alive AND still looks like a dev.sh process.
+# A registered PID must match its original start time and generation.
 dev_sh_pid_is_dev_sh() {
-    local cmd
-    cmd="$(ps -p "$1" -o command= 2>/dev/null || true)"
-    case "$cmd" in
-        *dev.sh*) return 0 ;;
-        *) return 1 ;;
-    esac
+    local lock="${2:-${SCRIPT_KIT_DEV_LOCK_DIR:-${DEV_SH_LOCK_DIR:-}}}" expected actual
+    [[ -n "$lock" && -f "$lock/generation" && -f "$lock/process-start" && ! -L "$lock" ]] || return 1
+    [[ "$(cat "$lock/pid" 2>/dev/null)" == "$1" ]] || return 1
+    expected="$(cat "$lock/process-start")"
+    actual="$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
+    [[ -n "$expected" && "$expected" == "$actual" ]]
 }
 dev_sh_kill_tree() {
-    local pid="$1" sig="${2:-TERM}" child
+    local pid="$1" sig="${2:-TERM}" child identity
+    identity="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"
+    [[ -n "$identity" ]] || return 0
     for child in $(pgrep -P "$pid" 2>/dev/null || true); do
         dev_sh_kill_tree "$child" "$sig"
     done
+    [[ "$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)" == "$identity" ]] || return 1
     kill "-$sig" "$pid" 2>/dev/null || true
 }
 # cargo-watch / dev-cycle processes whose cwd is this repo. These get orphaned
@@ -75,32 +118,31 @@ dev_sh_write_lock() {
     printf '%s\n' "$$" > "$SCRIPT_KIT_DEV_LOCK_DIR/pid"
     printf '%s\n' "${SCRIPT_KIT_DEV_SESSION_NAME:-dev-watch}" > "$SCRIPT_KIT_DEV_LOCK_DIR/session"
     printf '%s\n' "$1" > "$SCRIPT_KIT_DEV_LOCK_DIR/root"
+    LC_ALL=C ps -p "$$" -o lstart= | sed 's/^ *//;s/ *$//' > "$SCRIPT_KIT_DEV_LOCK_DIR/process-start"
+    python3 -c 'import uuid; print(uuid.uuid4())' > "$SCRIPT_KIT_DEV_LOCK_DIR/generation"
+    SCRIPT_KIT_DEV_LOCK_GENERATION="$(cat "$SCRIPT_KIT_DEV_LOCK_DIR/generation")"
+    export SCRIPT_KIT_DEV_LOCK_GENERATION
 }
-# Stop the previous watcher (if any), sweep orphaned cargo-watch processes for
-# this repo, and remove the lock dir. Safe to call when nothing is running.
+# Stop only a registered lifetime. Name/CWD census is diagnostic, never authority.
 dev_sh_stop_existing() {
-    local repo_root="$1" lock_dir="$2" old_pid orphan i
+    local repo_root="$1" lock_dir="$2" old_pid expected_generation i
+    [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || return 0
     old_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-    if dev_sh_pid_alive "$old_pid" && dev_sh_pid_is_dev_sh "$old_pid"; then
-        echo "[dev.sh] stopping previous watcher pid=${old_pid} session=$(cat "$lock_dir/session" 2>/dev/null || echo '?')"
-        dev_sh_kill_tree "$old_pid" TERM
-        i=0
-        while dev_sh_pid_alive "$old_pid" && [ "$i" -lt 50 ]; do
-            sleep 0.1
-            i=$((i + 1))
-        done
-        if dev_sh_pid_alive "$old_pid"; then
-            echo "[dev.sh] previous watcher ignored TERM; sending KILL"
-            dev_sh_kill_tree "$old_pid" KILL
-        fi
+    expected_generation="$(cat "$lock_dir/generation" 2>/dev/null || true)"
+    if [[ -z "$expected_generation" ]] || ! dev_sh_pid_is_dev_sh "$old_pid" "$lock_dir"; then
+        echo "[dev.sh] REFUSED: unknown/stale/reused watcher lease remains protected: $lock_dir" >&2
+        return 78
     fi
-    for orphan in $(dev_sh_repo_watcher_pids "$repo_root"); do
-        echo "[dev.sh] killing orphaned watcher pid=${orphan} (cwd=${repo_root})"
-        dev_sh_kill_tree "$orphan" TERM
-        sleep 0.2
-        dev_sh_kill_tree "$orphan" KILL
+    kill -TERM "$old_pid"
+    for (( i=0; i<100; i++ )); do
+        if ! dev_sh_pid_alive "$old_pid"; then break; fi
+        sleep 0.1
     done
-    rm -rf "$lock_dir" 2>/dev/null || true
+    if dev_sh_pid_alive "$old_pid"; then
+        echo "[dev.sh] REFUSED: registered watcher teardown not confirmed" >&2; return 78
+    fi
+    # The original launcher's cleanup removes its own exact generation.
+    [[ ! -e "$lock_dir" ]] || { echo "[dev.sh] REFUSED: watcher cleanup record remains" >&2; return 78; }
 }
 dev_sh_acquire_lock() {
     local lock_root="/tmp/sk-dev-launcher-locks"
@@ -108,6 +150,9 @@ dev_sh_acquire_lock() {
     repo_root="$(pwd -P)"
     mkdir -p "$lock_root"
     SCRIPT_KIT_DEV_LOCK_DIR="${lock_root}/$(dev_sh_lock_key "$repo_root").lock"
+    if [[ "${SCRIPT_KIT_DEV_ALLOW_MULTI:-0}" == "1" ]]; then
+        SCRIPT_KIT_DEV_LOCK_DIR="${lock_root}/$(dev_sh_lock_key "$repo_root")-$$.lock"
+    fi
 
     if mkdir "$SCRIPT_KIT_DEV_LOCK_DIR" 2>/dev/null; then
         dev_sh_write_lock "$repo_root"
@@ -126,13 +171,8 @@ dev_sh_acquire_lock() {
             exit 2
         fi
     else
-        if dev_sh_pid_alive "$old_pid"; then
-            echo "[dev.sh] lock pid ${old_pid} is not a dev.sh (PID reuse); clearing stale lock"
-        else
-            echo "[dev.sh] clearing stale lock (pid ${old_pid:-?} is gone)"
-        fi
-        # Also sweep watchers orphaned by a hard-killed previous dev.sh.
-        dev_sh_stop_existing "$repo_root" "$SCRIPT_KIT_DEV_LOCK_DIR"
+        echo "[dev.sh] REFUSED: incomplete or stale watcher registration remains protected: ${SCRIPT_KIT_DEV_LOCK_DIR}" >&2
+        exit 78
     fi
 
     mkdir "$SCRIPT_KIT_DEV_LOCK_DIR"
@@ -155,17 +195,16 @@ dev_sh_cleanup() {
         wait "$SCRIPT_KIT_DEV_WATCHDOG_PID" 2>/dev/null || true
     fi
 
-    # Stop cargo-watch, dev-cycle, and any in-flight cargo build.
-    pkill -TERM -P "$$" 2>/dev/null || true
-    sleep 0.2
-    pkill -KILL -P "$$" 2>/dev/null || true
+    # Revalidate each direct child/tree lifetime before signalling.
+    for child in $(pgrep -P "$$" 2>/dev/null || true); do dev_sh_kill_tree "$child" TERM; done
 
     rm -f "$SCRIPT_KIT_DEV_STAMP_FILE" 2>/dev/null || true
 
-    if [ -n "${SCRIPT_KIT_DEV_LOCK_DIR:-}" ] \
-        && [ -f "$SCRIPT_KIT_DEV_LOCK_DIR/pid" ] \
-        && [ "$(cat "$SCRIPT_KIT_DEV_LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
-        rm -rf "$SCRIPT_KIT_DEV_LOCK_DIR" 2>/dev/null || true
+    if [[ -n "${SCRIPT_KIT_DEV_LOCK_DIR:-}" && -n "${SCRIPT_KIT_DEV_LOCK_GENERATION:-}" ]] \
+        && dev_sh_pid_is_dev_sh "$$" "$SCRIPT_KIT_DEV_LOCK_DIR" \
+        && [[ "$(cat "$SCRIPT_KIT_DEV_LOCK_DIR/generation")" == "$SCRIPT_KIT_DEV_LOCK_GENERATION" ]]; then
+        rm -f "$SCRIPT_KIT_DEV_LOCK_DIR/pid" "$SCRIPT_KIT_DEV_LOCK_DIR/root" "$SCRIPT_KIT_DEV_LOCK_DIR/session" "$SCRIPT_KIT_DEV_LOCK_DIR/process-start" "$SCRIPT_KIT_DEV_LOCK_DIR/generation"
+        rmdir "$SCRIPT_KIT_DEV_LOCK_DIR" 2>/dev/null || true
     fi
 
     if [ "$DEV_SH_EXIT_CODE" -ne 0 ]; then
@@ -180,30 +219,6 @@ dev_sh_on_signal() {
     esac
     dev_sh_cleanup
 }
-trap 'dev_sh_on_signal INT' INT
-trap 'dev_sh_on_signal TERM' TERM
-trap dev_sh_cleanup EXIT
-
-# --- Flags -------------------------------------------------------------------
-dev_sh_usage() {
-    sed -n '/^# Flags:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
-}
-SCRIPT_KIT_DEV_TAKEOVER="${SCRIPT_KIT_DEV_TAKEOVER:-0}"
-DEV_SH_MODE="run"
-for arg in "$@"; do
-    case "$arg" in
-        --takeover|--force|-f) SCRIPT_KIT_DEV_TAKEOVER=1 ;;
-        --stop) DEV_SH_MODE="stop" ;;
-        --status) DEV_SH_MODE="status" ;;
-        -h|--help) dev_sh_usage; exit 0 ;;
-        *)
-            echo "[dev.sh] ERROR unknown flag: $arg" >&2
-            dev_sh_usage >&2
-            DEV_SH_EXIT_CODE=64
-            exit 64
-            ;;
-    esac
-done
 
 if [ "$DEV_SH_MODE" != "run" ]; then
     DEV_SH_REPO_ROOT="$(pwd -P)"
@@ -238,6 +253,10 @@ if [ "$DEV_SH_MODE" != "run" ]; then
     esac
 fi
 
+trap 'dev_sh_on_signal INT' INT
+trap 'dev_sh_on_signal TERM' TERM
+trap dev_sh_cleanup EXIT
+
 # --- Banner FIRST so the user sees activity within ~1s, before any du scan ---
 echo "[dev.sh] start t=$(date '+%Y-%m-%dT%H:%M:%S%z') pid=$$"
 echo "[dev.sh] First build may take several minutes; subsequent rebuilds are incremental."
@@ -266,11 +285,10 @@ SESSION_DIR_RAW="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}"
 mkdir -p "$SESSION_DIR_RAW"
 export SCRIPT_KIT_SESSION_DIR="$(cd "$SESSION_DIR_RAW" && pwd -P)"
 
-if [ "${SCRIPT_KIT_DEV_ALLOW_MULTI:-0}" != "1" ]; then
-    dev_sh_acquire_lock
-else
-    echo "[dev.sh] WARNING multiple ./dev.sh watchers allowed by SCRIPT_KIT_DEV_ALLOW_MULTI=1"
+if [ "${SCRIPT_KIT_DEV_ALLOW_MULTI:-0}" = "1" ]; then
+    echo "[dev.sh] WARNING explicitly authorized multiple watchers"
 fi
+dev_sh_acquire_lock
 
 # --- Launcher self-update stamp ---------------------------------------------
 # Record a digest of the launcher + helper scripts at start. dev-cycle.sh will
@@ -296,49 +314,7 @@ export SCRIPT_KIT_DEV_STAMP_FILE
 SCRIPT_KIT_TARGET_CLEAN_THRESHOLD_GB="${SCRIPT_KIT_TARGET_CLEAN_THRESHOLD_GB:-50}"
 SCRIPT_KIT_TARGET_AGENT_THRESHOLD_GB="${SCRIPT_KIT_TARGET_AGENT_THRESHOLD_GB:-50}"
 if [ "${SCRIPT_KIT_REPORT_CACHE_SIZE:-1}" = "1" ]; then
-    (
-        humanize_kib() {
-            local kib="$1"
-            awk -v k="$kib" 'BEGIN{
-                u="K"; v=k+0;
-                if (v>=1024){v/=1024;u="M"};
-                if (v>=1024){v/=1024;u="G"};
-                if (v>=1024){v/=1024;u="T"};
-                printf("%.1f%s", v, u);
-            }'
-        }
-        if [ -d target ]; then
-            target_kib="$(du -sk target 2>/dev/null | awk '{print $1}')"
-            inc_kib="$(du -sk target/debug/incremental 2>/dev/null | awk '{print $1}')"
-            target_human="$(humanize_kib "${target_kib:-0}")"
-            inc_human="$(humanize_kib "${inc_kib:-0}")"
-            echo "[dev.sh] cache target=${target_human} incremental=${inc_human}" >&2
-
-            # SUGGEST only — never auto-clean from dev.sh; that forces a cold
-            # rebuild with no progress. Use prune-cargo-targets.sh instead.
-            if [[ "$SCRIPT_KIT_TARGET_CLEAN_THRESHOLD_GB" =~ ^[0-9]+$ ]] && [ "$SCRIPT_KIT_TARGET_CLEAN_THRESHOLD_GB" -gt 0 ]; then
-                threshold_kib=$((SCRIPT_KIT_TARGET_CLEAN_THRESHOLD_GB * 1024 * 1024))
-                if [ -n "$target_kib" ] && [ "$target_kib" -gt "$threshold_kib" ]; then
-                    echo "[dev.sh] SUGGEST target/ is ${target_human} (>${SCRIPT_KIT_TARGET_CLEAN_THRESHOLD_GB}G) — run: scripts/agentic/prune-cargo-targets.sh --apply" >&2
-                fi
-            fi
-        fi
-        if [ -d target-agent ]; then
-            agent_kib="$(du -sk target-agent 2>/dev/null | awk '{print $1}')"
-            agent_human="$(humanize_kib "${agent_kib:-0}")"
-            echo "[dev.sh] cache target-agent=${agent_human}" >&2
-            pools_kib="$(du -sk target-agent/pools 2>/dev/null | awk '{print $1}')"
-            runtime_kib="$(du -sk target-agent/runtime 2>/dev/null | awk '{print $1}')"
-            [ -n "$pools_kib" ] && echo "[dev.sh] cache target-agent-pools=$(humanize_kib "$pools_kib")" >&2
-            [ -n "$runtime_kib" ] && echo "[dev.sh] cache target-agent-runtime=$(humanize_kib "$runtime_kib")" >&2
-            if [[ "$SCRIPT_KIT_TARGET_AGENT_THRESHOLD_GB" =~ ^[0-9]+$ ]] && [ "$SCRIPT_KIT_TARGET_AGENT_THRESHOLD_GB" -gt 0 ]; then
-                threshold_kib=$((SCRIPT_KIT_TARGET_AGENT_THRESHOLD_GB * 1024 * 1024))
-                if [ -n "$agent_kib" ] && [ "$agent_kib" -gt "$threshold_kib" ]; then
-                    echo "[dev.sh] SUGGEST target-agent/ is ${agent_human} (>${SCRIPT_KIT_TARGET_AGENT_THRESHOLD_GB}G) — run: scripts/agentic/prune-cargo-targets.sh --apply" >&2
-                fi
-            fi
-        fi
-    ) &
+    bun scripts/devtools/devtools.ts build-ops query storage >&2 &
     SCRIPT_KIT_DEV_CACHE_PID=$!
 fi
 
@@ -352,9 +328,8 @@ if [ "${SCRIPT_KIT_DEV_ENSURE_PI_SIDECAR:-1}" = "1" ]; then
 fi
 
 # --- Crash watchdog -----------------------------------------------------------
-# Optional supervisor for the session app pid: loud banner + auto-relaunch on
-# abnormal death, incremental-cache wipe on a repeat crash of the same binary,
-# and a stop-and-report banner when a clean rebuild still crashes. Keep this
+# Optional supervisor for the session app pid: loud banner + exact relaunch on
+# abnormal death; repeated crashes stop without deleting caches or touching source.
 # off by default so using Script Kit's Quit command during dev leaves the app
 # stopped instead of being silently relaunched by dev.sh.
 SCRIPT_KIT_DEV_CRASH_WATCHDOG="${SCRIPT_KIT_DEV_CRASH_WATCHDOG:-0}"
@@ -410,33 +385,9 @@ cargo_watch_args+=(--no-restart -d "${SCRIPT_KIT_CARGO_WATCH_DELAY:-1.0}")
 #   - per-second heartbeat with elapsed seconds
 #   - relaunch elapsed + ready marker
 #   - skip-relaunch when binary mtime unchanged and session is healthy
-cargo watch "${cargo_watch_args[@]}" \
-    -s "bash scripts/agentic/dev-cycle.sh" \
-    -w src/ \
-    -w scripts/kit-sdk.ts \
-    -w Cargo.toml \
-    -w Cargo.lock \
-    -w build.rs \
-    -i 'src/bin/storybook.rs' \
-    -i 'src/bin/smoke-test.rs' \
-    -i 'src/storybook/*' \
-    -i 'src/stories/*' \
-    -i 'src/*_tests.rs' \
-    -i 'tests/*' \
-    -i '*.md' \
-    -i 'docs/*' \
-    -i 'expert-bundles/*' \
-    -i 'audit-docs/*' \
-    -i 'audits/*' \
-    -i '.test-screenshots/*' \
-    -i 'test-screenshots/*' \
-    -i '.hive/*' \
-    -i '.mocks/*' \
-    -i 'storybook.sh' \
-    -i 'tasks/*' \
-    -i 'plan/*' \
-    -i 'security-audit/*' \
-    -i 'ai/*' \
-    -i 'hooks/*' \
-    -i 'kit-init/*' \
-    -i 'rules/*'
+compiler_watch_args=()
+while IFS= read -r compiler_input || [[ -n "$compiler_input" ]]; do
+    case "$compiler_input" in ""|/*|*..*) echo "[dev.sh] invalid compiler-input path" >&2; exit 78 ;; esac
+    [[ ! -e "$compiler_input" ]] || compiler_watch_args+=(-w "$compiler_input")
+done < scripts/agentic/compiler-input-paths.txt
+cargo watch "${cargo_watch_args[@]}" -s "bash scripts/agentic/dev-cycle.sh" "${compiler_watch_args[@]}"

@@ -181,7 +181,7 @@ impl ScriptListApp {
                     .find(|entry| entry.id == command_id)
                     .cloned()
                 {
-                    self.execute_builtin(&entry, cx);
+                    let _outcome = self.execute_builtin(&entry, cx);
                 } else {
                     tracing::warn!(
                         target: "script_kit::trigger_builtin",
@@ -459,12 +459,15 @@ impl ScriptListApp {
         if let Some(focus) = plan.pending_focus {
             self.restore_current_view_with_focus(plan.next_view, focus);
         } else {
-            self.current_view = plan.next_view;
+            self.transition_current_view_and_rekey_main_automation_surface(plan.next_view);
         }
         self.builtin_row_stack_scroll_handle.scroll_to_item(0);
         let surface_kind = self.current_view.surface_kind();
         if plan.resize {
             self.update_window_size_deferred(window, cx);
+        }
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
         }
 
         FilterableRouteState::Applied { surface_kind }

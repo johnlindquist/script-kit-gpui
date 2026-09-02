@@ -136,7 +136,7 @@ async function step(name: string, inputText: string | null, expect: Expect): Pro
 }
 
 try {
-  await driver.request({ type: "show" }, { expect: "externalCommandResult", timeoutMs: 10_000 }).catch(() => driver.send({ type: "show" }));
+  await driver.request({ type: "show" }, { expect: "windowVisibilityAck", timeoutMs: 10_000 }).catch(() => driver.send({ type: "show" }));
   await driver.waitForSettle().catch(() => {});
   const opened = await driver.request(
     { type: "openAgentChatKitchenSinkFixture" },

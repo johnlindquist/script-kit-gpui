@@ -147,7 +147,8 @@ impl KeywordManager {
         info!("Loading scriptlets with keyword triggers");
 
         // Use load_scriptlets() to load from all plugins (plugins/*/scriptlets/*.md)
-        let scriptlets = load_scriptlets();
+        let scriptlets = load_scriptlets()?.into_scriptlets();
+        self.clear_triggers();
         let mut loaded_count = 0;
 
         for scriptlet in scriptlets {
@@ -567,7 +568,6 @@ impl KeywordManager {
     pub fn reload(&mut self) -> Result<usize> {
         info!("Reloading keyword scriptlets");
 
-        self.clear_triggers();
         self.load_scriptlets()
     }
 

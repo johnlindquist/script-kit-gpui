@@ -341,7 +341,9 @@ pub struct TerminalHandle {
     /// Event proxy for receiving terminal events (shared with Term).
     event_proxy: EventProxy,
     /// PTY manager for process I/O (writing only - reading happens in background thread).
-    pty: PtyManager,
+    pty: Option<PtyManager>,
+    /// Local input bytes accepted by an injected parser-only terminal.
+    fixture_input: Vec<u8>,
     /// Prevents the cached child status from emitting duplicate exit events.
     exit_event_emitted: bool,
     /// Theme adapter for colors.
@@ -374,12 +376,14 @@ impl Drop for TerminalHandle {
         self.reader_stop_flag.store(true, Ordering::Relaxed);
 
         // Best-effort shutdown: terminate the child to unblock PTY reads, then join.
-        if self.pty.is_running() {
-            if let Err(error) = self.pty.kill() {
-                warn!(
-                    error = %error,
-                    "Failed to kill PTY child during terminal drop"
-                );
+        if let Some(pty) = self.pty.as_mut() {
+            if pty.is_running() {
+                if let Err(error) = pty.kill() {
+                    warn!(
+                        error = %error,
+                        "Failed to kill PTY child during terminal drop"
+                    );
+                }
             }
         }
 

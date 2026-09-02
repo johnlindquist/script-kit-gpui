@@ -836,16 +836,29 @@ impl SearchResult {
             // actual source file even when another command has the same name.
             SearchResult::Script(sm) => Some(sm.script.source_command_id()),
             SearchResult::Scriptlet(sm) => Some(sm.scriptlet.source_command_id()),
-            SearchResult::Fallback(fm) => fm
-                .stable_selection_key_override
-                .clone()
-                .or_else(|| Some(format!("fallback/{}", fm.fallback.name()))),
+            SearchResult::Fallback(fm) => Some(
+                fm.stable_selection_key_override
+                    .clone()
+                    .unwrap_or_else(|| fm.fallback.source_selection_key()),
+            ),
+            SearchResult::App(am) => {
+                // The installation path owns the launch target. Two copies of
+                // the same bundle and same-named unbundled apps remain distinct.
+                if !am.app.path.as_os_str().is_empty() {
+                    use sha2::Digest;
+                    let digest = sha2::Sha256::digest(am.app.path.as_os_str().as_encoded_bytes());
+                    Some(format!("app/source-sha256-{digest:x}"))
+                } else {
+                    am.app
+                        .bundle_id
+                        .as_ref()
+                        .filter(|id| !id.is_empty())
+                        .map(|id| format!("app/{id}"))
+                }
+            }
             SearchResult::Agent(am) => Some(format!("agent/{}", am.agent.path.display())),
             SearchResult::BrowserTab(bm) => Some(bm.hit.stable_key.clone()),
-            SearchResult::ScriptIssue(issue) => Some(format!(
-                "script-issue/{}:{}:{}:{}",
-                issue.title, issue.failed_count, issue.fatal_count, issue.warning_count
-            )),
+            SearchResult::ScriptIssue(_) => Some("script-issue/catalog-validation".to_string()),
             SearchResult::SpineProjection(row) => Some(row.id.to_string()),
             _ => self
                 .history_result_key()
@@ -1385,7 +1398,7 @@ mod tests {
         assert_eq!(result.history_result_key(), None);
         assert_eq!(
             result.stable_selection_key(),
-            Some("fallback/Search Test".to_string())
+            Some("fallback/builtin/search-test".to_string())
         );
     }
 

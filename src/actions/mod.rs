@@ -19,7 +19,8 @@ mod command_bar;
 pub(crate) mod constants;
 mod dialog;
 mod types;
-mod window;
+pub(crate) mod window;
+pub(crate) use window::ActionsWindow;
 
 // Re-export only the public API that is actually used externally:
 // - ScriptInfo: used by main.rs for action context
@@ -92,11 +93,9 @@ pub struct ActionsWindowPlacement {
     reason = "the independently compiled application binary owns detached automation activation"
 )]
 pub(crate) use window::activate_detached_actions_window_action;
-pub(crate) use window::{
-    actions_popup_automation_snapshot, get_actions_dialog_entity, set_actions_dialog_search_text,
-};
+pub(crate) use window::{actions_popup_automation_snapshot, set_actions_dialog_search_text};
 pub use window::{
-    close_actions_window, is_actions_window, is_actions_window_open,
+    close_actions_window, get_actions_dialog_entity, is_actions_window, is_actions_window_open,
     is_actions_window_open_for_main, notify_actions_window, open_actions_window,
     route_key_to_detached_actions_window, WindowPosition,
 };

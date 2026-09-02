@@ -310,12 +310,11 @@ enum PromptMessage {
         options: Option<protocol::BatchOptions>,
         trace: protocol::TransactionTraceMode,
         target: Option<protocol::AutomationWindowTarget>,
+        expected: Option<protocol::AutomationTargetIdentitySnapshot>,
     },
     /// Dispatch a GPUI event through the real input pipeline to a target window
     SimulateGpuiEvent {
-        request_id: String,
-        target: Option<protocol::AutomationWindowTarget>,
-        event: protocol::SimulatedGpuiEvent,
+        message: Box<protocol::Message>,
     },
     /// Perform a setup action on the Agent Chat setup card
     PerformAgentChatSetupAction {

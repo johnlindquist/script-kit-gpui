@@ -47,8 +47,9 @@ pub use actions::{
 };
 pub(crate) use artifacts::{
     discard_root_todos_snapshot_refresh, finish_root_todos_snapshot_refresh,
-    read_root_todos_snapshot, root_todos_snapshot_is_fresh, try_begin_root_todos_snapshot_refresh,
-    RootTodoRefreshSnapshot,
+    invalidate_owned_root_todos_freshness, owned_root_todos_snapshot, read_root_todos_snapshot,
+    reset_owned_root_todos, root_todos_fresh_cache_status, root_todos_snapshot_is_fresh,
+    try_begin_root_todos_snapshot_refresh, RootTodoRefreshSnapshot,
 };
 #[allow(unused_imports)]
 pub use artifacts::{

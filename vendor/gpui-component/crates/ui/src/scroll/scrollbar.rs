@@ -542,6 +542,7 @@ impl Scrollbar {
         configured_scrollbar_show: ScrollbarShow,
         radius: Pixels,
         part: &'static str,
+        capture_frozen: bool,
     ) -> serde_json::Value {
         let axis = if state.axis.is_vertical() {
             "vertical"
@@ -566,10 +567,10 @@ impl Scrollbar {
             "scrollOffset": if state.axis.is_vertical() { offset.y.as_f32() } else { offset.x.as_f32() },
             "showMode": Self::fidelity_show_mode(scrollbar_show),
             "configuredShowMode": Self::fidelity_show_mode(configured_scrollbar_show),
-            "captureFrozen": true,
-            "hovered": false,
-            "hoveredOnThumb": false,
-            "dragged": false,
+            "captureFrozen": capture_frozen,
+            "hovered": !capture_frozen && scrollbar_state.get().hovered_axis == Some(state.axis),
+            "hoveredOnThumb": !capture_frozen && scrollbar_state.get().hovered_on_thumb == Some(state.axis),
+            "dragged": !capture_frozen && scrollbar_state.get().dragged_axis == Some(state.axis),
             "rawHovered": scrollbar_state.get().hovered_axis == Some(state.axis),
             "rawHoveredOnThumb": scrollbar_state.get().hovered_on_thumb == Some(state.axis),
             "rawDragged": scrollbar_state.get().dragged_axis == Some(state.axis),
@@ -617,6 +618,7 @@ impl Scrollbar {
                         configured_scrollbar_show,
                         radius,
                         "axis",
+                        true,
                     )),
                 );
                 window.paint_layer(hitbox_bounds, |window| {
@@ -635,6 +637,7 @@ impl Scrollbar {
                                     configured_scrollbar_show,
                                     radius,
                                     "track",
+                                    true,
                                 )),
                             );
                             Self::paint_track(state, window);
@@ -655,6 +658,7 @@ impl Scrollbar {
                                     configured_scrollbar_show,
                                     radius,
                                     "thumb",
+                                    true,
                                 )),
                             );
                             Self::paint_thumb(state, radius, window);
@@ -958,8 +962,6 @@ impl Element for Scrollbar {
         let fidelity_capture = false;
         let view_id = window.current_view();
         let hitbox_bounds = prepaint.hitbox.bounds;
-        let is_visible = scrollbar_state.get().is_scrollbar_visible() || scrollbar_show.is_always();
-        let is_hover_to_show = scrollbar_show.is_hover();
 
         // Update last_scroll_time when offset is changed.
         if !fidelity_capture
@@ -972,6 +974,11 @@ impl Element for Scrollbar {
             );
             cx.notify(view_id);
         }
+
+        // A changed offset makes the thumb visible in this frame. Its input
+        // handlers must use that same refreshed visibility, not the prior frame.
+        let is_visible = scrollbar_state.get().is_scrollbar_visible() || scrollbar_show.is_always();
+        let is_hover_to_show = scrollbar_show.is_hover();
 
         window.with_content_mask(
             Some(ContentMask {
@@ -993,6 +1000,38 @@ impl Element for Scrollbar {
                     let is_vertical = axis.is_vertical();
 
                     window.set_cursor_style(CursorStyle::default(), &state.bar_hitbox);
+
+                    #[cfg(feature = "fidelity")]
+                    if window.owned_frame_observation_active() {
+                        if let ElementId::Name(id) = &self.id {
+                            let axis_name = if is_vertical {
+                                "vertical"
+                            } else {
+                                "horizontal"
+                            };
+                            for (part, part_bounds) in
+                                [("track", state.bounds), ("thumb", state.thumb_fill_bounds)]
+                            {
+                                let mut metadata = self.fidelity_axis_metadata(
+                                    state,
+                                    scrollbar_state,
+                                    scrollbar_show,
+                                    configured_scrollbar_show,
+                                    radius,
+                                    part,
+                                    fidelity_capture,
+                                );
+                                metadata["hitEnabled"] =
+                                    serde_json::json!(is_hover_to_show || is_visible);
+                                window.record_owned_paint_binding(
+                                    "scrollbar",
+                                    format!("{id}:{axis_name}:{part}"),
+                                    part_bounds,
+                                    metadata,
+                                );
+                            }
+                        }
+                    }
 
                     #[cfg(feature = "fidelity")]
                     if fidelity_capture {

@@ -339,7 +339,7 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     expect(result.summary?.total_failed).toBe(0);
   });
 
-  test("noninteractive SDK workers default to two while preserving an explicit override", async () => {
+  test("noninteractive SDK workers default to two and allow a smaller explicit count", async () => {
     const bounded = await runFixture("safety-env", [], fixturePath, {
       SDK_TEST_CONCURRENCY: "",
       SDK_RUNNER_EXPECTED_CONCURRENCY: "2",
@@ -348,8 +348,8 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     expect(bounded.summary?.total_passed).toBe(1);
 
     const explicit = await runFixture("safety-env", [], fixturePath, {
-      SDK_TEST_CONCURRENCY: "3",
-      SDK_RUNNER_EXPECTED_CONCURRENCY: "3",
+      SDK_TEST_CONCURRENCY: "1",
+      SDK_RUNNER_EXPECTED_CONCURRENCY: "1",
     });
     expect(explicit.exitCode).toBe(0);
     expect(explicit.summary?.total_passed).toBe(1);
@@ -395,7 +395,7 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     },
   );
 
-  test.each(["9", "64", "9007199254740991"])(
+  test.each(["3", "9", "64", "9007199254740991"])(
     "unbounded SDK worker count %s refuses before any script can start",
     async (concurrency) => {
       const result = await runFixture("safety-env", [], fixturePath, {
@@ -403,7 +403,7 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
       });
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toBe("");
-      expect(result.stderr).toContain("SDK_TEST_CONCURRENCY exceeds the eight-worker safety ceiling");
+      expect(result.stderr).toContain("SDK_TEST_CONCURRENCY exceeds the two-worker safety ceiling");
     },
   );
 

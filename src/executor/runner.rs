@@ -99,6 +99,12 @@ static SDK_EXTRACTED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock
 
 /// Find an executable, checking common locations that GUI apps might miss
 pub fn find_executable(name: &str) -> Option<PathBuf> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+    {
+        tracing::warn!(%error, "Executable discovery refused");
+        return None;
+    }
     info!(category = "EXEC", executable = %name, "Looking for executable");
 
     // Common paths where executables might be installed
@@ -190,6 +196,12 @@ fn ensure_sdk_extracted() -> Option<PathBuf> {
 
 /// Find the SDK path, checking standard locations
 pub fn find_sdk_path() -> Option<PathBuf> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)
+    {
+        tracing::warn!(%error, "SDK discovery refused");
+        return None;
+    }
     info!(category = "EXEC", "Looking for SDK");
 
     // 1. Check ~/.scriptkit/sdk/kit-sdk.ts (primary location)
@@ -571,12 +583,26 @@ impl SplitSession {
         let _ = self.child.kill();
         #[cfg(unix)]
         {
-            if !self.process_handle.killed && !self.process_handle.confirm_group_cleanup("SIGKILL")
-            {
-                return Err(
-                    "Owned script process group is still alive; cleanup remains pending"
-                        .to_string(),
-                );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                // Only this session owns the Child. Reap it before observing
+                // the group: an unreaped leader can otherwise look alive after
+                // SIGKILL. Descendants must still independently be gone.
+                self.child
+                    .try_wait()
+                    .map_err(|error| format!("Failed to reap owned script process: {error}"))?;
+                if self.process_handle.killed
+                    || self.process_handle.confirm_group_cleanup("SIGKILL")
+                {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "Owned script process group is still alive; cleanup remains pending"
+                            .to_string(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
         Ok(())
@@ -681,6 +707,8 @@ fn execute_script_interactive_impl(
     extra_env: Vec<(String, String)>,
     argv: Vec<String>,
 ) -> Result<ScriptSession, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     let start = Instant::now();
     logging::bench_log("execute_script_interactive_start");
     debug!(path = %path.display(), "Starting interactive script execution");
@@ -784,6 +812,8 @@ pub fn spawn_script_with_extra_env(
     script_path: &str,
     extra_env: &[(String, String)],
 ) -> Result<ScriptSession, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     // Try to find the executable in common locations
     let executable = find_executable(cmd)
         .map(|p| p.to_string_lossy().into_owned())

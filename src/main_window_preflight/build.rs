@@ -8,14 +8,48 @@ use crate::scripts::SearchResult;
 use crate::AppView;
 use std::hash::{Hash, Hasher};
 
+pub(crate) fn command_block_reason(
+    app: &crate::ScriptListApp,
+    result: &SearchResult,
+) -> Option<&'static str> {
+    if matches!(app.current_view, AppView::ScriptList) {
+        return match app.resolved_main_menu_selected_subject() {
+            Some(crate::ResolvedMainMenuSelection::SearchResult { row, .. })
+            | Some(crate::ResolvedMainMenuSelection::Calculator { row, .. }) => {
+                (!row.eligibility.activatable).then_some("This command is not available right now.")
+            }
+            None => Some("No current selected result."),
+        };
+    }
+    let descriptor = match app.main_services.owned_sources() {
+        Some(sources) => {
+            result.command_descriptor_with_host_availability(&sources.sdk_host_availability)
+        }
+        None => result.command_descriptor(),
+    };
+    let descriptor = match descriptor {
+        Ok(descriptor) => descriptor,
+        Err(_) => return Some("This command has invalid metadata and cannot run."),
+    };
+    if descriptor.can_execute() {
+        return None;
+    }
+    descriptor
+        .primary_action()
+        .and_then(|action| action.availability.safe_message())
+        .or_else(|| descriptor.availability.safe_message())
+        .or(Some("This command is not available right now."))
+}
+
 fn selected_result(app: &crate::ScriptListApp) -> Option<crate::scripts::SearchResult> {
     use crate::scripts::*;
 
     match &app.current_view {
         AppView::ScriptList if app.menu_syntax_capture_form_owns_input() => None,
-        AppView::ScriptList => app
-            .main_menu_result_caches
-            .cloned_first_search_result_at_or_after_grouped_item(app.selected_index),
+        AppView::ScriptList => match app.resolved_main_menu_selected_subject()? {
+            crate::ResolvedMainMenuSelection::SearchResult { result, .. } => Some(result.clone()),
+            crate::ResolvedMainMenuSelection::Calculator { .. } => None,
+        },
         AppView::BrowserHistoryView {
             filter,
             selected_index,
@@ -81,9 +115,10 @@ fn visible_result_keys(app: &crate::ScriptListApp) -> Vec<String> {
     match &app.current_view {
         AppView::ScriptList if app.menu_syntax_capture_form_owns_input() => Vec::new(),
         AppView::ScriptList => app
-            .main_menu_result_caches
-            .grouped_selectable_search_results()
-            .filter_map(|result| result.stable_selection_key())
+            .main_menu_committed_rows()
+            .iter()
+            .filter(|row| row.eligibility.selectable)
+            .map(|row| row.stable_key.clone())
             .collect(),
         AppView::BrowserHistoryView { filter, .. } => {
             crate::browser_history::fuzzy_search_browser_history(
@@ -148,20 +183,17 @@ fn visible_row_fingerprint(app: &crate::ScriptListApp) -> String {
                     status.label
                 )
             }
-            GroupedListItem::Item(flat_index) => app
-                .main_menu_result_caches
-                .search_result_for_flat_index(*flat_index)
-                .map(|result| {
+            GroupedListItem::Item(_) => app
+                .main_menu_committed_rows()
+                .iter()
+                .find(|row| row.grouped_index == grouped_index)
+                .map(|row| {
                     format!(
-                        "i:{grouped_index}:{flat_index}:{}:{:?}:{:?}:{}:{}",
-                        result.stable_selection_key().unwrap_or_default(),
-                        result_role(result),
-                        enter_action_kind(result),
-                        result.type_label(),
-                        result.source_name().unwrap_or("")
+                        "i:{grouped_index}:{}:{}:{:?}",
+                        row.semantic_id, row.content_fingerprint, row.eligibility
                     )
                 })
-                .unwrap_or_else(|| format!("i:{grouped_index}:{flat_index}:missing")),
+                .unwrap_or_else(|| format!("i:{grouped_index}:invalid")),
         })
         .collect::<Vec<_>>()
         .join("|")
@@ -269,41 +301,39 @@ fn visible_result_receipts(app: &crate::ScriptListApp) -> Vec<MainWindowPrefligh
         return Vec::new();
     }
 
-    app.main_menu_result_caches
-        .grouped_items()
+    app.main_menu_committed_rows()
         .iter()
-        .enumerate()
-        .filter_map(|(grouped_index, item)| {
-            let GroupedListItem::Item(flat_index) = item else {
-                return None;
-            };
-            let result = app
-                .main_menu_result_caches
-                .search_result_for_flat_index(*flat_index)?;
-            if matches!(
-                result,
-                SearchResult::SpineProjection(row) if !row.is_selectable
-            ) {
-                return None;
+        .filter(|row| row.eligibility.selectable)
+        .filter_map(|row| match row.subject {
+            crate::MainMenuRowSubject::SearchResult { flat_index } => {
+                let result = app.main_menu_committed_results().get(flat_index)?;
+                Some(MainWindowPreflightVisibleResult {
+                    visible_rank: row.selectable_ordinal?,
+                    grouped_index: row.grouped_index,
+                    stable_key: Some(row.stable_key.clone()),
+                    role: result_role(result),
+                    action_kind: enter_action_kind(result),
+                    type_label: result.type_label().to_string(),
+                    source_name: result.source_name().map(ToString::to_string),
+                    description: result.description().map(ToString::to_string),
+                    leading_icon_present: leading_icon_present(result),
+                    leading_icon_kind: leading_icon_kind(result),
+                    leading_icon_bundle_id: leading_icon_bundle_id(result),
+                })
             }
-            Some(MainWindowPreflightVisibleResult {
-                visible_rank: 0,
-                grouped_index,
-                stable_key: result.stable_selection_key(),
-                role: result_role(result),
-                action_kind: enter_action_kind(result),
-                type_label: result.type_label().to_string(),
-                source_name: result.source_name().map(ToString::to_string),
-                description: result.description().map(ToString::to_string),
-                leading_icon_present: leading_icon_present(result),
-                leading_icon_kind: leading_icon_kind(result),
-                leading_icon_bundle_id: leading_icon_bundle_id(result),
-            })
-        })
-        .enumerate()
-        .map(|(visible_rank, mut receipt)| {
-            receipt.visible_rank = visible_rank;
-            receipt
+            crate::MainMenuRowSubject::Calculator => Some(MainWindowPreflightVisibleResult {
+                visible_rank: row.selectable_ordinal?,
+                grouped_index: row.grouped_index,
+                stable_key: Some(row.stable_key.clone()),
+                role: MainWindowPreflightResultRole::Primary,
+                action_kind: MainWindowPreflightActionKind::CopyCalculator,
+                type_label: "Calculator".to_string(),
+                source_name: None,
+                description: None,
+                leading_icon_present: false,
+                leading_icon_kind: None,
+                leading_icon_bundle_id: None,
+            }),
         })
         .collect()
 }
@@ -421,7 +451,7 @@ fn selection_warnings(
     let mut warnings = Vec::new();
 
     if let Some(result) = result {
-        if let Some(reason) = result.command_execution_block_reason() {
+        if let Some(reason) = command_block_reason(app, result) {
             warnings.push(reason.to_string());
         }
         if matches!(result, crate::scripts::SearchResult::Agent(_)) {
@@ -447,8 +477,23 @@ fn build_enter_action(
     app: &crate::ScriptListApp,
     result: Option<&crate::scripts::SearchResult>,
 ) -> Option<MainWindowPreflightAction> {
+    if let Some(crate::ResolvedMainMenuSelection::Calculator { row, result }) =
+        app.resolved_main_menu_selected_subject()
+    {
+        return row
+            .eligibility
+            .activatable
+            .then(|| MainWindowPreflightAction {
+                kind: MainWindowPreflightActionKind::CopyCalculator,
+                label: "Copy".to_string(),
+                subject: result.formatted.clone(),
+                type_label: "Calculator".to_string(),
+                source_name: None,
+                description: None,
+            });
+    }
     result
-        .filter(|result| result.command_execution_block_reason().is_none())
+        .filter(|result| command_block_reason(app, result).is_none())
         .map(|result| MainWindowPreflightAction {
             kind: enter_action_kind(result),
             label: app.main_window_primary_action_label(),
@@ -457,6 +502,37 @@ fn build_enter_action(
             source_name: result.source_name().map(ToString::to_string),
             description: result.description().map(ToString::to_string),
         })
+}
+
+fn selected_subject_role(
+    app: &crate::ScriptListApp,
+    result: Option<&SearchResult>,
+) -> Option<MainWindowPreflightResultRole> {
+    if matches!(
+        app.resolved_main_menu_selected_subject(),
+        Some(crate::ResolvedMainMenuSelection::Calculator { .. })
+    ) {
+        Some(MainWindowPreflightResultRole::Primary)
+    } else {
+        result.map(result_role)
+    }
+}
+
+fn selected_subject_key(
+    app: &crate::ScriptListApp,
+    result: Option<&SearchResult>,
+) -> Option<String> {
+    if matches!(app.current_view, AppView::ScriptList) {
+        return app
+            .resolved_main_menu_selected_subject()
+            .map(|subject| match subject {
+                crate::ResolvedMainMenuSelection::SearchResult { row, .. }
+                | crate::ResolvedMainMenuSelection::Calculator { row, .. } => {
+                    row.stable_key.clone()
+                }
+            });
+    }
+    result.and_then(SearchResult::stable_selection_key)
 }
 
 /// Refresh only the selection-dependent fields of a cached receipt.
@@ -471,11 +547,17 @@ pub(crate) fn refresh_main_window_preflight_selection(
 ) {
     let result = selected_result(app);
     receipt.selected_index = app.selected_index;
-    receipt.selected_result_key = result.as_ref().and_then(|r| r.stable_selection_key());
-    receipt.selected_result_role = result.as_ref().map(result_role);
-    receipt.selected_command = result
-        .as_ref()
-        .and_then(|result| result.redacted_command_receipt().ok());
+    receipt.selected_result_key = selected_subject_key(app, result.as_ref());
+    receipt.selected_result_role = selected_subject_role(app, result.as_ref());
+    receipt.selected_command = result.as_ref().and_then(|result| {
+        result
+            .redacted_command_receipt(
+                app.main_services
+                    .owned_sources()
+                    .map(|sources| &sources.sdk_host_availability),
+            )
+            .ok()
+    });
     receipt.enter_action = build_enter_action(app, result.as_ref());
     receipt.warnings = selection_warnings(app, result.as_ref());
 }
@@ -508,7 +590,7 @@ pub(crate) fn build_main_window_preflight_receipt(
     let warnings = selection_warnings(app, result.as_ref());
     let enter_action = build_enter_action(app, result.as_ref());
     let visible_results = visible_result_receipts(app);
-    let selected_result_role = result.as_ref().map(result_role);
+    let selected_result_role = selected_subject_role(app, result.as_ref());
     let computed_search_text =
         crate::menu_syntax::free_text_for_search(&app.menu_syntax_mode, &app.filter_text)
             .to_string();
@@ -529,17 +611,25 @@ pub(crate) fn build_main_window_preflight_receipt(
         source_filters,
         filter_indicators,
         selected_index: app.selected_index,
-        selected_result_key: result.as_ref().and_then(|r| r.stable_selection_key()),
+        selected_result_key: selected_subject_key(app, result.as_ref()),
         selected_result_role,
-        selected_command: result
-            .as_ref()
-            .and_then(|result| result.redacted_command_receipt().ok()),
+        selected_command: result.as_ref().and_then(|result| {
+            result
+                .redacted_command_receipt(
+                    app.main_services
+                        .owned_sources()
+                        .map(|sources| &sources.sdk_host_availability),
+                )
+                .ok()
+        }),
         visible_results,
         visible_result_key_fingerprint: visible_result_keys(app).join("|"),
         visible_row_fingerprint: visible_row_fingerprint(app),
         visible_result_count: app
-            .main_menu_result_caches
-            .grouped_selectable_result_count(),
+            .main_menu_committed_rows()
+            .iter()
+            .filter(|row| row.eligibility.selectable)
+            .count(),
         root_passive_frame: build_root_passive_frame_receipt(app),
         enter_action,
         tab_action: build_tab_action(app),

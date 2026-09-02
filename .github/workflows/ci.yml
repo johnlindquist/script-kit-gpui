@@ -12,6 +12,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  RUST_TEST_THREADS: "2"
+  CMAKE_BUILD_PARALLEL_LEVEL: "1"
+  SDK_TEST_CONCURRENCY: "2"
   # sccache cannot cache incrementally compiled Rust crates; CI runners are
   # ephemeral, so prefer portable compiler-cache hits over local incrementals.
   CARGO_INCREMENTAL: "0"
@@ -60,7 +64,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
@@ -93,10 +98,11 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'full-ci') && github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
         with:
-          components: rustfmt
+          bun-version: 1.2.21
       - run: cargo fmt --check
 
   # Fast compile check (parallel with format)
@@ -108,8 +114,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
 
       # Full target directory cache - fastest for cargo check
       - uses: Swatinem/rust-cache@v2
@@ -132,10 +141,11 @@ jobs:
     if: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') || github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
         with:
-          components: rustfmt
+          bun-version: 1.2.21
       - run: cargo fmt --check
 
   check:
@@ -147,8 +157,11 @@ jobs:
       RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -167,10 +180,11 @@ jobs:
       RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
         with:
-          components: clippy
+          bun-version: 1.2.21
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -193,8 +207,8 @@ jobs:
       RUST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -230,8 +244,8 @@ jobs:
       RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -265,8 +279,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -291,7 +308,7 @@ jobs:
         run: cargo bundle --help >/dev/null
 
       - name: Build release bundle
-        run: cargo bundle --release --bin script-kit-gpui
+        run: cargo bundle --release --bin script-kit-gpui --features owned-ui-evaluation
 
       - name: Zip unsigned app bundle
         run: |
@@ -317,8 +334,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -332,6 +352,9 @@ jobs:
           key: pi-sidecar-${{ runner.os }}-${{ runner.arch }}-${{ env.PI_AGENT_RUST_REF }}-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: Prepare bundled Pi sidecar
+        env:
+          SCRIPT_KIT_NONINTERACTIVE: "0"
+          PI_AGENT_RUST_TARGET_DIR: ${{ runner.temp }}/pi_agent_rust-target
         run: bash scripts/prepare-pi-sidecar.sh
 
       - name: Verify Pi sidecar

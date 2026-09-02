@@ -217,29 +217,32 @@ mod tests {
     // NEW: Native footer bridge dispatch regression tests
     // =======================================================================
 
-    /// Fails if the native footer bridge listener is removed from ui_window.rs
-    /// or stops draining the canonical `footer_action_channel()`.
+    /// The native footer bridge must consume only its owning window's events
+    /// and acknowledge them after canonical dispatch.
     #[test]
-    fn test_native_footer_bridge_exists_and_uses_canonical_channel() {
+    fn test_native_footer_bridge_exists_and_uses_owner_scoped_receiver() {
         let content = fs::read_to_string("src/app_impl/ui_window.rs")
             .expect("Failed to read src/app_impl/ui_window.rs");
+        let listener = function_body(&content, "fn ensure_main_footer_action_listener");
 
-        // The bridge must exist as a method on ScriptListApp
         assert!(
-            content.contains("fn ensure_main_footer_action_listener"),
-            "Native footer bridge listener must exist in ui_window.rs"
+            listener.contains("footer_popup::footer_action_receiver(window)")
+                && listener.contains("footer_popup::footer_owner_subscription(window, cx)")
+                && listener.contains("while let Ok(event) = rx.recv().await"),
+            "Native footer bridge must drain the owning window's receiver for its subscription lifetime"
         );
-
-        // It must drain the canonical footer_action_channel (not a duplicate channel)
+        let accept = listener
+            .find("if let Some(action) = event.accept(window)")
+            .expect("footer events must be accepted against the live owner before dispatch");
+        let dispatch = listener
+            .find("handle_main_footer_action(action, window, cx)")
+            .expect("footer bridge must route through canonical action dispatch");
+        let complete = listener
+            .find("event.complete(window)")
+            .expect("footer bridge must acknowledge completed dispatch");
         assert!(
-            content.contains("footer_popup::footer_action_channel()"),
-            "Native footer bridge must use the canonical footer_action_channel()"
-        );
-
-        // It must delegate to handle_main_footer_action (not inline dispatch)
-        assert!(
-            content.contains("handle_main_footer_action(action"),
-            "Native footer bridge must route through handle_main_footer_action()"
+            accept < dispatch && dispatch < complete,
+            "Native footer events must be owner-checked, dispatched, then acknowledged"
         );
     }
 

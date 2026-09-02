@@ -48,6 +48,9 @@ impl ScriptListApp {
         let (focus_target, focused_input) = focus_for_about_restore(&self.current_view);
         self.pending_focus = Some(focus_target);
         self.focused_input = focused_input;
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
         cx.notify();
     }
 

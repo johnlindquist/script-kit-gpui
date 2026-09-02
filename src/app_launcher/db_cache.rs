@@ -28,6 +28,7 @@ fn init_apps_db(conn: &Connection) -> Result<()> {
 
 /// Get or initialize the apps database connection
 fn get_apps_db() -> Result<Arc<Mutex<Connection>>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     if let Some(db) = APPS_DB.get() {
         return Ok(Arc::clone(db));
     }
@@ -73,7 +74,7 @@ pub fn get_app_loading_state() -> AppLoadingState {
         .lock()
         .ok()
         .map(|g| *g)
-        .unwrap_or(AppLoadingState::Ready)
+        .unwrap_or(AppLoadingState::Failed)
 }
 
 /// Get a human-readable message for the current loading state
@@ -85,13 +86,10 @@ pub fn get_app_loading_message() -> &'static str {
 /// Check if apps are still loading
 #[allow(dead_code)]
 pub fn is_apps_loading() -> bool {
-    get_app_loading_state() != AppLoadingState::Ready
-}
-
-/// Get the in-memory app cache (triggers initialization if not yet loaded)
-#[allow(dead_code)]
-pub fn get_cached_apps() -> Vec<AppInfo> {
-    APP_CACHE.lock().map(|g| g.clone()).unwrap_or_default()
+    matches!(
+        get_app_loading_state(),
+        AppLoadingState::LoadingFromCache | AppLoadingState::ScanningDirectories
+    )
 }
 
 /// Look up a pre-decoded app icon from the in-memory cache by bundle ID.
@@ -103,128 +101,122 @@ pub fn cached_app_icon_for_bundle(bundle_id: &str) -> Option<DecodedIcon> {
 
     let cache = APP_CACHE.lock().ok()?;
     cache
+        .apps
+        .as_ref()?
         .iter()
         .find(|app| app.bundle_id.as_deref() == Some(bundle_id))
         .and_then(|app| app.icon.clone())
 }
 
 /// Get modification time for a path as Unix timestamp
-fn get_mtime(path: &Path) -> Option<i64> {
-    path.metadata()
-        .ok()?
+fn get_mtime(path: &Path) -> Result<i64> {
+    let modified = path
+        .metadata()
+        .with_context(|| format!("Reading application metadata: {}", path.display()))?
         .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs() as i64)
+        .with_context(|| format!("Reading application modification time: {}", path.display()))?;
+    match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_secs())
+            .context("Application modification time exceeds SQLite range"),
+        Err(before_epoch) => Ok(-i64::try_from(before_epoch.duration().as_secs())
+            .context("Application modification time exceeds SQLite range")?),
+    }
 }
 
 // ============================================================================
 // SQLite Cache Operations
 // ============================================================================
 
-fn with_apps_db<T>(default: T, f: impl FnOnce(&Connection) -> T) -> T {
-    let db = match get_apps_db() {
-        Ok(db) => db,
-        Err(e) => {
-            warn!(error = %e, "Failed to get apps database");
-            return default;
-        }
-    };
-
-    let conn = match db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "Failed to lock apps database");
-            return default;
-        }
-    };
-
-    f(&conn)
-}
-
 /// Load all apps from the SQLite cache with icons decoded synchronously.
 ///
 /// Returns apps with their icons already decoded as RenderImages.
 /// This is the fast path for startup - no filesystem scanning needed.
-fn load_apps_from_db() -> Vec<AppInfo> {
-    let _span = info_span!("load_apps_from_db").entered();
-    let start = Instant::now();
-
-    with_apps_db(Vec::new(), |conn| {
-        let mut stmt = match conn.prepare(
-            "SELECT bundle_id, name, path, icon_blob FROM apps ORDER BY name COLLATE NOCASE",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "Failed to prepare apps query");
-                return Vec::new();
-            }
-        };
-
-        let apps_iter = stmt.query_map([], |row| {
-            let bundle_id: Option<String> = row.get(0)?;
-            let name: String = row.get(1)?;
-            let path_str: String = row.get(2)?;
-            let icon_blob: Option<Vec<u8>> = row.get(3)?;
-
-            Ok((bundle_id, name, path_str, icon_blob))
-        });
-
-        let mut apps = Vec::new();
-        let mut icons_decoded = 0;
-
-        if let Ok(iter) = apps_iter {
-            for (bundle_id, name, path_str, icon_blob) in iter.flatten() {
-                let path = PathBuf::from(&path_str);
-
-                // Skip apps that no longer exist
-                if !path.exists() {
-                    continue;
-                }
-
-                // Decode icon synchronously if present
-                let icon = icon_blob.and_then(|bytes| {
-                    crate::list_item::decode_png_to_render_image_with_bgra_conversion(&bytes).ok()
-                });
-
-                if icon.is_some() {
-                    icons_decoded += 1;
-                }
-
-                apps.push(AppInfo {
-                    name,
-                    path,
-                    bundle_id,
-                    icon,
-                });
-            }
-        }
-
-        info!(
-            app_count = apps.len(),
-            icons_decoded,
-            duration_ms = start.elapsed().as_millis(),
-            "Loaded apps from DB with icons"
-        );
-
-        apps
-    })
+fn load_apps_from_db() -> Result<Vec<AppInfo>> {
+    let db = get_apps_db()?;
+    let conn = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Application database lock poisoned"))?;
+    load_apps_from_connection(&conn)
 }
 
-/// Save or update an app in the SQLite cache
-fn save_app_to_db(app: &AppInfo, icon_bytes: Option<&[u8]>, mtime: i64) {
-    with_apps_db((), |conn| {
-        let now = std::time::SystemTime::now()
+fn load_apps_from_connection(conn: &Connection) -> Result<Vec<AppInfo>> {
+    let _span = info_span!("load_apps_from_db").entered();
+    let start = Instant::now();
+    let mut stmt = conn
+        .prepare("SELECT bundle_id, name, path, icon_blob FROM apps ORDER BY name COLLATE NOCASE")
+        .context("Preparing cached application query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+            ))
+        })
+        .context("Reading cached application rows")?;
+    let mut apps = Vec::new();
+    let mut icons_decoded = 0;
+    for row in rows {
+        let (bundle_id, name, path, icon_blob) = row.context("Decoding cached application row")?;
+        let path = PathBuf::from(path);
+        match path.metadata() {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => continue, // An individual cached path is no longer an app bundle.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Reading cached application path: {}", path.display())
+                })
+            }
+        }
+        // A malformed optional image is not an invalid application catalogue.
+        let icon = icon_blob.and_then(|bytes| {
+            crate::list_item::decode_png_to_render_image_with_bgra_conversion(&bytes).ok()
+        });
+        if icon.is_some() {
+            icons_decoded += 1;
+        }
+        apps.push(AppInfo {
+            name,
+            path,
+            bundle_id,
+            icon,
+        });
+    }
+    info!(
+        app_count = apps.len(),
+        icons_decoded,
+        duration_ms = start.elapsed().as_millis(),
+        "Loaded apps from DB with icons"
+    );
+    Ok(apps)
+}
+
+/// Commit one complete scan atomically, preserving existing optional icon bytes.
+fn save_apps_to_db(conn: &mut Connection, apps: &[ScannedApp]) -> Result<()> {
+    let transaction = conn
+        .transaction()
+        .context("Starting application cache update")?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        let path_str = app.path.to_string_lossy().to_string();
-        let bundle_id = app.bundle_id.as_deref().unwrap_or(&path_str);
-
-        let result = conn.execute(
-            "INSERT INTO apps (bundle_id, name, path, icon_blob, mtime, last_seen)
+            .context("Reading application cache timestamp")?
+            .as_secs(),
+    )
+    .context("Application cache timestamp exceeds SQLite range")?;
+    let mut expected = std::collections::HashSet::with_capacity(apps.len());
+    for entry in apps {
+        let app = &entry.app;
+        let path = app.path.to_string_lossy();
+        let bundle_id = app
+            .bundle_id
+            .as_deref()
+            .map(std::borrow::Cow::Borrowed)
+            .unwrap_or_else(|| app.path.to_string_lossy());
+        transaction
+            .execute(
+                "INSERT INTO apps (bundle_id, name, path, icon_blob, mtime, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(bundle_id) DO UPDATE SET
                  name = excluded.name,
@@ -232,30 +224,49 @@ fn save_app_to_db(app: &AppInfo, icon_bytes: Option<&[u8]>, mtime: i64) {
                  icon_blob = COALESCE(excluded.icon_blob, apps.icon_blob),
                  mtime = excluded.mtime,
                  last_seen = excluded.last_seen",
-            params![bundle_id, app.name, path_str, icon_bytes, mtime, now],
-        );
-
-        if let Err(e) = result {
-            warn!(error = %e, app = %app.name, "Failed to save app to database");
+                params![
+                    bundle_id.as_ref(),
+                    app.name,
+                    path.as_ref(),
+                    entry.icon_bytes.as_deref(),
+                    entry.mtime,
+                    now
+                ],
+            )
+            .with_context(|| format!("Saving application cache entry: {}", app.path.display()))?;
+        expected.insert(bundle_id);
+    }
+    let stale = {
+        let mut statement = transaction.prepare("SELECT bundle_id FROM apps")?;
+        let mut rows = statement.query([])?;
+        let mut stale = Vec::new();
+        while let Some(row) = rows.next()? {
+            let bundle_id = row.get_ref(0)?.as_str()?;
+            if !expected.contains(bundle_id) {
+                stale.push(bundle_id.to_owned());
+            }
         }
-    });
+        stale
+    };
+    for bundle_id in stale {
+        transaction.execute("DELETE FROM apps WHERE bundle_id = ?1", [bundle_id])?;
+    }
+    transaction
+        .commit()
+        .context("Committing application cache update")
 }
 
 /// Get database statistics for logging
-pub fn get_apps_db_stats() -> (usize, u64) {
-    with_apps_db((0, 0), |conn| {
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM apps", [], |row| row.get(0))
-            .unwrap_or(0);
-
-        let total_icon_size: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(LENGTH(icon_blob)), 0) FROM apps WHERE icon_blob IS NOT NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        (count as usize, total_icon_size as u64)
-    })
+pub fn get_apps_db_stats() -> Result<(usize, u64)> {
+    let db = get_apps_db()?;
+    let conn = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Application database lock poisoned"))?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM apps", [], |row| row.get(0))?;
+    let total_icon_size: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(LENGTH(icon_blob)), 0) FROM apps WHERE icon_blob IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok((usize::try_from(count)?, u64::try_from(total_icon_size)?))
 }

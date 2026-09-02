@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -16,10 +17,7 @@ import { openDayPage } from "../day-page-open-helper.ts";
 
 assertNoninteractiveVisualProbe("cons-proof-gov.layout-text");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY
-    ?? "target-agent/artifacts/cons-proof-c05/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const layoutPath = resolve(
   process.env.CONSISTENCY_LAYOUT_RECEIPT_PATH
     ?? ".artifacts/consistency/PF-005/layout-join.json",
@@ -227,19 +225,17 @@ let observedSettingsAnalysis: ReturnType<typeof analyzeLayout> | null = null;
 let observedNotesFits: TextFit[] = [];
 
 try {
-  driver = await Driver.launch({
-    binary,
-    sessionName: `cons-proof-c05-${process.pid}`,
-    sandboxHome: true,
-    sharedModels: false,
-    defaultTimeoutMs: 12_000,
-    env: {
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+  sessionName: `cons-proof-c05-${process.pid}`,
+  sandboxHome: true,
+  sharedModels: false,
+  defaultTimeoutMs: 12_000,
+  env: {
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  }, });
 
   runtimeStage = "settings-layout-join";
   driver.send({ type: "triggerBuiltin", name: "settings" });

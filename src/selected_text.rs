@@ -46,6 +46,10 @@ use tracing::{instrument, warn};
 #[instrument]
 #[cfg(target_os = "macos")]
 pub fn has_accessibility_permission() -> bool {
+    if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery).is_err()
+    {
+        return false;
+    }
     let result = accessibility::application_is_trusted();
     debug!(granted = result, "Checked accessibility permission");
     result
@@ -62,6 +66,11 @@ pub fn has_accessibility_permission() -> bool {
 #[instrument]
 #[cfg(target_os = "macos")]
 pub fn request_accessibility_permission() -> bool {
+    if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)
+        .is_err()
+    {
+        return false;
+    }
     info!("Requesting accessibility permission");
     let result = accessibility::application_is_trusted_with_prompt();
     if result {
@@ -83,6 +92,7 @@ pub fn request_accessibility_permission() -> bool {
 #[instrument]
 #[cfg(target_os = "macos")]
 pub fn open_accessibility_settings() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)?;
     info!("Opening accessibility settings");
     Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
@@ -102,6 +112,7 @@ pub fn open_accessibility_settings() -> Result<()> {
 #[instrument]
 #[cfg(target_os = "macos")]
 pub fn show_permission_dialog() -> Result<bool> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)?;
     // First, check if already granted
     if has_accessibility_permission() {
         debug!("Permission already granted");
@@ -198,6 +209,7 @@ extern "C" {
 #[instrument(skip_all)]
 #[cfg(target_os = "macos")]
 pub fn get_selected_text_ax_only() -> Result<Option<String>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     if !has_accessibility_permission() {
         bail!(
             "Accessibility permission required. Enable in System Preferences > Privacy & Security > Accessibility"
@@ -365,7 +377,7 @@ fn cf_string_to_string_if_string(value: CFTypeRef) -> Option<String> {
         let ok = CFStringGetCString(
             value as CFStringRef,
             buffer.as_mut_ptr(),
-            buffer_size as i64,
+            buffer_size,
             K_CF_STRING_ENCODING_UTF8,
         );
         if !ok {
@@ -400,6 +412,7 @@ fn cf_string_to_string_if_string(value: CFTypeRef) -> Option<String> {
 #[instrument(skip_all)]
 #[cfg(target_os = "macos")]
 pub fn get_selected_text() -> Result<String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     // Check permissions first
     if !has_accessibility_permission() {
         bail!(
@@ -474,6 +487,7 @@ pub struct CapturedText {
 #[instrument(skip_all)]
 #[cfg(target_os = "macos")]
 pub fn capture_selection_or_focused_text() -> Result<Option<CapturedText>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let source = crate::frontmost_app_tracker::get_last_real_app();
     let source_app = source.as_ref().map(|app| app.name.clone());
     let source_pid = source.map(|app| app.pid);
@@ -562,6 +576,7 @@ pub fn capture_selection_or_focused_text() -> Result<Option<CapturedText>> {
 #[instrument(skip(text), fields(text_len = text.len()))]
 #[cfg(target_os = "macos")]
 pub fn set_selected_text(text: &str) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)?;
     if !has_accessibility_permission() {
         bail!("Accessibility permission required");
     }
@@ -581,6 +596,7 @@ pub fn set_selected_text(text: &str) -> Result<()> {
 /// 4. Restores the original clipboard (best effort)
 #[cfg(target_os = "macos")]
 fn set_via_clipboard_fallback(text: &str) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let snapshot = PasteboardSnapshot::capture()
         .context("Failed to snapshot clipboard before selected-text replacement")?;
     let snapshot_summary = snapshot.summary();
@@ -1014,6 +1030,7 @@ unsafe fn release_objects(objects: &[cocoa::base::id]) {
 /// The function will simulate Cmd+V to paste into the currently focused app.
 #[cfg(target_os = "macos")]
 pub fn simulate_paste_with_cg() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)?;
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 

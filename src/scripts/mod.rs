@@ -19,10 +19,11 @@
 
 #![allow(dead_code)]
 
-mod command_contract;
+pub mod command_contract;
 mod grouping;
 pub(crate) mod input_detection;
 mod loader;
+pub(crate) mod main_menu_rows;
 mod metadata;
 pub(crate) mod root_search_contract;
 mod scheduling;
@@ -61,7 +62,7 @@ pub(crate) use self::grouping::prepend_root_conversations_section;
 #[allow(unused_imports)]
 pub use self::loader::{read_scripts, read_scripts_report};
 pub use self::scheduling::register_scheduled_scripts;
-pub use self::scriptlet_loader::{load_scriptlets, read_scriptlets_from_file};
+pub use self::scriptlet_loader::{load_scriptlets, read_scriptlets_from_file, ScriptletCatalogue};
 #[allow(unused_imports)]
 pub use self::search::{
     compute_match_indices_for_result, fuzzy_search_builtins, fuzzy_search_flows,

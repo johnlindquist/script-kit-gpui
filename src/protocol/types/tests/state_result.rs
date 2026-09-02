@@ -310,7 +310,8 @@ fn test_hello_ack_response_shape() {
 
 #[test]
 fn test_file_search_result_empty_response_shape() {
-    let response = crate::protocol::Message::file_search_result("fs-1".to_string(), Vec::new());
+    let response =
+        crate::protocol::Message::file_search_result("fs-1".to_string(), Vec::new(), None);
     let actual = to_json(response);
     assert_eq!(
         actual,
@@ -320,5 +321,18 @@ fn test_file_search_result_empty_response_shape() {
             "files": []
         }),
         "empty fileSearchResult JSON shape changed"
+    );
+}
+
+#[test]
+fn test_file_search_failure_is_not_an_empty_success() {
+    let response = crate::protocol::Message::file_search_result(
+        "fs-failed".into(),
+        Vec::new(),
+        Some("permission denied".into()),
+    );
+    assert_eq!(
+        to_json(response),
+        json!({"type": "fileSearchResult", "requestId": "fs-failed", "files": [], "error": "permission denied"})
     );
 }

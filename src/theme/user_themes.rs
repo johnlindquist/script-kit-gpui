@@ -31,6 +31,7 @@ pub fn user_themes_dir() -> PathBuf {
 /// Ensures the user-themes directory exists. Call once during setup.
 pub fn ensure_user_themes_dir() -> Result<()> {
     let dir = user_themes_dir();
+    require_theme_path(&dir)?;
     if !dir.exists() {
         fs::create_dir_all(&dir)
             .with_context(|| format!("creating user themes dir {}", dir.display()))?;
@@ -73,6 +74,9 @@ pub struct DeletedUserThemeBackup {
 /// files are skipped so one bad file cannot hide the rest.
 pub fn list_user_themes() -> Vec<UserTheme> {
     let dir = user_themes_dir();
+    if require_theme_path(&dir).is_err() {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -81,6 +85,7 @@ pub fn list_user_themes() -> Vec<UserTheme> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
+            require_theme_path(&path).ok()?;
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 return None;
             }
@@ -96,7 +101,7 @@ pub fn list_user_themes() -> Vec<UserTheme> {
         })
         .collect();
 
-    themes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    themes.sort_by_cached_key(|a| a.name.to_lowercase());
     themes
 }
 
@@ -109,9 +114,11 @@ pub fn find_user_theme(slug: &str) -> Option<UserTheme> {
 /// Loads a user-authored theme by slug. Invalid files are ignored, matching
 /// list behavior so one broken custom theme cannot break Theme Designer.
 pub fn load_user_theme(slug: &str) -> Option<Theme> {
+    ensure_safe_user_theme_slug(slug).ok()?;
     let path = user_themes_dir().join(format!("{slug}.json"));
+    require_theme_path(&path).ok()?;
     let contents = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Theme>(&contents).ok()
+    super::types::decode_theme_json(&contents, super::types::detect_system_appearance()).ok()
 }
 
 /// Normalizes a display name into a filesystem-safe slug.
@@ -271,6 +278,7 @@ pub fn save_theme_to_user_theme_slug(slug: &str, name: &str, theme: &Theme) -> R
 pub fn delete_user_theme(slug: &str) -> Result<()> {
     ensure_safe_user_theme_slug(slug)?;
     let path = user_themes_dir().join(format!("{slug}.json"));
+    require_theme_path(&path)?;
     if path.exists() {
         fs::remove_file(&path)
             .with_context(|| format!("deleting user theme {}", path.display()))?;
@@ -282,6 +290,7 @@ pub fn delete_user_theme(slug: &str) -> Result<()> {
 pub fn delete_user_theme_with_backup(slug: &str) -> Result<Option<DeletedUserThemeBackup>> {
     ensure_safe_user_theme_slug(slug)?;
     let path = user_themes_dir().join(format!("{slug}.json"));
+    require_theme_path(&path)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -328,20 +337,18 @@ pub fn restore_user_theme_backup(backup: &DeletedUserThemeBackup) -> Result<User
 }
 
 fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("user theme path has no parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("creating theme dir {}", parent.display()))?;
-    let tmp = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("theme.json")
-    ));
-    fs::write(&tmp, contents)
-        .with_context(|| format!("writing theme tmp file {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("finalizing theme file {}", path.display()))?;
+    require_theme_path(path)?;
+    crate::atomic_file::write_atomic(path, contents.as_bytes())?;
+    if crate::runtime_policy::is_owned_evaluation() {
+        crate::runtime_policy::record_completed_fixture_effect();
+    }
+    Ok(())
+}
+
+fn require_theme_path(path: &Path) -> Result<()> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(path)?;
+    }
     Ok(())
 }
 

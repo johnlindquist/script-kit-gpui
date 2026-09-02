@@ -56,6 +56,7 @@ pub struct SecretInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretStoreErrorKind {
+    PolicyRefused,
     PathUnavailable,
     ReadFailed,
     InvalidFormat,
@@ -68,6 +69,7 @@ pub enum SecretStoreErrorKind {
 impl SecretStoreErrorKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            SecretStoreErrorKind::PolicyRefused => "credentials_refused",
             SecretStoreErrorKind::PathUnavailable => "path_unavailable",
             SecretStoreErrorKind::ReadFailed => "read_failed",
             SecretStoreErrorKind::InvalidFormat => "invalid_format",
@@ -99,6 +101,7 @@ impl SecretStoreError {
 
     pub fn user_message(&self) -> &'static str {
         match self.kind {
+            SecretStoreErrorKind::PolicyRefused => "Credential access is forbidden in owned evaluation.",
             SecretStoreErrorKind::PathUnavailable => {
                 "Secret storage location is unavailable. Check your home directory and try again."
             }
@@ -140,6 +143,9 @@ fn secrets_cache() -> &'static Mutex<SecretsCache> {
 
 /// Get cached secrets, loading from disk if not yet cached.
 fn get_cached_secrets() -> Result<HashMap<String, SecretEntry>, SecretStoreError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials).map_err(
+        |error| SecretStoreError::new(SecretStoreErrorKind::PolicyRefused, error.to_string()),
+    )?;
     let mut guard = secrets_cache().lock().map_err(|e| {
         SecretStoreError::new(
             SecretStoreErrorKind::CacheUnavailable,
@@ -172,6 +178,12 @@ fn update_cache(secrets: HashMap<String, SecretEntry>) -> anyhow::Result<()> {
 /// Warm up the secrets cache (call at app startup).
 /// Loads and decrypts secrets in the background so they're ready when needed.
 pub fn warmup_cache() {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+    {
+        tracing::warn!(%error, "Secret warmup refused");
+        return;
+    }
     std::thread::spawn(|| {
         let start = std::time::Instant::now();
         let secrets = match get_cached_secrets() {
@@ -202,6 +214,7 @@ const APP_IDENTIFIER: &str = "com.scriptkit.secrets";
 
 /// Get the path to the secrets file
 fn secrets_path() -> anyhow::Result<PathBuf> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)?;
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     Ok(home.join(".scriptkit").join("secrets.age"))
@@ -223,6 +236,9 @@ fn derive_passphrase() -> SecretString {
 fn load_secrets_from_path(
     path: &std::path::Path,
 ) -> Result<HashMap<String, SecretEntry>, SecretStoreError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials).map_err(
+        |error| SecretStoreError::new(SecretStoreErrorKind::PolicyRefused, error.to_string()),
+    )?;
     if !path.exists() {
         return Ok(HashMap::new());
     }
@@ -368,6 +384,8 @@ fn save_secrets_to_path(
     secrets: &HashMap<String, SecretEntry>,
     path: &std::path::Path,
 ) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+        .map_err(|error| error.to_string())?;
     // Ensure parent directory exists
     let parent = path
         .parent()

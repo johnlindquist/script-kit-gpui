@@ -205,6 +205,15 @@ impl ScriptListApp {
                     return DispatchOutcome::success();
                 };
 
+                if let Err(error) = crate::runtime_policy::check(
+                    crate::runtime_policy::ExternalEffect::NativeInput,
+                ) {
+                    return DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        error.to_string(),
+                    );
+                }
+
                 tracing::info!(
                     action = paste_action.trace_action(),
                     emoji = %emoji.value,
@@ -237,9 +246,16 @@ impl ScriptListApp {
                 };
 
                 tracing::info!(action = %action_id, emoji = %emoji.value, "emoji action");
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload.clipboard_text));
-                self.show_hud(payload.hud_text, Some(HUD_SHORT_MS), cx);
-                DispatchOutcome::success()
+                match crate::platform::copy_text(&payload.clipboard_text) {
+                    Ok(receipt) => {
+                        self.show_hud(receipt.feedback(payload.hud_text), Some(HUD_SHORT_MS), cx);
+                        DispatchOutcome::success()
+                    }
+                    Err(error) => DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        format!("Failed to copy emoji: {error}"),
+                    ),
+                }
             }
             "emoji_pin" | "emoji_unpin" => {
                 let Some(pin_action) = EmojiPinHandlerAction::from_action_id(action_id) else {

@@ -1,4 +1,32 @@
 impl ScriptListApp {
+    pub(crate) fn create_owned_flow_session(&mut self, flow: &crate::flows::model::FlowDescriptor, cx: &mut Context<Self>) -> anyhow::Result<u64> {
+        crate::runtime_policy::WindowHostPolicy::OwnedHidden.validate()?;
+        let id = self.create_flow_session(flow, cx);
+        self.open_flow_session(id, cx);
+        Ok(id)
+    }
+
+    pub(crate) fn apply_owned_flow_event(
+        &mut self, session_id: u64, expected_message_id: &str,
+        event: crate::flows::codex_client::FlowThreadEvent, cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        crate::runtime_policy::WindowHostPolicy::OwnedHidden.validate()?;
+        let index = self.flow_session_index(session_id).ok_or_else(|| anyhow::anyhow!("flow_session_missing"))?;
+        let active = self.conversations.flow_sessions[index].0.active_turn.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("flow_turn_missing"))?;
+        anyhow::ensure!(active.message_id == expected_message_id, "stale_flow_turn");
+        use crate::flows::codex_client::FlowThreadEvent;
+        let event_session = match &event {
+            FlowThreadEvent::ThreadStarted { session_id, .. } | FlowThreadEvent::TurnStarted { session_id }
+            | FlowThreadEvent::AgentDelta { session_id, .. } | FlowThreadEvent::AgentMessageFinal { session_id, .. }
+            | FlowThreadEvent::TurnCompleted { session_id, .. } | FlowThreadEvent::TurnFailed { session_id, .. }
+            | FlowThreadEvent::SessionFailed { session_id, .. } => *session_id,
+        };
+        anyhow::ensure!(event_session == session_id, "wrong_flow_session_event");
+        self.apply_flow_thread_event(event, cx);
+        cx.notify();
+        Ok(())
+    }
     fn flow_session_index(&self, session_id: u64) -> Option<usize> {
         self.conversations
             .flow_sessions
@@ -425,10 +453,9 @@ impl ScriptListApp {
         let submit_sender = self.flow_chat_sender.clone();
         let submit_callback: crate::prompts::ChatSubmitCallback =
             std::sync::Arc::new(move |request| {
-                let _ = submit_sender.try_send(crate::flows::session::FlowChatRequest::Submit {
-                    session_id,
-                    text: request.outbound_text().to_string(),
-                });
+                submit_sender.try_send(crate::flows::session::FlowChatRequest::Submit {
+                    session_id, text: request.outbound_text().to_string(),
+                }).map_err(|_| "flow_submission_channel_full_or_closed".to_string())
             });
         // The flow session (this view) is the SINGLE lifecycle/key owner:
         // Esc backgrounds and Enter submits the shared draft; runtime
@@ -473,14 +500,12 @@ impl ScriptListApp {
             ]),
             callback: std::sync::Arc::new(
                 move |message_id: String, action: sk_protocol::ai_reliability::AiRecoveryAction| {
-                    let _ = recovery_sender.try_send(
-                        crate::flows::session::FlowChatRequest::Recovery {
-                            session_id,
-                            message_id,
-                            action,
-                        },
-                    );
-                    Ok(())
+                    recovery_sender.try_send(crate::flows::session::FlowChatRequest::Recovery {
+                        session_id, message_id, action,
+                    }).map_err(|_| Box::new(crate::ai::reliability::runtime_closed_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Codex,
+                        "flow_recovery_channel_full_or_closed",
+                    )))
                 },
             ),
         });
@@ -554,7 +579,7 @@ impl ScriptListApp {
         // their first message. File read + server spawn + thread/start all
         // happen off the GPUI thread; failures surface as SessionFailed
         // through the normal event drain.
-        if matches!(
+        if !crate::runtime_policy::is_owned_evaluation() && matches!(
             meta.transport,
             crate::flows::session::SessionTransport::CodexThread
         ) {
@@ -757,6 +782,13 @@ impl ScriptListApp {
         let (flow_id, flow_path) = (meta.flow_id.clone(), meta.flow_path.clone());
         meta.reliability
             .begin_turn(&flow_id, &flow_path, turn_ordinal);
+
+        if crate::runtime_policy::is_owned_evaluation() {
+            // Runtime acceptance is real; subsequent controlled events enter
+            // apply_flow_thread_event and finish_flow_turn, never a provider.
+            cx.notify();
+            return FlowChatSubmitResult::Dispatched;
+        }
 
         match transport {
             crate::flows::session::SessionTransport::CodexThread => {

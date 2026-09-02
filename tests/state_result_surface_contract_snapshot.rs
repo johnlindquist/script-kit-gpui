@@ -121,7 +121,8 @@ fn main_get_state_includes_surface_contract_but_target_diagnostics_do_not() {
         "// Collect current UI state",
     );
     assert!(
-        PROMPT_HANDLER_SOURCE.contains("Some(self.current_surface_contract_snapshot())"),
+        PROMPT_HANDLER_SOURCE
+            .contains("Some(self.current_surface_contract_snapshot(&main_target))"),
         "main-window getState must include a surface contract snapshot"
     );
     assert!(

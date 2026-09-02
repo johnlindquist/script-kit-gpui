@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { createHash } from "node:crypto";
 import {
@@ -25,10 +26,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 
 assertNoninteractiveVisualProbe("notes-actions.private-pasteboard-archive");
 
-const BINARY = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-c07/script-kit-gpui",
-);
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_DIR = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ?? ".test-output/cons-flow-c07",
 );
@@ -682,22 +680,20 @@ try {
 
   pasteboard = await PasteboardGuard.create();
   databaseRoot = mkdtempSync(join(tmpdir(), "cons-flow-c07-notes-"));
-  driver = await Driver.launch({
-    binary: BINARY,
-    sessionName: "cons-flow-c07-notes-actions",
-    sandboxHome: true,
-    sharedModels: false,
-    env: {
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_TEST_NOTES_DB_PATH: join(databaseRoot, "notes.db"),
-      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-    readyTimeoutMs: 30_000,
-    defaultTimeoutMs: 15_000,
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY,
+  sessionName: "cons-flow-c07-notes-actions",
+  sandboxHome: true,
+  sharedModels: false,
+  env: {
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_TEST_NOTES_DB_PATH: join(databaseRoot, "notes.db"),
+    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+    SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  },
+  readyTimeoutMs: 30_000,
+  defaultTimeoutMs: 15_000, });
   await driver.waitForSettle();
   driver.send({ type: "openNotes", requestId: "cons-flow-c07-open-notes" });
   await poll(

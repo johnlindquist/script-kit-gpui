@@ -15,6 +15,7 @@ use gpui::{
 };
 use gpui_component::button::ButtonVariant as ConfirmButtonVariant;
 
+use crate::runtime_policy::WindowHostPolicy;
 use crate::{
     components::confirm_modal_shell::{
         confirm_modal_header, confirm_modal_shell, modal_action_row, ConfirmModalShellConfig,
@@ -46,12 +47,32 @@ const CONFIRM_LIFECYCLE_POLL_MS: u64 = 120;
 const NS_WINDOW_ABOVE: i64 = 1;
 
 static CONFIRM_WINDOW: OnceLock<Mutex<Option<WindowHandle<ConfirmPopupWindow>>>> = OnceLock::new();
-static CONFIRM_PARENT_WINDOW: OnceLock<Mutex<Option<AnyWindowHandle>>> = OnceLock::new();
+static CONFIRM_PARENT_WINDOW: OnceLock<Mutex<Option<(String, u64, AnyWindowHandle)>>> =
+    OnceLock::new();
 static CONFIRM_RESULT_TX: OnceLock<Mutex<Option<async_channel::Sender<ParentDialogResult>>>> =
     OnceLock::new();
 static CONFIRM_FOCUSED_BUTTON: OnceLock<Mutex<FocusedButton>> = OnceLock::new();
 static CONFIRM_HAS_SECONDARY: OnceLock<Mutex<bool>> = OnceLock::new();
 
+fn current_confirm_window_handle() -> Option<WindowHandle<ConfirmPopupWindow>> {
+    CONFIRM_WINDOW
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|slot| *slot))
+}
+
+fn retire_confirm_lifetime(handle: WindowHandle<ConfirmPopupWindow>, generation: Option<u64>) {
+    if let Some(generation) = generation {
+        crate::windows::remove_runtime_window_instance(CONFIRM_POPUP_AUTOMATION_ID, generation);
+    }
+    if current_confirm_window_handle() == Some(handle) {
+        clear_confirm_window_handle();
+        if let Some(slot) = CONFIRM_PARENT_WINDOW.get() {
+            if let Ok(mut slot) = slot.lock() {
+                *slot = None;
+            }
+        }
+    }
+}
 const CONFIRM_POPUP_AUTOMATION_ID: &str = "confirm-popup";
 
 fn unregister_confirm_popup_automation_window(reason: &'static str) {
@@ -61,6 +82,7 @@ fn unregister_confirm_popup_automation_window(reason: &'static str) {
         reason
     );
     crate::windows::remove_automation_window(CONFIRM_POPUP_AUTOMATION_ID);
+    crate::windows::remove_runtime_window_handle(CONFIRM_POPUP_AUTOMATION_ID);
 }
 
 #[derive(Clone)]
@@ -441,12 +463,24 @@ pub(crate) fn send_confirm_result(confirmed: bool) {
     });
 }
 
-pub(crate) fn send_parent_dialog_result(result: ParentDialogResult) {
-    if let Some(storage) = CONFIRM_RESULT_TX.get() {
-        if let Ok(mut guard) = storage.lock() {
-            if let Some(tx) = guard.take() {
-                let _ = tx.try_send(result);
-            }
+pub(crate) fn send_parent_dialog_result(result: ParentDialogResult) -> bool {
+    let Some(storage) = CONFIRM_RESULT_TX.get() else {
+        return false;
+    };
+    let Ok(mut guard) = storage.lock() else {
+        return false;
+    };
+    let Some(tx) = guard.as_ref() else {
+        return false;
+    };
+    match tx.try_send(result) {
+        Ok(()) => {
+            *guard = None;
+            true
+        }
+        Err(error) => {
+            tracing::error!(%error, "confirm_result_delivery_failed");
+            false
         }
     }
 }
@@ -463,13 +497,40 @@ pub(crate) fn close_parent_action_dialog_programmatically(cx: &mut App) {
     close_confirm_window(cx);
 }
 
-/// Select and activate a confirm dialog button by value for batch automation.
-///
-/// Accepts `"confirm"`, `"secondary"`, or `"cancel"` as the value. Sends the
-/// result and closes the dialog. Returns `Some(value)` on success, `None` if
-/// the value is invalid or no confirm dialog is open.
+/// Activate an exact live Confirm button only when submission is explicit.
+/// Confirm has no independent selection state: selection-only is refused.
 #[allow(dead_code)]
-pub(crate) fn batch_select_confirm_button_by_value(value: &str, cx: &mut App) -> Option<String> {
+pub(crate) fn batch_select_confirm_button_by_value(
+    generation: u64,
+    value: &str,
+    submit: bool,
+    cx: &mut App,
+) -> Result<Option<String>, crate::protocol::TransactionError> {
+    if !submit {
+        return Err(crate::protocol::TransactionError {
+            code: crate::protocol::TransactionErrorCode::UnsupportedCommand,
+            message: "selection_only_unsupported".into(),
+            suggestion: Some("Use explicit submit:true to activate a Confirm button".into()),
+        });
+    }
+    let Some(handle) = current_confirm_window_handle() else {
+        return Ok(None);
+    };
+    if crate::windows::get_runtime_window_handle_for_generation(
+        CONFIRM_POPUP_AUTOMATION_ID,
+        generation,
+    ) != Some(handle.into())
+    {
+        return Ok(None);
+    }
+    let parent_live = crate::windows::automation_window_by_id(CONFIRM_POPUP_AUTOMATION_ID)
+        .and_then(|info| info.parent_window_id.zip(info.parent_window_generation))
+        .is_some_and(|(id, generation)| {
+            crate::windows::get_runtime_window_handle_for_generation(&id, generation).is_some()
+        });
+    if !parent_live {
+        return Ok(None);
+    }
     let result = match value {
         "confirm" => ParentDialogResult::Primary,
         "secondary" => {
@@ -478,19 +539,18 @@ pub(crate) fn batch_select_confirm_button_by_value(value: &str, cx: &mut App) ->
                 .and_then(|state| state.lock().ok())
                 .is_some_and(|state| *state);
             if !has_secondary {
-                return None;
+                return Ok(None);
             }
             ParentDialogResult::Secondary
         }
         "cancel" => ParentDialogResult::Dismiss,
-        _ => return None,
+        _ => return Ok(None),
     };
-    if !is_confirm_window_open() {
-        return None;
+    if !is_confirm_window_open() || !send_parent_dialog_result(result) {
+        return Ok(None);
     }
-    send_parent_dialog_result(result);
     close_confirm_window(cx);
-    Some(value.to_string())
+    Ok(Some(value.to_string()))
 }
 
 /// Select and activate a confirm dialog button by semantic ID. Three-action
@@ -498,17 +558,26 @@ pub(crate) fn batch_select_confirm_button_by_value(value: &str, cx: &mut App) ->
 /// legacy two-action dialogs retain `button:1:cancel`.
 #[allow(dead_code)]
 pub(crate) fn batch_select_confirm_button_by_semantic_id(
+    generation: u64,
     semantic_id: &str,
+    submit: bool,
     cx: &mut App,
-) -> Option<String> {
+) -> Result<Option<String>, crate::protocol::TransactionError> {
+    let has_secondary = CONFIRM_HAS_SECONDARY
+        .get()
+        .and_then(|state| state.lock().ok())
+        .is_some_and(|state| *state);
     let value = match semantic_id {
         "button:0:confirm" => "confirm",
-        "button:1:secondary" => "secondary",
-        "button:1:cancel" | "button:2:cancel" => "cancel",
-        _ => return None,
+        "button:1:secondary" if has_secondary => "secondary",
+        "button:1:cancel" if !has_secondary => "cancel",
+        "button:2:cancel" if has_secondary => "cancel",
+        _ => return Ok(None),
     };
-    batch_select_confirm_button_by_value(value, cx)?;
-    Some(semantic_id.to_string())
+    Ok(
+        batch_select_confirm_button_by_value(generation, value, submit, cx)?
+            .map(|_| semantic_id.to_owned()),
+    )
 }
 
 fn get_confirm_focused_button() -> FocusedButton {
@@ -583,13 +652,13 @@ fn notify_confirm_window(cx: &mut App) {
 }
 
 fn notify_confirm_parent_window(cx: &mut App) {
-    if let Some(storage) = CONFIRM_PARENT_WINDOW.get() {
-        if let Ok(guard) = storage.lock() {
-            if let Some(handle) = guard.as_ref() {
-                let _ = handle.update(cx, |root, _window, cx| {
-                    cx.notify(root.entity_id());
-                });
-            }
+    let parent = CONFIRM_PARENT_WINDOW
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|slot| slot.clone()));
+    if let Some((id, generation, handle)) = parent {
+        if crate::windows::get_runtime_window_handle_for_generation(&id, generation) == Some(handle)
+        {
+            let _ = handle.update(cx, |root, _, cx| cx.notify(root.entity_id()));
         }
     }
 }
@@ -604,33 +673,53 @@ pub(crate) struct ConfirmPopupSnapshot {
     pub(crate) cancel_text: String,
     pub(crate) secondary_text: Option<String>,
     pub(crate) focused_button: &'static str,
+    pub(crate) generation: u64,
+    pub(crate) completion_error: Option<String>,
+    pub(crate) revisions: (u64, u64, u64, u64),
 }
 
 /// Read the confirm popup snapshot if the popup window is open.
 ///
 /// Used by the automation surface collector to extract semantic elements
 /// from the live popup state without needing `&mut App`.
-pub(crate) fn get_confirm_popup_snapshot(cx: &gpui::App) -> Option<ConfirmPopupSnapshot> {
+pub(crate) fn get_confirm_popup_snapshot(
+    cx: &gpui::App,
+    expected_generation: u64,
+    window: Option<&Window>,
+) -> Option<ConfirmPopupSnapshot> {
+    crate::windows::get_runtime_window_handle_for_generation(
+        CONFIRM_POPUP_AUTOMATION_ID,
+        expected_generation,
+    )?;
     let storage = CONFIRM_WINDOW.get()?;
-    let guard = storage.lock().ok()?;
-    let handle = (*guard)?;
-    handle
-        .read_with(cx, |popup, _cx| {
-            let focused_button = match popup.focused_button {
-                FocusedButton::Confirm => "confirm",
-                FocusedButton::Secondary => "secondary",
-                FocusedButton::Cancel => "cancel",
-            };
-            ConfirmPopupSnapshot {
+    let handle = (*storage.lock().ok()?)?;
+    crate::windows::automation_surface_collector::read_window_root(
+        handle,
+        window,
+        cx,
+        |popup, _| {
+            if popup.generation != Some(expected_generation) {
+                return None;
+            }
+            Some(ConfirmPopupSnapshot {
                 title: popup.title.to_string(),
                 body: popup.body.to_string(),
                 confirm_text: popup.confirm_text.to_string(),
                 cancel_text: popup.cancel_text.to_string(),
                 secondary_text: popup.secondary_text.as_ref().map(ToString::to_string),
-                focused_button,
-            }
-        })
-        .ok()
+                focused_button: match popup.focused_button {
+                    FocusedButton::Confirm => "confirm",
+                    FocusedButton::Secondary => "secondary",
+                    FocusedButton::Cancel => "cancel",
+                },
+                generation: expected_generation,
+                completion_error: popup.completion_error.clone(),
+                revisions: popup.revision_facts(),
+            })
+        },
+    )
+    .ok()
+    .flatten()
 }
 
 pub(crate) fn is_confirm_window_open() -> bool {
@@ -640,49 +729,72 @@ pub(crate) fn is_confirm_window_open() -> bool {
         .is_some_and(|guard| guard.is_some())
 }
 
-pub(crate) fn close_confirm_window(cx: &mut App) {
-    // Unregister from automation registry before destroying the window
-    unregister_confirm_popup_automation_window("close_confirm_window");
-
-    tracing::info!(
-        target: "script_kit::confirm",
-        event = "close_confirm_window_called",
-        "close_confirm_window called"
+pub(crate) fn close_owned_confirm_window(generation: u64, cx: &mut App) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::windows::runtime_window_host_policy(CONFIRM_POPUP_AUTOMATION_ID, generation)?
+            .is_hidden(),
+        "confirm_owned_host_required"
     );
-    if let Some(storage) = CONFIRM_WINDOW.get() {
-        if let Ok(mut guard) = storage.lock() {
-            if let Some(handle) = guard.take() {
-                tracing::info!(
-                    target: "script_kit::confirm",
-                    event = "close_confirm_window_removing",
-                    "close_confirm_window: removing window"
-                );
-                // remove_window() destroys the NSWindow, which causes AppKit
-                // to automatically detach it from its parent (addChildWindow
-                // relationship). No manual removeChildWindow: needed.
-                let _ = handle.update(cx, |_root, window, cx| {
-                    crate::platform::dematerialize_then_remove_gpui_window(
-                        window,
-                        cx,
-                        "CONFIRM",
-                        "Confirm popup",
-                    );
-                });
-            } else {
-                tracing::debug!(
-                    target: "script_kit::confirm",
-                    event = "close_confirm_window_no_handle",
-                    "close_confirm_window: no handle stored"
-                );
-            }
-        }
+    let handle = crate::windows::get_runtime_window_handle_for_generation(
+        CONFIRM_POPUP_AUTOMATION_ID,
+        generation,
+    )
+    .ok_or_else(|| anyhow::anyhow!("confirm_target_stale"))?;
+    let handle = handle
+        .downcast::<ConfirmPopupWindow>()
+        .ok_or_else(|| anyhow::anyhow!("confirm_root_mismatch"))?;
+    handle.update(cx, |view, window, cx| {
+        anyhow::ensure!(
+            view.generation == Some(generation),
+            "confirm_generation_mismatch"
+        );
+        view.resolve_and_close(ParentDialogResult::ProgrammaticClose, window, cx);
+        anyhow::ensure!(
+            view.resolved,
+            "confirm_completion_failed: {}",
+            view.completion_error.as_deref().unwrap_or("unknown")
+        );
+        Ok(())
+    })?
+}
+
+fn close_confirm_window_if_generation(generation: u64, cx: &mut App) {
+    if crate::windows::get_runtime_window_handle_for_generation(
+        CONFIRM_POPUP_AUTOMATION_ID,
+        generation,
+    )
+    .is_some()
+    {
+        close_confirm_window(cx);
     }
+}
+pub(crate) fn close_confirm_window(cx: &mut App) {
+    let handle = CONFIRM_WINDOW
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|mut slot| slot.take()));
+    let Some(handle) = handle else {
+        return;
+    };
     notify_confirm_parent_window(cx);
-    if let Some(storage) = CONFIRM_PARENT_WINDOW.get() {
-        if let Ok(mut guard) = storage.lock() {
-            *guard = None;
+    unregister_confirm_popup_automation_window("close_confirm_window");
+    if let Some(slot) = CONFIRM_PARENT_WINDOW.get() {
+        if let Ok(mut slot) = slot.lock() {
+            *slot = None;
         }
     }
+    clear_confirm_window_handle();
+    let _ = handle.update(cx, |_, window, cx| {
+        if window.is_owned_hidden() {
+            window.remove_window();
+        } else {
+            crate::platform::dematerialize_then_remove_gpui_window(
+                window,
+                cx,
+                "CONFIRM",
+                "Confirm popup",
+            );
+        }
+    });
 }
 
 pub(crate) struct ConfirmPopupParentWindow {
@@ -690,32 +802,6 @@ pub(crate) struct ConfirmPopupParentWindow {
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) display_id: Option<DisplayId>,
     pub(crate) automation_id: Option<String>,
-}
-
-/// Read an NSWindow's `title` as a Rust String, or `None` if the title is nil
-/// or not valid UTF-8. Safe to call on the AppKit main thread inside the
-/// confirm-popup defer block where we already hold raw NSWindow pointers.
-#[cfg(target_os = "macos")]
-unsafe fn nswindow_title_string(window: cocoa::base::id) -> Option<String> {
-    use cocoa::base::nil;
-    use objc::{msg_send, sel, sel_impl};
-    use std::ffi::CStr;
-    if window == nil {
-        return None;
-    }
-    let title: cocoa::base::id = unsafe { msg_send![window, title] };
-    if title == nil {
-        return None;
-    }
-    let title_cstr: *const std::os::raw::c_char = unsafe { msg_send![title, UTF8String] };
-    if title_cstr.is_null() {
-        return None;
-    }
-    Some(
-        unsafe { CStr::from_ptr(title_cstr) }
-            .to_string_lossy()
-            .into_owned(),
-    )
 }
 
 fn automation_bounds_from_gpui(bounds: Bounds<Pixels>) -> crate::protocol::AutomationWindowBounds {
@@ -733,390 +819,184 @@ pub(crate) fn open_confirm_popup_window(
     options: ConfirmWindowOptions,
     keep_open_while: Rc<dyn Fn() -> bool>,
     result_tx: async_channel::Sender<ParentDialogResult>,
+    host_policy: WindowHostPolicy,
 ) -> anyhow::Result<WindowHandle<ConfirmPopupWindow>> {
-    let parent_automation_id = resolve_confirm_popup_parent_automation_id(
+    host_policy.validate()?;
+    let parent_id = resolve_confirm_popup_parent_automation_id(
         parent_window.handle,
         parent_window.bounds,
         parent_window.automation_id.as_deref(),
-        options.title.as_ref(),
+        &options.title,
     )?;
-
-    tracing::info!(
-        target: "script_kit::confirm",
-        event = "open_confirm_popup_window",
-        title = %options.title,
-        parent_x = ?parent_window.bounds.origin.x,
-        parent_y = ?parent_window.bounds.origin.y,
-        parent_w = ?parent_window.bounds.size.width,
-        parent_h = ?parent_window.bounds.size.height,
-        display_id = ?parent_window.display_id,
-        "open_confirm_popup_window: opening native confirm popup"
+    let parent = crate::windows::automation_window_by_id(&parent_id)
+        .ok_or_else(|| anyhow::anyhow!("confirm_parent_missing"))?;
+    let parent_generation = parent
+        .generation
+        .ok_or_else(|| anyhow::anyhow!("confirm_parent_generation_missing"))?;
+    anyhow::ensure!(
+        crate::windows::runtime_window_host_policy(&parent_id, parent_generation)? == host_policy,
+        "confirm_parent_host_policy_mismatch"
     );
     close_confirm_window(cx);
-    let has_secondary = options.secondary_text.is_some();
-    if let Ok(mut state) = CONFIRM_HAS_SECONDARY
+    *CONFIRM_HAS_SECONDARY
         .get_or_init(|| Mutex::new(false))
         .lock()
-    {
-        *state = has_secondary;
-    }
-
+        .map_err(|_| anyhow::anyhow!("confirm_state_poisoned"))? = options.secondary_text.is_some();
     let theme = get_cached_theme();
     let is_dark_vibrancy = theme.should_use_dark_vibrancy();
-    let vibrancy_enabled = theme.is_vibrancy_enabled();
-    let window_background = if vibrancy_enabled {
+    let window_background = if !host_policy.is_hidden() && theme.is_vibrancy_enabled() {
         crate::platform::vibrancy_window_background()
     } else {
         WindowBackgroundAppearance::Opaque
     };
-
-    let bounds = confirm_window_bounds(
-        parent_window.bounds,
-        options.width,
-        options.body.as_ref(),
-        cx,
-    );
-
-    tracing::info!(
-        target: "script_kit::confirm",
-        event = "open_confirm_popup_window_bounds",
-        x = ?bounds.origin.x,
-        y = ?bounds.origin.y,
-        width = ?bounds.size.width,
-        height = ?bounds.size.height,
-        vibrancy_enabled,
-        is_dark_vibrancy,
-        "open_confirm_popup_window: calculated bounds"
-    );
-
+    let bounds = confirm_window_bounds(parent_window.bounds, options.width, &options.body, cx);
     let request = options.clone();
-    let lifecycle = keep_open_while.clone();
     let sender = result_tx.clone();
-
     let handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
             window_background,
-            // Keep the popup from becoming key before AppKit attaches it as a child.
-            // Main-window confirm routing owns live Enter/Tab/Escape handling while
-            // AppKit keeps the attached popup visually above the parent.
             focus: false,
-            show: true,
+            show: !host_policy.is_hidden(),
             kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
             display_id: parent_window.display_id,
             ..Default::default()
         },
-        move |_window, cx| cx.new(|cx| ConfirmPopupWindow::new(request, lifecycle, sender, cx)),
+        move |_, cx| cx.new(|cx| ConfirmPopupWindow::new(request, keep_open_while, sender, cx)),
     )?;
+    handle.update(cx, |popup, _, _| popup.window_handle = Some(handle))?;
+    *CONFIRM_WINDOW
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("confirm_state_poisoned"))? = Some(handle);
+    let exact_parent_id = parent_id.clone();
 
-    tracing::info!(
-        target: "script_kit::confirm",
-        event = "open_confirm_popup_window_created",
-        "open_confirm_popup_window: window created successfully"
-    );
-
-    handle
-        .update(cx, |_view, window, _cx| {
-            crate::platform::configure_child_attached_overlay_window_glass(
-                window,
-                "CONFIRM",
-                "Confirm popup",
-            );
-        })
-        .ok();
-
-    // Capture expected frame for NSWindow matching in the deferred callback
-    let expected_w: f32 = bounds.size.width.into();
-    let expected_h: f32 = bounds.size.height.into();
-    let expected_x: f32 = bounds.origin.x.into();
-    let expected_y: f32 = bounds.origin.y.into();
-
-    // Capture intended parent identity + frame so the AppKit attach step can
-    // pick the *intended* parent NSWindow deterministically, instead of
-    // defaulting to whichever window happens to be `isKeyWindow` when the
-    // defer block runs (which is brittle when Notes / Agent Chat / main coexist).
-    let parent_automation_id_for_nswindow = parent_automation_id.clone();
-    let parent_expected_w: f32 = parent_window.bounds.size.width.into();
-    let parent_expected_h: f32 = parent_window.bounds.size.height.into();
-    let parent_expected_title =
-        crate::windows::automation_window_by_id(&parent_automation_id).and_then(|info| info.title);
+    let publish = move |cx: &mut App| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            current_confirm_window_handle() == Some(handle),
+            "confirm_lifetime_superseded"
+        );
+        let info = crate::windows::register_runtime_window_instance(
+            crate::protocol::AutomationWindowInfo {
+                id: CONFIRM_POPUP_AUTOMATION_ID.to_string(),
+                kind: crate::protocol::AutomationWindowKind::PromptPopup,
+                title: Some(options.title.to_string()),
+                focused: false,
+                visible: !host_policy.is_hidden(),
+                semantic_surface: Some("confirmDialog".into()),
+                bounds: Some(automation_bounds_from_gpui(bounds)),
+                parent_window_id: Some(parent_id.clone()),
+                parent_kind: Some(parent.kind),
+                parent_window_generation: Some(parent_generation),
+                pid: Some(std::process::id()),
+                generation: None,
+            },
+            handle.into(),
+            cx,
+        )?;
+        let generation = info
+            .generation
+            .ok_or_else(|| anyhow::anyhow!("confirm_generation_missing"))?;
+        let on_close = cx.on_window_closed(move |cx, window_id| {
+            if window_id == handle.window_id() {
+                if current_confirm_window_handle() == Some(handle) {
+                    notify_confirm_parent_window(cx);
+                }
+                retire_confirm_lifetime(handle, Some(generation));
+            }
+        });
+        handle.update(cx, |popup, _, _| {
+            popup.generation = Some(generation);
+            popup.close_subscription = Some(on_close);
+        })?;
+        *CONFIRM_WINDOW
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("confirm_state_poisoned"))? = Some(handle);
+        *CONFIRM_PARENT_WINDOW
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("confirm_state_poisoned"))? =
+            Some((parent_id, parent_generation, parent_window.handle));
+        *CONFIRM_RESULT_TX
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("confirm_state_poisoned"))? = Some(result_tx);
+        *CONFIRM_FOCUSED_BUTTON
+            .get_or_init(|| Mutex::new(FocusedButton::Confirm))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("confirm_state_poisoned"))? = FocusedButton::Confirm;
+        notify_confirm_parent_window(cx);
+        Ok(())
+    };
 
     #[cfg(target_os = "macos")]
-    {
-        let _ = handle.update(cx, move |_root, window, cx| {
-            window.defer(cx, move |_window, _cx| {
-                use cocoa::appkit::NSApp;
-                use cocoa::base::nil;
-                use objc::{msg_send, sel, sel_impl};
-
-                // SAFETY: On the AppKit main thread inside GPUI's deferred
-                // window callback. We enumerate all NSWindows to find the
-                // confirm popup by matching the expected frame bounds, rather
-                // than relying on lastObject (which may return the wrong
-                // window when other popups coexist).
-                unsafe {
-                    let app: cocoa::base::id = NSApp();
-                    let windows: cocoa::base::id = msg_send![app, windows];
-                    let count: usize = msg_send![windows, count];
-
-                    tracing::info!(
-                        target: "script_kit::confirm",
-                        event = "configure_confirm_nswindow_search",
-                        window_count = count,
-                        target_x = expected_x,
-                        target_y = expected_y,
-                        target_w = expected_w,
-                        target_h = expected_h,
-                        "Searching {} NSWindows for confirm popup by frame bounds",
-                        count
-                    );
-
-                    if count == 0 {
-                        tracing::warn!(
-                            target: "script_kit::confirm",
-                            event = "configure_confirm_no_windows",
-                            "No NSWindows found"
-                        );
-                        return;
-                    }
-
-                    // Log all windows for diagnosis
-                    let mut confirm_ns_window: cocoa::base::id = nil;
-                    for i in 0..count {
-                        let w: cocoa::base::id = msg_send![windows, objectAtIndex: i];
-                        if w == nil {
-                            continue;
-                        }
-                        let frame: cocoa::foundation::NSRect = msg_send![w, frame];
-                        let level: i64 = msg_send![w, level];
-                        let is_visible: bool = msg_send![w, isVisible];
-                        let is_key: bool = msg_send![w, isKeyWindow];
-
-                        tracing::info!(
-                            target: "script_kit::confirm",
-                            event = "configure_confirm_nswindow_enumerate",
-                            index = i,
-                            ptr = format!("{:?}", w),
-                            x = frame.origin.x,
-                            y = frame.origin.y,
-                            w = frame.size.width,
-                            h = frame.size.height,
-                            level,
-                            is_visible,
-                            is_key,
-                            "NSWindow[{}]: {:?} frame=({:.0},{:.0} {:.0}x{:.0}) level={} visible={} key={}",
-                            i, w, frame.origin.x, frame.origin.y,
-                            frame.size.width, frame.size.height,
-                            level, is_visible, is_key
-                        );
-
-                        // Match by approximate frame bounds (GPUI may apply
-                        // slight adjustments, so use tolerance on position
-                        // and size). Confirm is shortcut-sized, so size alone
-                        // can collide with another compact popup.
-                        if (frame.size.width - expected_w as f64).abs() < 2.0
-                            && (frame.size.height - expected_h as f64).abs() < 2.0
-                            && (frame.origin.x - expected_x as f64).abs() < 4.0
-                            && (frame.origin.y - expected_y as f64).abs() < 4.0
-                            && is_visible
-                        {
-                            tracing::info!(
-                                target: "script_kit::confirm",
-                                event = "configure_confirm_nswindow_matched",
-                                index = i,
-                                ptr = format!("{:?}", w),
-                                "Matched confirm popup NSWindow by frame bounds"
-                            );
-                            confirm_ns_window = w;
-                        }
-                    }
-
-                    // Fallback to lastObject if frame matching didn't find it
-                    if confirm_ns_window == nil {
-                        confirm_ns_window = msg_send![windows, lastObject];
-                        tracing::warn!(
-                            target: "script_kit::confirm",
-                            event = "configure_confirm_nswindow_fallback",
-                            ptr = format!("{:?}", confirm_ns_window),
-                            "Frame match failed, falling back to lastObject"
-                        );
-                    }
-
-                    if confirm_ns_window != nil {
-                        tracing::info!(
-                            target: "script_kit::confirm",
-                            event = "configure_confirm_popup_applying",
-                            ptr = format!("{:?}", confirm_ns_window),
-                            is_dark_vibrancy,
-                            "Applying vibrancy + level to confirm NSWindow"
-                        );
-                        platform::configure_confirm_popup_window(confirm_ns_window, is_dark_vibrancy);
-
-                        // Attach confirm as child of the parent window so AppKit
-                        // keeps it above and moves it with the parent.
-                        //
-                        // Deterministic match first: prefer the NSWindow whose
-                        // frame size matches the parent we computed bounds from,
-                        // optionally cross-checked against the registered
-                        // automation title. This protects multi-window setups
-                        // (Notes / Agent Chat / main coexist) where the key window may
-                        // not be the *intended* parent. Fall back to the legacy
-                        // isKeyWindow / first-visible heuristic only if the
-                        // deterministic match fails.
-                        let mut main_ns_window: cocoa::base::id = nil;
-                        for idx in 0..count {
-                            let w: cocoa::base::id = msg_send![windows, objectAtIndex: idx];
-                            if w == nil || w == confirm_ns_window {
-                                continue;
-                            }
-                            let w_visible: bool = msg_send![w, isVisible];
-                            if !w_visible {
-                                continue;
-                            }
-                            let frame: cocoa::foundation::NSRect = msg_send![w, frame];
-                            let size_matches = (frame.size.width
-                                - parent_expected_w as f64)
-                                .abs()
-                                < 2.0
-                                && (frame.size.height - parent_expected_h as f64).abs() < 2.0;
-                            let title_opt = nswindow_title_string(w);
-                            let expected_title_matches = parent_expected_title
-                                .as_deref()
-                                .is_some_and(|expected| title_opt.as_deref() == Some(expected));
-                            let notes_title_matches = parent_automation_id_for_nswindow == "notes"
-                                && title_opt.as_deref() == Some("Notes");
-                            if (size_matches && expected_title_matches) || notes_title_matches {
-                                main_ns_window = w;
-                                tracing::info!(
-                                    target: "script_kit::confirm",
-                                    event = "confirm_window_parent_matched_by_automation_id",
-                                    parent_window_id = %parent_automation_id_for_nswindow,
-                                    parent_title = ?title_opt,
-                                    parent_w = frame.size.width,
-                                    parent_h = frame.size.height,
-                                    "Matched confirm popup parent NSWindow deterministically"
-                                );
-                                break;
-                            }
-                        }
-                        if main_ns_window == nil {
-                            tracing::warn!(
-                                target: "script_kit::confirm",
-                                event = "confirm_window_parent_deterministic_match_failed",
-                                parent_window_id = %parent_automation_id_for_nswindow,
-                                expected_title = ?parent_expected_title,
-                                expected_w = parent_expected_w,
-                                expected_h = parent_expected_h,
-                                "Falling back to legacy key/visible-window parent search"
-                            );
-                            let mut fallback_ns_window: cocoa::base::id = nil;
-                            for idx in 0..count {
-                                let w: cocoa::base::id =
-                                    msg_send![windows, objectAtIndex: idx];
-                                if w != nil && w != confirm_ns_window {
-                                    let w_visible: bool = msg_send![w, isVisible];
-                                    if w_visible {
-                                        let w_key: bool = msg_send![w, isKeyWindow];
-                                        if w_key {
-                                            main_ns_window = w;
-                                            break;
-                                        }
-                                        if fallback_ns_window == nil {
-                                            fallback_ns_window = w;
-                                        }
-                                    }
-                                }
-                            }
-                            if main_ns_window == nil {
-                                main_ns_window = fallback_ns_window;
-                                if main_ns_window == nil {
-                                    tracing::warn!(
-                                        target: "script_kit::confirm",
-                                        event = "confirm_window.no_parent_found",
-                                        "No visible parent window found for addChildWindow"
-                                    );
-                                }
-                            }
-                        }
-                        if main_ns_window != nil {
-                            // SAFETY: both pointers verified non-nil and distinct.
-                            let _: () = msg_send![main_ns_window, addChildWindow:confirm_ns_window ordered:NS_WINDOW_ABOVE];
-                            tracing::info!(
-                                target: "script_kit::confirm",
-                                event = "confirm_window_attached_to_parent",
-                                parent_window_id = %parent_automation_id_for_nswindow,
-                                parent = format!("{:?}", main_ns_window),
-                                child = format!("{:?}", confirm_ns_window),
-                                "Attached confirm popup as native child window"
-                            );
-                        }
-
-                        // Always order front regardless of parent attachment.
-                        // orderFrontRegardless is needed for the no-parent fallback and
-                        // also ensures the child is visually ordered even if addChildWindow
-                        // doesn't immediately reorder on non-activating panels. Do not make
-                        // this popup key: the main window routes confirm keys while AppKit
-                        // keeps the child popup above the parent.
-                        let _: () = msg_send![confirm_ns_window, orderFrontRegardless];
-                    } else {
-                        tracing::error!(
-                            target: "script_kit::confirm",
-                            event = "configure_confirm_popup_no_window",
-                            "Cannot configure confirm popup: no NSWindow found"
-                        );
-                    }
+    if !host_policy.is_hidden() {
+        let parent_handle = parent_window.handle;
+        handle.update(cx, move |_, window, cx| {
+            window.defer(cx, move |window, cx| {
+                if current_confirm_window_handle() != Some(handle)
+                    || crate::windows::get_runtime_window_handle_for_generation(
+                        &exact_parent_id,
+                        parent_generation,
+                    ) != Some(parent_handle)
+                {
+                    window.remove_window();
+                    return;
                 }
+                if crate::runtime_policy::check(
+                    crate::runtime_policy::ExternalEffect::NativeVisibility,
+                )
+                .is_err()
+                {
+                    window.remove_window();
+                    return;
+                }
+                let child = crate::components::inline_popup_window::inline_popup_ns_window(window);
+                let parent = cx
+                    .update_window(parent_handle, |_, parent, _| {
+                        crate::components::inline_popup_window::inline_popup_ns_window(parent)
+                    })
+                    .ok()
+                    .flatten();
+                let (Some(child), Some(parent)) = (child, parent) else {
+                    window.remove_window();
+                    return;
+                };
+                if child == parent {
+                    window.remove_window();
+                    return;
+                }
+                crate::platform::configure_child_attached_overlay_window_glass(
+                    window,
+                    "CONFIRM",
+                    "Confirm popup",
+                );
+                // SAFETY: pointers come from exact live GPUI handles on the foreground thread.
+                unsafe {
+                    use objc::{msg_send, sel, sel_impl};
+                    platform::configure_confirm_popup_window(child, is_dark_vibrancy);
+                    let _: () = msg_send![parent, addChildWindow: child ordered: NS_WINDOW_ABOVE];
+                    let _: () = msg_send![child, orderFrontRegardless];
+                }
+                cx.defer(move |cx| {
+                    if let Err(error) = publish(cx) {
+                        tracing::error!(%error, "confirm_registration_failed");
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    }
+                });
             });
-        });
+        })?;
+        return Ok(handle);
     }
-
-    let storage = CONFIRM_WINDOW.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = storage.lock() {
-        *guard = Some(handle);
+    if let Err(error) = publish(cx) {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        return Err(error);
     }
-    let parent_storage = CONFIRM_PARENT_WINDOW.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = parent_storage.lock() {
-        *guard = Some(parent_window.handle);
-    }
-    notify_confirm_parent_window(cx);
-
-    // Store result sender and focused button state for key routing from main window
-    let tx_storage = CONFIRM_RESULT_TX.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = tx_storage.lock() {
-        *guard = Some(result_tx);
-    }
-    let btn_storage = CONFIRM_FOCUSED_BUTTON.get_or_init(|| Mutex::new(FocusedButton::Confirm));
-    if let Ok(mut guard) = btn_storage.lock() {
-        *guard = FocusedButton::Confirm;
-    }
-
-    // Register in the automation window registry with parent identity.
-    // Fail-closed: if registration fails, close the popup and propagate the error.
-    if let Err(e) = crate::windows::register_attached_popup(
-        "confirm-popup".to_string(),
-        crate::protocol::AutomationWindowKind::PromptPopup,
-        Some(options.title.to_string()),
-        Some("confirmDialog".to_string()),
-        Some(automation_bounds_from_gpui(bounds)),
-        Some(parent_automation_id.as_str()),
-    ) {
-        tracing::warn!(
-            target: "script_kit::confirm",
-            event = "confirm_popup_registry_failed",
-            error = %e,
-            "Failed to register confirm popup in automation registry — closing popup"
-        );
-        close_confirm_window(cx);
-        return Err(e);
-    }
-
-    tracing::info!(
-        target: "script_kit::confirm",
-        event = "open_confirm_popup_window_ready",
-        "open_confirm_popup_window: handle stored, popup ready"
-    );
-
     Ok(handle)
 }
 
@@ -1155,71 +1035,33 @@ fn resolve_registered_parent_automation_id(
 
 fn resolve_confirm_popup_parent_automation_id(
     parent_window_handle: AnyWindowHandle,
-    parent_window_bounds: Bounds<Pixels>,
+    _parent_window_bounds: Bounds<Pixels>,
     parent_automation_id: Option<&str>,
     title: &str,
 ) -> anyhow::Result<String> {
-    if let Some(id) = parent_automation_id {
-        let resolved = resolve_registered_parent_automation_id(id, title)?;
-        // Refresh the registered runtime handle + live bounds so downstream
-        // automation snapshots (and the AppKit child-window lookup) reflect the
-        // exact parent we are about to attach to.
-        crate::windows::upsert_runtime_window_handle(&resolved, parent_window_handle);
-        crate::windows::set_automation_bounds(
-            &resolved,
-            Some(automation_bounds_from_gpui(parent_window_bounds)),
-        );
-        return Ok(resolved);
+    let parent = match parent_automation_id {
+        Some(id) => crate::windows::automation_window_by_id(
+            &resolve_registered_parent_automation_id(id, title)?,
+        ),
+        None => crate::windows::list_automation_windows()
+            .into_iter()
+            .find(|info| {
+                info.generation.is_some_and(|generation| {
+                    crate::windows::get_runtime_window_handle_for_generation(&info.id, generation)
+                        == Some(parent_window_handle)
+                })
+            }),
     }
-
-    let Some(main_window_handle) = crate::get_main_window_handle() else {
-        tracing::warn!(
-            target: "script_kit::confirm",
-            event = "confirm_popup_open_blocked_missing_parent",
-            title,
-            "Confirm popup open blocked: no parent automation identity"
-        );
-        anyhow::bail!("Cannot open confirm popup: parent automation identity is required");
-    };
-
-    if main_window_handle != parent_window_handle {
-        tracing::warn!(
-            target: "script_kit::confirm",
-            event = "confirm_popup_open_blocked_missing_parent",
-            title,
-            "Confirm popup open blocked: no parent automation identity"
-        );
-        anyhow::bail!("Cannot open confirm popup: parent automation identity is required");
-    }
-
-    let synthesized_parent_id = "main".to_string();
-    crate::windows::upsert_runtime_window_handle(&synthesized_parent_id, parent_window_handle);
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: synthesized_parent_id.clone(),
-        kind: crate::protocol::AutomationWindowKind::Main,
-        title: Some("Script Kit".to_string()),
-        focused: true,
-        visible: true,
-        semantic_surface: Some("scriptList".to_string()),
-        bounds: Some(crate::protocol::AutomationWindowBounds {
-            x: f32::from(parent_window_bounds.origin.x) as f64,
-            y: f32::from(parent_window_bounds.origin.y) as f64,
-            width: f32::from(parent_window_bounds.size.width) as f64,
-            height: f32::from(parent_window_bounds.size.height) as f64,
-        }),
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
-    });
-    tracing::info!(
-        target: "script_kit::confirm",
-        event = "confirm_popup_synthesized_main_parent",
-        parent_window_id = %synthesized_parent_id,
-        "Synthesized main-window automation identity for confirm popup"
+    .ok_or_else(|| anyhow::anyhow!("confirm_parent_identity_missing"))?;
+    let generation = parent
+        .generation
+        .ok_or_else(|| anyhow::anyhow!("confirm_parent_generation_missing"))?;
+    anyhow::ensure!(
+        crate::windows::get_runtime_window_handle_for_generation(&parent.id, generation)
+            == Some(parent_window_handle),
+        "confirm_parent_stale"
     );
-
-    Ok(synthesized_parent_id)
+    Ok(parent.id)
 }
 
 pub(crate) struct ConfirmPopupWindow {
@@ -1236,9 +1078,25 @@ pub(crate) struct ConfirmPopupWindow {
     lifecycle_task: Option<Task<()>>,
     did_request_focus: bool,
     resolved: bool,
+    generation: Option<u64>,
+    completion_error: Option<String>,
+    window_handle: Option<WindowHandle<ConfirmPopupWindow>>,
+    close_subscription: Option<gpui::Subscription>,
+    semantic_revision: u64,
+    presentation_revision: u64,
+    applied_theme_revision: u64,
 }
 
 impl ConfirmPopupWindow {
+    pub(crate) fn revision_facts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.semantic_revision,
+            self.semantic_revision,
+            self.presentation_revision,
+            self.applied_theme_revision,
+        )
+    }
+
     fn new(
         options: ConfirmWindowOptions,
         keep_open_while: Rc<dyn Fn() -> bool>,
@@ -1268,19 +1126,23 @@ impl ConfirmPopupWindow {
             lifecycle_task: None,
             did_request_focus: false,
             resolved: false,
+            generation: None,
+            completion_error: None,
+            window_handle: None,
+            close_subscription: None,
+            semantic_revision: 1,
+            presentation_revision: 1,
+            applied_theme_revision: 0,
         }
     }
 
     fn shift_focus(&mut self, reverse: bool, cx: &mut Context<Self>) {
-        self.focused_button = match (self.focused_button, reverse, self.secondary_text.is_some()) {
-            (FocusedButton::Confirm, false, true) => FocusedButton::Secondary,
-            (FocusedButton::Secondary, false, true) => FocusedButton::Cancel,
-            (FocusedButton::Cancel, false, _) => FocusedButton::Confirm,
-            (FocusedButton::Confirm, true, _) => FocusedButton::Cancel,
-            (FocusedButton::Cancel, true, true) => FocusedButton::Secondary,
-            (FocusedButton::Secondary, true, true) => FocusedButton::Confirm,
-            (_, _, false) => FocusedButton::Confirm,
-        };
+        self.focused_button = next_confirm_focused_button(
+            self.focused_button,
+            reverse,
+            self.secondary_text.is_some(),
+        );
+        self.semantic_revision = self.semantic_revision.saturating_add(1);
         set_confirm_focused_button(self.focused_button);
         cx.notify();
     }
@@ -1329,21 +1191,28 @@ impl ConfirmPopupWindow {
                     "Lifecycle predicate returned false — closing confirm window"
                 );
 
-                let _ = this.update(cx, |this, _cx| {
-                    if !this.resolved {
-                        tracing::info!(
-                            target: "script_kit::confirm",
-                            event = "lifecycle_auto_cancel",
-                            "Auto-cancelling confirm (lifecycle predicate false)"
-                        );
-                        this.resolved = true;
-                        let _ = result_tx.try_send(ParentDialogResult::Dismiss);
-                    }
-                });
-
-                cx.update(|cx| {
-                    close_confirm_window(cx);
-                });
+                let generation = this
+                    .update(cx, |this, cx| {
+                        if this.resolved {
+                            return this.generation;
+                        }
+                        match result_tx.try_send(ParentDialogResult::Dismiss) {
+                            Ok(()) => {
+                                this.resolved = true;
+                                this.generation
+                            }
+                            Err(error) => {
+                                this.completion_error = Some(error.to_string());
+                                cx.notify();
+                                None
+                            }
+                        }
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(generation) = generation {
+                    cx.update(|cx| close_confirm_window_if_generation(generation, cx));
+                }
 
                 break;
             }
@@ -1363,31 +1232,28 @@ impl ConfirmPopupWindow {
         cx: &mut Context<Self>,
     ) {
         if self.resolved {
-            tracing::debug!(
-                target: "script_kit::confirm",
-                event = "resolve_and_close_already_resolved",
-                result = ?result,
-                "resolve_and_close: already resolved, ignoring"
-            );
             return;
         }
-
-        tracing::info!(
-            target: "script_kit::confirm",
-            event = "resolve_and_close",
-            result = ?result,
-            "resolve_and_close: sending result and closing window"
-        );
-
+        if let Err(error) = self.result_tx.try_send(result) {
+            self.semantic_revision = self.semantic_revision.saturating_add(1);
+            self.completion_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
         self.resolved = true;
-        let _ = self.result_tx.try_send(result);
-
-        window.defer(cx, |window, cx| {
-            tracing::info!(
-                target: "script_kit::confirm",
-                event = "resolve_and_close_deferred",
-                "resolve_and_close: deferred removal executing"
-            );
+        self.semantic_revision = self.semantic_revision.saturating_add(1);
+        let expected_generation = self.generation;
+        let expected_handle = window.window_handle();
+        window.defer(cx, move |window, cx| {
+            if !expected_generation.is_some_and(|generation| {
+                crate::windows::get_runtime_window_handle_for_generation(
+                    CONFIRM_POPUP_AUTOMATION_ID,
+                    generation,
+                ) == Some(expected_handle)
+            }) {
+                window.remove_window();
+                return;
+            }
             unregister_confirm_popup_automation_window("resolve_and_close");
             clear_confirm_window_handle();
             notify_confirm_parent_window(cx);
@@ -1395,6 +1261,10 @@ impl ConfirmPopupWindow {
                 if let Ok(mut guard) = storage.lock() {
                     *guard = None;
                 }
+            }
+            if window.is_owned_hidden() {
+                window.remove_window();
+                return;
             }
             crate::platform::dematerialize_then_remove_gpui_window_from_app(
                 window,
@@ -1408,19 +1278,13 @@ impl ConfirmPopupWindow {
 
 impl Drop for ConfirmPopupWindow {
     fn drop(&mut self) {
-        tracing::warn!(
-            target: "script_kit::confirm",
-            event = "confirm_popup_window_DROPPED",
-            resolved = self.resolved,
-            title = %self.title,
-            "ConfirmPopupWindow entity DROPPED — if resolved=false, the window was destroyed externally"
-        );
         if !self.resolved {
-            tracing::error!(
-                target: "script_kit::confirm",
-                event = "confirm_popup_window_DROPPED_UNRESOLVED",
-                "ConfirmPopupWindow dropped WITHOUT resolving — this will send false to the result channel"
-            );
+            let _ = self
+                .result_tx
+                .try_send(ParentDialogResult::ProgrammaticClose);
+        }
+        if let Some(handle) = self.window_handle {
+            retire_confirm_lifetime(handle, self.generation);
         }
     }
 }
@@ -1433,6 +1297,11 @@ impl Focusable for ConfirmPopupWindow {
 
 impl Render for ConfirmPopupWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let revision = crate::theme::service::theme_revision();
+        if self.applied_theme_revision != revision {
+            self.applied_theme_revision = revision;
+            self.presentation_revision = self.presentation_revision.saturating_add(1);
+        }
         let is_focused = self.focus_handle.is_focused(window);
         let is_active = window.is_window_active();
         tracing::info!(
@@ -1448,7 +1317,11 @@ impl Render for ConfirmPopupWindow {
         );
 
         self.ensure_lifecycle_task(cx);
-        self.focused_button = get_confirm_focused_button();
+        let focused = get_confirm_focused_button();
+        if self.focused_button != focused {
+            self.focused_button = focused;
+            self.semantic_revision = self.semantic_revision.saturating_add(1);
+        }
 
         if !self.did_request_focus {
             self.did_request_focus = true;
@@ -1543,7 +1416,8 @@ impl Render for ConfirmPopupWindow {
         let confirm_entity = entity.clone();
         let secondary_entity = entity.clone();
 
-        let title_row = confirm_modal_header(self.title.clone(), accent_color, title_color);
+        let title_row = confirm_modal_header(self.title.clone(), accent_color, title_color)
+            .debug_selector(|| "confirm-modal-header".to_string());
 
         // Footer button order, not macOS-alert order: the primary ↵ action
         // leads and the Esc action trails, matching the native footer strips
@@ -1601,12 +1475,14 @@ impl Render for ConfirmPopupWindow {
             confirm_action_button_gap(),
             action_buttons,
             &theme,
-        );
+        )
+        .debug_selector(|| "confirm-modal-action-row".to_string());
 
         let has_body = !self.body.trim().is_empty();
         let gaps = confirm_modal_stack_gaps(has_body);
         let mut stack = div()
             .id("confirm-modal-stack")
+            .debug_selector(|| "confirm-modal-stack".to_string())
             .w_full()
             .min_h_0()
             .flex()
@@ -1620,6 +1496,7 @@ impl Render for ConfirmPopupWindow {
             stack = stack
                 .child(
                     div()
+                        .debug_selector(|| "confirm-modal-body".to_string())
                         .w_full()
                         .min_h(px(0.))
                         .overflow_hidden()
@@ -1636,6 +1513,7 @@ impl Render for ConfirmPopupWindow {
         stack = stack.child(action_row);
 
         div()
+            .debug_selector(|| "confirm-popup-root".to_string())
             .size_full()
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
@@ -1851,52 +1729,61 @@ mod tests {
     }
 
     #[test]
-    fn confirm_nswindow_search_matches_position_and_size() {
+    fn confirm_popup_native_attachment_uses_exact_gpui_handles() {
         let source = std::fs::read_to_string("src/confirm/window.rs")
             .expect("Failed to read src/confirm/window.rs");
-        let search_section = source
-            .split("configure_confirm_nswindow_search")
+        let open = source
+            .split("pub(crate) fn open_confirm_popup_window(")
             .nth(1)
-            .and_then(|section| section.split("if confirm_ns_window == nil").next())
-            .expect("expected confirm NSWindow search section");
+            .and_then(|body| {
+                body.split("\nfn resolve_registered_parent_automation_id(")
+                    .next()
+            })
+            .expect("confirm popup open implementation must exist");
 
         assert!(
-            search_section.contains("expected_x")
-                && search_section.contains("expected_y")
-                && search_section.contains("frame.origin.x")
-                && search_section.contains("frame.origin.y")
-                && search_section.contains("frame.size.width")
-                && search_section.contains("frame.size.height"),
-            "confirm popup NSWindow matching should include position and size"
+            open.contains("inline_popup_ns_window(window)")
+                && open.contains(".update_window(parent_handle,")
+                && open.contains("inline_popup_ns_window(parent)")
+                && open.contains("addChildWindow: child ordered: NS_WINDOW_ABOVE"),
+            "confirm popup must attach the exact live GPUI child and parent, never infer identity from frame geometry"
+        );
+        assert!(
+            open.contains("let (Some(child), Some(parent)) = (child, parent) else {")
+                && open.contains("if child == parent {"),
+            "native attachment must reject missing handles and self-parenting"
         );
     }
 
     #[test]
-    fn confirm_popup_parent_search_prefers_automation_id_before_key_window() {
+    fn confirm_popup_attachment_revalidates_parent_generation() {
         let source = std::fs::read_to_string("src/confirm/window.rs")
             .expect("Failed to read src/confirm/window.rs");
-
-        let attach_section = source
-            .split("Deterministic match first")
+        let open = source
+            .split("pub(crate) fn open_confirm_popup_window(")
             .nth(1)
-            .expect("expected AppKit deterministic-match attach section");
-
+            .and_then(|body| {
+                body.split("\nfn resolve_registered_parent_automation_id(")
+                    .next()
+            })
+            .expect("confirm popup open implementation must exist");
+        let revalidation = open
+            .split("window.defer(cx, move |window, cx| {")
+            .nth(1)
+            .and_then(|body| body.split("let child =").next())
+            .expect("deferred confirm attachment must validate its owner before native lookup");
+        let compact: String = revalidation.split_whitespace().collect();
         assert!(
-            attach_section.contains("parent_automation_id_for_nswindow")
-                && attach_section.contains("confirm_window_parent_matched_by_automation_id"),
-            "confirm popup parent NSWindow search should prefer the resolved automation id"
+            compact.contains("current_confirm_window_handle()!=Some(handle)")
+                && compact.contains(
+                    "get_runtime_window_handle_for_generation(&exact_parent_id,parent_generation,)!=Some(parent_handle)"
+                )
+                && compact.contains("window.remove_window();return;"),
+            "stale popup or parent generations must fail closed before native child attachment"
         );
-
-        let automation_match_idx = attach_section
-            .find("confirm_window_parent_matched_by_automation_id")
-            .expect("expected deterministic parent match event");
-        let key_window_idx = attach_section
-            .find("msg_send![w, isKeyWindow]")
-            .expect("legacy fallback may still call msg_send![w, isKeyWindow]");
-
         assert!(
-            automation_match_idx < key_window_idx,
-            "automation-id parent matching must happen before key-window fallback"
+            !open.contains("isKeyWindow") && !open.contains("orderedWindows"),
+            "confirm attachment must not fall back to an unrelated focused or ordered window"
         );
     }
 
@@ -1913,6 +1800,7 @@ mod tests {
             semantic_surface: Some("notes".to_string()),
             bounds: None,
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: Some(std::process::id()),
             generation: None,
@@ -1932,21 +1820,35 @@ mod tests {
     }
 
     #[test]
-    fn confirm_popup_can_synthesize_main_parent_identity() {
+    fn confirm_popup_parent_identity_requires_live_registered_generation() {
         let source = std::fs::read_to_string("src/confirm/window.rs")
             .expect("Failed to read src/confirm/window.rs");
+        let resolver = source
+            .split("fn resolve_confirm_popup_parent_automation_id(")
+            .nth(1)
+            .and_then(|body| body.split("\npub(crate) struct ConfirmPopupWindow").next())
+            .expect("confirm popup parent identity resolver must exist");
 
         assert!(
-            source.contains("fn resolve_confirm_popup_parent_automation_id("),
-            "confirm popup should resolve the parent automation identity through a dedicated helper"
+            resolver.contains("resolve_registered_parent_automation_id(id, title)?")
+                && resolver
+                    .contains("get_runtime_window_handle_for_generation(&parent.id, generation)")
+                && resolver.contains("== Some(parent_window_handle)"),
+            "confirm popup parent identity must resolve to the exact registered GPUI generation"
         );
+        for failure in [
+            "confirm_parent_identity_missing",
+            "confirm_parent_generation_missing",
+            "confirm_parent_stale",
+        ] {
+            assert!(
+                resolver.contains(failure),
+                "resolver must fail closed for {failure}"
+            );
+        }
         assert!(
-            source.contains("event = \"confirm_popup_synthesized_main_parent\""),
-            "confirm popup should log when it synthesizes the main-window automation identity"
-        );
-        assert!(
-            source.contains("crate::windows::upsert_runtime_window_handle(&synthesized_parent_id, parent_window_handle);"),
-            "confirm popup should register the synthesized main-window runtime handle"
+            !resolver.contains("upsert_") && !resolver.contains("register_runtime_window_instance"),
+            "confirm popup resolution must not synthesize or overwrite a parent identity"
         );
     }
 }

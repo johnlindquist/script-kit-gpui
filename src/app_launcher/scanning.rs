@@ -5,23 +5,60 @@
 /// Scan for installed macOS applications
 ///
 /// This function uses a two-phase loading strategy:
-/// 1. First, instantly load from SQLite cache (if available) WITHOUT icon decoding
-/// 2. Then, scan directories in background to find new/changed apps
+/// 1. Load the last SQLite snapshot, including decoded icons, if available.
+/// 2. Refresh it in the background; failures retain the snapshot and are reported.
 ///
 /// # Returns
-/// A reference to the cached vector of AppInfo structs.
+/// An owned cached snapshot, or the initialization/most recent scan error.
 ///
 /// # Performance
-/// - First call: Returns SQLite-cached apps in <50ms (icons decoded in background)
+/// - First call: Reads SQLite and, without a cached snapshot, scans directories.
 /// - Subsequent calls: Returns immediately from in-memory cache
 ///
 /// # Tracing
 /// Uses spans to profile: db_lock, query, deserialization, icon_decode
-pub fn scan_applications() -> Vec<AppInfo> {
+pub fn scan_applications() -> Result<Vec<AppInfo>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let _span = info_span!("scan_applications").entered();
-
-    // Return a clone of the cached apps
-    APP_CACHE.lock().map(|g| g.clone()).unwrap_or_default()
+    let result = (|| {
+        if let Some(apps) = app_cache_snapshot(&APP_CACHE)? {
+            return Ok(apps);
+        }
+        let _scan = APP_SCAN_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Application scan lock poisoned"))?;
+        if let Some(apps) = app_cache_snapshot(&APP_CACHE)? {
+            return Ok(apps);
+        }
+        set_loading_state(AppLoadingState::LoadingFromCache);
+        let cached_apps = match load_apps_from_db() {
+            Ok(apps) => apps,
+            Err(error) => return complete_app_scan(&APP_CACHE, Err(error)),
+        };
+        if cached_apps.is_empty() {
+            return refresh_app_cache();
+        }
+        let apps = complete_app_scan(&APP_CACHE, Ok(cached_apps))?;
+        set_loading_state(AppLoadingState::ScanningDirectories);
+        if let Err(error) = std::thread::Builder::new()
+            .name("application-cache-refresh".into())
+            .spawn(|| {
+                if let Err(error) = scan_applications_fresh() {
+                    warn!(%error, "Application refresh failed; retaining last successful cache");
+                }
+            })
+        {
+            return complete_app_scan(
+                &APP_CACHE,
+                Err(error).context("Starting application cache refresh"),
+            );
+        }
+        Ok(apps)
+    })();
+    if result.is_err() {
+        set_loading_state(AppLoadingState::Failed);
+    }
+    result
 }
 
 /// Force a fresh scan of applications and replace the in-memory cache.
@@ -29,21 +66,30 @@ pub fn scan_applications() -> Vec<AppInfo> {
 /// This is how newly installed/removed apps show up without an app restart:
 /// the app watcher calls this on /Applications changes. Blocking (disk +
 /// sqlite) — run on a background thread/executor, never the UI thread.
-pub fn scan_applications_fresh() -> Vec<AppInfo> {
+pub fn scan_applications_fresh() -> Result<Vec<AppInfo>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
+    let _scan = APP_SCAN_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Application scan lock poisoned"))?;
+    refresh_app_cache()
+}
+
+fn refresh_app_cache() -> Result<Vec<AppInfo>> {
+    set_loading_state(AppLoadingState::ScanningDirectories);
     let start = Instant::now();
-    let apps = scan_all_directories_with_db_update();
-    if let Ok(mut guard) = APP_CACHE.lock() {
-        *guard = apps.clone();
+    let result = complete_app_scan(&APP_CACHE, scan_all_directories_with_db_update());
+    match &result {
+        Ok(apps) => {
+            set_loading_state(AppLoadingState::Ready);
+            info!(
+                app_count = apps.len(),
+                duration_ms = start.elapsed().as_millis(),
+                "Fresh scan of applications (cache updated)"
+            );
+        }
+        Err(_) => set_loading_state(AppLoadingState::Failed),
     }
-    let duration_ms = start.elapsed().as_millis();
-
-    info!(
-        app_count = apps.len(),
-        duration_ms = duration_ms,
-        "Fresh scan of applications (cache updated)"
-    );
-
-    apps
+    result
 }
 
 /// Reset icon extraction stats before a new scan
@@ -73,115 +119,94 @@ fn log_icon_stats_summary() {
             icons_from_icon_services = from_icon_services,
             icons_skipped_icon_services = skipped_icon_services,
             total_extract_ms = total_ms,
-            avg_extract_ms = if extracted > 0 {
-                total_ms / extracted
-            } else {
-                0
-            },
+            avg_extract_ms = total_ms.checked_div(extracted).unwrap_or(0),
             "Icon extraction summary"
         );
     }
 }
 
 /// Scan all configured directories for applications and update SQLite
-fn scan_all_directories_with_db_update() -> Vec<AppInfo> {
+fn scan_all_directories_with_db_update() -> Result<Vec<AppInfo>> {
     let _span = info_span!("scan_all_directories_with_db_update").entered();
     let start = Instant::now();
-
-    // Reset stats for this scan
     reset_icon_stats();
-
-    let mut apps = Vec::new();
-    let mut dirs_scanned = 0;
-
-    for dir in APP_DIRECTORIES {
-        let expanded = shellexpand::tilde(dir);
-        let path = Path::new(expanded.as_ref());
-
-        if path.exists() {
-            let dir_start = Instant::now();
-            match scan_directory_with_db_update(path) {
-                Ok(found) => {
-                    let count = found.len();
-                    trace!(
-                        directory = %path.display(),
-                        count,
-                        duration_ms = dir_start.elapsed().as_millis(),
-                        "Scanned directory"
-                    );
-                    apps.extend(found);
-                    dirs_scanned += 1;
-                }
-                Err(e) => {
-                    warn!(
-                        directory = %path.display(),
-                        error = %e,
-                        "Failed to scan directory"
-                    );
-                }
-            }
-        } else {
-            trace!(directory = %path.display(), "Directory does not exist, skipping");
-        }
-    }
-
-    // Sort by name for consistent ordering
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
-    // Remove duplicates (same name from different directories - prefer first)
-    apps.dedup_by(|a, b| a.name.to_lowercase() == b.name.to_lowercase());
-
-    // Log icon extraction summary (batched instead of per-app)
+    let roots: Vec<PathBuf> = APP_DIRECTORIES
+        .iter()
+        .map(|dir| PathBuf::from(shellexpand::tilde(dir).as_ref()))
+        .collect();
+    // Finish enumeration and parsing before touching SQLite: a failed root must
+    // not turn the successful prefix into either a published or persisted scan.
+    let app_paths = collect_app_paths_from_roots(&roots)?;
+    let mut scanned: Vec<ScannedApp> = app_paths
+        .par_iter()
+        .map(|path| -> Result<Option<ScannedApp>> {
+            let Some((app, icon_bytes)) = parse_app_bundle_with_icon(path)? else {
+                return Ok(None);
+            };
+            let mtime = get_mtime(path)?;
+            Ok(Some(ScannedApp {
+                app,
+                icon_bytes,
+                mtime,
+            }))
+        })
+        .filter_map(Result::transpose)
+        .collect::<Result<Vec<_>>>()?;
+    scanned.sort_by_cached_key(|entry| entry.app.name.to_lowercase());
+    scanned.dedup_by(|a, b| a.app.name.to_lowercase() == b.app.name.to_lowercase());
+    let db = get_apps_db()?;
+    let mut conn = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Application database lock poisoned"))?;
+    save_apps_to_db(&mut conn, &scanned)?;
     log_icon_stats_summary();
-
     debug!(
-        total_apps = apps.len(),
-        dirs_scanned,
+        total_apps = scanned.len(),
         total_duration_ms = start.elapsed().as_millis(),
         "Directory scan complete"
     );
-
-    apps
+    Ok(scanned.into_iter().map(|entry| entry.app).collect())
 }
 
-/// Scan a single directory for .app bundles and update SQLite
-///
-/// Uses parallel iteration (rayon) for icon extraction which is the bottleneck.
-fn scan_directory_with_db_update(dir: &Path) -> Result<Vec<AppInfo>> {
-    let app_paths = collect_app_paths(dir)?;
+struct ScannedApp {
+    app: AppInfo,
+    icon_bytes: Option<Vec<u8>>,
+    mtime: i64,
+}
 
-    // Process apps in parallel using rayon (icon extraction is the bottleneck)
-    let apps: Vec<AppInfo> = app_paths
-        .par_iter()
-        .filter_map(|path| {
-            if let Some((app_info, icon_bytes)) = parse_app_bundle_with_icon(path) {
-                // Save to SQLite (thread-safe via mutex in get_apps_db)
-                let mtime = get_mtime(path).unwrap_or(0);
-                save_app_to_db(&app_info, icon_bytes.as_deref(), mtime);
-                Some(app_info)
-            } else {
-                None
+fn collect_app_paths_from_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for root in roots {
+        // These installation locations are optional across macOS versions and
+        // user setups. Only genuine absence is optional, never a failed read.
+        match fs::read_dir(root) {
+            Ok(entries) => collect_app_entries(root, entries, &mut paths)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to read application root: {}", root.display())
+                })
             }
-        })
-        .collect();
-
-    Ok(apps)
+        }
+    }
+    Ok(paths)
 }
 
 /// Parse a .app bundle to extract application information and icon bytes
-fn parse_app_bundle_with_icon(path: &Path) -> Option<(AppInfo, Option<Vec<u8>>)> {
-    // Extract app name from bundle name (strip .app extension)
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())?;
+fn parse_app_bundle_with_icon(path: &Path) -> Result<Option<(AppInfo, Option<Vec<u8>>)>> {
+    // A bundle whose filename cannot be represented as an application name is
+    // an invalid individual entry, not a failed directory scan.
+    let Some(name) = path.file_stem().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let name = name.to_owned();
 
     // Try to extract bundle identifier from Info.plist
-    let bundle_id = extract_bundle_id(path);
+    let bundle_id = extract_bundle_id(path)?;
 
     // Extract icon (macOS only)
     #[cfg(target_os = "macos")]
-    let icon_bytes = get_or_extract_icon(path);
+    let icon_bytes = get_or_extract_icon(path)?;
     #[cfg(not(target_os = "macos"))]
     let icon_bytes: Option<Vec<u8>> = None;
 
@@ -190,7 +215,7 @@ fn parse_app_bundle_with_icon(path: &Path) -> Option<(AppInfo, Option<Vec<u8>>)>
         crate::list_item::decode_png_to_render_image_with_bgra_conversion(bytes).ok()
     });
 
-    Some((
+    Ok(Some((
         AppInfo {
             name,
             path: path.to_path_buf(),
@@ -198,150 +223,47 @@ fn parse_app_bundle_with_icon(path: &Path) -> Option<(AppInfo, Option<Vec<u8>>)>
             icon,
         },
         icon_bytes,
-    ))
-}
-
-/// Scan all configured directories for applications (legacy, no DB update)
-#[allow(dead_code)]
-fn scan_all_directories() -> Vec<AppInfo> {
-    let mut apps = Vec::new();
-
-    for dir in APP_DIRECTORIES {
-        let expanded = shellexpand::tilde(dir);
-        let path = Path::new(expanded.as_ref());
-
-        if path.exists() {
-            match scan_directory(path) {
-                Ok(found) => {
-                    debug!(
-                        directory = %path.display(),
-                        count = found.len(),
-                        "Scanned directory"
-                    );
-                    apps.extend(found);
-                }
-                Err(e) => {
-                    warn!(
-                        directory = %path.display(),
-                        error = %e,
-                        "Failed to scan directory"
-                    );
-                }
-            }
-        } else {
-            debug!(directory = %path.display(), "Directory does not exist, skipping");
-        }
-    }
-
-    // Sort by name for consistent ordering
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
-    // Remove duplicates (same name from different directories - prefer first)
-    apps.dedup_by(|a, b| a.name.to_lowercase() == b.name.to_lowercase());
-
-    apps
-}
-
-/// Scan a single directory for .app bundles (legacy, no DB update)
-fn scan_directory(dir: &Path) -> Result<Vec<AppInfo>> {
-    let apps = collect_app_paths(dir)?
-        .into_iter()
-        .filter_map(|path| parse_app_bundle(&path))
-        .collect();
-
-    Ok(apps)
-}
-
-fn collect_app_paths(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut app_paths = Vec::new();
-    collect_app_paths_recursive(dir, &mut app_paths)
-        .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
-    Ok(app_paths)
+    )))
 }
 
 fn collect_app_paths_recursive(dir: &Path, app_paths: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = fs::read_dir(dir)?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        if path.extension().map(|e| e == "app").unwrap_or(false) {
-            app_paths.push(path);
-            continue;
-        }
-
-        if entry
-            .file_type()
-            .map(|file_type| file_type.is_dir())
-            .unwrap_or(false)
-        {
-            if let Err(error) = collect_app_paths_recursive(&path, app_paths) {
-                trace!(
-                    directory = %path.display(),
-                    error = %error,
-                    "Skipping unreadable nested app scan directory"
-                );
-            }
-        }
-    }
-
-    Ok(())
+    let entries = fs::read_dir(dir)
+        .with_context(|| format!("Failed to read application directory: {}", dir.display()))?;
+    collect_app_entries(dir, entries, app_paths)
 }
 
-/// Parse a .app bundle to extract application information (legacy)
-fn parse_app_bundle(path: &Path) -> Option<AppInfo> {
-    // Extract app name from bundle name (strip .app extension)
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())?;
-
-    // Try to extract bundle identifier from Info.plist
-    let bundle_id = extract_bundle_id(path);
-
-    // Extract and pre-decode icon using disk cache (macOS only)
-    // Uses get_or_extract_icon() which checks disk cache first, only extracts if stale/missing
-    // Pre-decoding here is CRITICAL for performance - avoids PNG decode on every render
-    // Uses decode_png_to_render_image_with_bgra_conversion for Metal compatibility
-    #[cfg(target_os = "macos")]
-    let icon = get_or_extract_icon(path).and_then(|png_bytes| {
-        crate::list_item::decode_png_to_render_image_with_bgra_conversion(&png_bytes).ok()
-    });
-    #[cfg(not(target_os = "macos"))]
-    let icon = None;
-
-    Some(AppInfo {
-        name,
-        path: path.to_path_buf(),
-        bundle_id,
-        icon,
-    })
+fn collect_app_entries(
+    dir: &Path,
+    entries: fs::ReadDir,
+    app_paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "Failed to enumerate application directory: {}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("Failed to read application entry: {}", path.display()))?;
+        if path.extension().is_some_and(|extension| extension == "app") {
+            if file_type.is_dir() || file_type.is_symlink() {
+                app_paths.push(path);
+            }
+        } else if file_type.is_dir() {
+            collect_app_paths_recursive(&path, app_paths)?;
+        }
+    }
+    Ok(())
 }
 
 /// Extract CFBundleIdentifier from Info.plist
 ///
 /// Uses /usr/libexec/PlistBuddy for reliable plist parsing.
-fn extract_bundle_id(app_path: &Path) -> Option<String> {
-    let plist_path = app_path.join("Contents/Info.plist");
-
-    if !plist_path.exists() {
-        return None;
-    }
-
-    // Use PlistBuddy to extract CFBundleIdentifier (reliable and fast)
-    let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :CFBundleIdentifier", plist_path.to_str()?])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let bundle_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !bundle_id.is_empty() {
-            return Some(bundle_id);
-        }
-    }
-
-    None
+fn extract_bundle_id(app_path: &Path) -> Result<Option<String>> {
+    plist_value(&app_path.join("Contents/Info.plist"), ":CFBundleIdentifier")
 }
 
 fn icon_extraction_disabled() -> bool {
@@ -356,18 +278,54 @@ fn icon_services_fallback_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn plist_value(plist_path: &Path, key_path: &str) -> Option<String> {
-    let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", &format!("Print {key_path}"), plist_path.to_str()?])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
+fn plist_value(plist_path: &Path, key_path: &str) -> Result<Option<String>> {
+    match fs::metadata(plist_path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None), // Invalid individual bundle metadata is optional.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Reading application plist: {}", plist_path.display()))
+        }
     }
+    let output = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", &format!("Print {key_path}")])
+        .arg(plist_path)
+        .output();
+    decode_plist_output(output, key_path)
+        .with_context(|| format!("Reading {key_path} from {}", plist_path.display()))
+}
 
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
+fn decode_plist_output(
+    output: std::io::Result<std::process::Output>,
+    key_path: &str,
+) -> Result<Option<String>> {
+    let output = output.context("Running PlistBuddy")?;
+    let stdout = String::from_utf8(output.stdout).context("PlistBuddy returned invalid UTF-8")?;
+    let stderr =
+        String::from_utf8(output.stderr).context("PlistBuddy returned invalid diagnostics")?;
+    if !output.status.success() {
+        // PlistBuddy's missing-key diagnostic is optional metadata. Every other
+        // failed command, including a file read failure, remains a source error.
+        let missing = format!("Print: Entry, \"{key_path}\", Does Not Exist");
+        let mut diagnostics = stdout
+            .lines()
+            .chain(stderr.lines())
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .peekable();
+        if diagnostics.peek().is_some() && diagnostics.all(|line| line == missing) {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "PlistBuddy failed ({}): {} {}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+    let value = stdout.trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
 }
 
 fn icon_file_candidates(icon_name: &str) -> [String; 2] {
@@ -381,35 +339,52 @@ fn icon_file_candidates(icon_name: &str) -> [String; 2] {
     }
 }
 
-fn resolve_bundle_icon_resource_path(app_path: &Path) -> Option<PathBuf> {
+fn resolve_bundle_icon_resource_path(app_path: &Path) -> Result<Option<PathBuf>> {
     let resources_dir = app_path.join("Contents/Resources");
-    if !resources_dir.exists() {
-        return None;
+    match fs::metadata(&resources_dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("Reading application resources: {}", resources_dir.display())
+            })
+        }
     }
-
     let plist_path = app_path.join("Contents/Info.plist");
-    let icon_names = [
+    for key_path in [
         ":CFBundleIconFile",
         ":CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0",
         ":CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName",
-    ]
-    .into_iter()
-    .filter_map(|key_path| plist_value(&plist_path, key_path));
-
-    for icon_name in icon_names {
+    ] {
+        let Some(icon_name) = plist_value(&plist_path, key_path)? else {
+            continue;
+        };
         for candidate in icon_file_candidates(&icon_name) {
             let icon_path = resources_dir.join(candidate);
-            if icon_path.exists() {
-                return Some(icon_path);
+            match fs::metadata(&icon_path) {
+                Ok(metadata) if metadata.is_file() => return Ok(Some(icon_path)),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Reading application icon resource: {}", icon_path.display())
+                    })
+                }
             }
         }
     }
-
-    fs::read_dir(&resources_dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.extension().map(|ext| ext == "icns").unwrap_or(false))
+    for entry in fs::read_dir(&resources_dir)
+        .with_context(|| format!("Reading application resources: {}", resources_dir.display()))?
+    {
+        let path = entry.context("Reading application resource entry")?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "icns")
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(target_os = "macos")]
@@ -466,25 +441,28 @@ fn image_to_png_bytes(image: id) -> Option<Vec<u8>> {
 /// This path avoids NSWorkspace/iconForFile so it does not populate Apple's
 /// global IconServices cache at `/Library/Caches/com.apple.iconservices.store`.
 #[cfg(target_os = "macos")]
-fn extract_app_icon_from_bundle_resource(app_path: &Path) -> Option<Vec<u8>> {
-    let icon_path = resolve_bundle_icon_resource_path(app_path)?;
-    let path_str = icon_path.to_str()?;
-
+fn extract_app_icon_from_bundle_resource(app_path: &Path) -> Result<Option<Vec<u8>>> {
+    let Some(icon_path) = resolve_bundle_icon_resource_path(app_path)? else {
+        return Ok(None);
+    };
+    let bytes = fs::read(&icon_path)
+        .with_context(|| format!("Reading application icon: {}", icon_path.display()))?;
     unsafe {
-        let ns_path = CocoaNSString::alloc(nil).init_str(path_str);
-        if ns_path == nil {
-            return None;
-        }
-
+        let data: id = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>() length: bytes.len()];
+        anyhow::ensure!(data != nil, "Allocating application icon data failed");
         let image: id = msg_send![class!(NSImage), alloc];
-        if image == nil {
-            return None;
-        }
-
-        let image: id = msg_send![image, initWithContentsOfFile: ns_path];
-        let png_bytes = image_to_png_bytes(image)?;
+        anyhow::ensure!(image != nil, "Allocating application icon image failed");
+        let image: id = msg_send![image, initWithData: data];
+        let png_bytes = image_to_png_bytes(image);
+        let _: () = msg_send![image, release];
+        let png_bytes = png_bytes.with_context(|| {
+            format!(
+                "Decoding application icon resource: {}",
+                icon_path.display()
+            )
+        })?;
         ICONS_FROM_BUNDLE_RESOURCE.fetch_add(1, Ordering::Relaxed);
-        Some(png_bytes)
+        Ok(Some(png_bytes))
     }
 }
 
@@ -494,43 +472,47 @@ fn extract_app_icon_from_bundle_resource(app_path: &Path) -> Option<Vec<u8>> {
 /// The icon is converted to PNG format at 32x32 pixels for list display.
 /// Returns raw PNG bytes - caller should decode once and cache the RenderImage.
 #[cfg(target_os = "macos")]
-fn extract_app_icon_via_icon_services(app_path: &Path) -> Option<Vec<u8>> {
-    let path_str = app_path.to_str()?;
+fn extract_app_icon_via_icon_services(app_path: &Path) -> Result<Option<Vec<u8>>> {
+    let path_str = app_path
+        .to_str()
+        .context("IconServices application path is not UTF-8")?;
 
     unsafe {
         // Get NSWorkspace shared instance
         let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
         if workspace == nil {
-            return None;
+            anyhow::bail!("IconServices workspace unavailable");
         }
 
         // Create NSString for path
         let ns_path = CocoaNSString::alloc(nil).init_str(path_str);
         if ns_path == nil {
-            return None;
+            anyhow::bail!("Allocating IconServices application path failed");
         }
 
         // Get icon for file
         let icon: id = msg_send![workspace, iconForFile: ns_path];
-        let png_bytes = image_to_png_bytes(icon)?;
+        let _: () = msg_send![ns_path, release];
+        let png_bytes =
+            image_to_png_bytes(icon).context("Decoding IconServices application icon failed")?;
         ICONS_FROM_ICON_SERVICES.fetch_add(1, Ordering::Relaxed);
-        Some(png_bytes)
+        Ok(Some(png_bytes))
     }
 }
 
 /// Extract application icon without using IconServices by default.
 #[cfg(target_os = "macos")]
-fn extract_app_icon(app_path: &Path) -> Option<Vec<u8>> {
+fn extract_app_icon(app_path: &Path) -> Result<Option<Vec<u8>>> {
     if icon_extraction_disabled() {
         trace!(
             app = %app_path.display(),
             "Skipping app icon extraction because SCRIPT_KIT_DISABLE_APP_ICON_EXTRACTION is set"
         );
-        return None;
+        return Ok(None);
     }
 
-    if let Some(png_bytes) = extract_app_icon_from_bundle_resource(app_path) {
-        return Some(png_bytes);
+    if let Some(png_bytes) = extract_app_icon_from_bundle_resource(app_path)? {
+        return Ok(Some(png_bytes));
     }
 
     if icon_services_fallback_enabled() {
@@ -542,5 +524,34 @@ fn extract_app_icon(app_path: &Path) -> Option<Vec<u8>> {
         app = %app_path.display(),
         "Skipping IconServices app icon fallback; set SCRIPT_KIT_ENABLE_ICON_SERVICES_FALLBACK=1 to opt in"
     );
-    None
+    Ok(None)
+}
+
+/// Read optional icons only for the caller's observed application path set.
+/// This never scans or replaces the application catalogue.
+pub fn read_app_icons(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, DecodedIcon)>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
+    #[cfg(target_os = "macos")]
+    {
+        paths
+            .into_par_iter()
+            .map(|path| {
+                let Some(bytes) = get_or_extract_icon(&path)? else {
+                    return Ok(None);
+                };
+                let icon =
+                    crate::list_item::decode_png_to_render_image_with_bgra_conversion(&bytes)
+                        .with_context(|| {
+                            format!("Decoding application icon: {}", path.display())
+                        })?;
+                Ok(Some((path, icon)))
+            })
+            .filter_map(|result: Result<Option<(PathBuf, DecodedIcon)>>| result.transpose())
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = paths;
+        anyhow::bail!("Application icon discovery is unavailable on this platform")
+    }
 }

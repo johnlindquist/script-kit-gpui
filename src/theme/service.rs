@@ -24,10 +24,10 @@
 //! - Uses the WindowRegistry to notify all windows
 //! - Polls for changes every 200ms (same as previous per-window watchers)
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::App;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::types::AppearanceMode;
 use crate::watcher::ThemeWatcher;
@@ -42,153 +42,135 @@ const MEDIUM_POLL_IDLE_CUTOFF: u64 = 10;
 /// Flag to track if the theme service is running
 static THEME_SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Global theme revision counter.
-/// Incremented each time theme.json changes.
-/// Views use this to invalidate cached theme-derived values (like box shadows).
-static THEME_REVISION: AtomicU64 = AtomicU64::new(1);
-
-/// Get the current theme revision.
-///
-/// Views should compare this against a stored value to detect theme changes
-/// and recompute cached theme-derived values (like box shadows).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let rev = crate::theme::service::theme_revision();
-/// if self.theme_rev_seen != rev {
-///     self.theme_rev_seen = rev;
-///     self.cached_box_shadows = Self::compute_box_shadows();
-/// }
-/// ```
+/// Reads the revision from the same immutable snapshot as the theme.
 pub fn theme_revision() -> u64 {
-    THEME_REVISION.load(Ordering::Relaxed)
+    super::get_theme_snapshot().revision
 }
 
-/// Increment the theme revision.
-/// Called internally when theme.json changes are detected.
-fn bump_theme_revision() {
-    let old = THEME_REVISION.fetch_add(1, Ordering::SeqCst);
-    debug!(
-        old_revision = old,
-        new_revision = old + 1,
-        "Theme revision bumped"
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemePublicationSource {
+    Startup,
+    FileReload,
+    Appearance,
+    LivePreview,
+    Revert,
+    ChooserPreview { sync_native: bool },
+    Persisted,
 }
 
-fn reload_theme_cache_and_bump_revision() -> super::types::Theme {
-    let theme = crate::theme::reload_theme_cache();
-    bump_theme_revision();
-    theme
+impl ThemePublicationSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::FileReload => "file_reload",
+            Self::Appearance => "appearance",
+            Self::LivePreview => "live_preview",
+            Self::Revert => "revert",
+            Self::ChooserPreview { .. } => "chooser_preview",
+            Self::Persisted => "persisted",
+        }
+    }
 }
 
-/// Reload the Script Kit theme cache, re-sync gpui-component theme state, and bump revision.
-///
-/// Call this while already inside an app/window update so cache + revision visibility stays atomic.
-pub(crate) fn reload_theme_cache_sync_and_bump_revision(cx: &mut App) -> super::types::Theme {
-    let theme = reload_theme_cache_and_bump_revision();
-    super::gpui_integration::sync_gpui_component_theme_for_theme_with_source(
-        cx,
-        &theme,
-        "theme_service_reload",
-    );
-    debug!(
-        theme_revision = theme_revision(),
-        appearance = ?theme.appearance,
-        vibrancy_enabled = theme.get_vibrancy().enabled,
-        vibrancy_material = %theme.get_vibrancy().material,
-        "Applied atomic theme cache + runtime theme sync + revision update"
-    );
-    theme
+#[derive(Debug, thiserror::Error)]
+pub enum ThemePublishError {
+    #[error("stale_theme_revision: expected {expected}, actual {actual}")]
+    StaleRevision { expected: u64, actual: u64 },
+    #[error("theme_revision_exhausted")]
+    RevisionExhausted,
+    #[error("no_theme_preview")]
+    NoPreview,
+    #[error(transparent)]
+    InvalidEdit(#[from] super::live_edit::ThemeEditError),
+    #[error("theme_storage_failed: {0}")]
+    Storage(#[from] anyhow::Error),
 }
 
-/// Re-run the theme cache reload pipeline so live dev style tool theme color
-/// overrides (layered inside `reload_theme_cache`) reach every window.
-///
-/// Mirrors the file-watcher hot-reload path exactly: atomic cache reload +
-/// gpui-component sync + revision bump, then notify all registered windows.
-#[allow(dead_code)] // Called from dev style tool render path (binary target).
-pub(crate) fn reapply_runtime_theme_overrides(cx: &mut App) {
-    let _theme = reload_theme_cache_sync_and_bump_revision(cx);
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemePublicationReceipt {
+    pub previous_revision: u64,
+    pub revision: u64,
+    pub source: ThemePublicationSource,
+    /// Delivery is performed before returning; rendered frames are subsequent
+    /// evidence and cannot roll back an already published snapshot.
+    pub invalidation_requested: bool,
+    pub native_refresh_requested: bool,
+}
+
+pub fn publish_runtime_theme(
+    cx: &mut App,
+    expected_revision: u64,
+    prepared: super::live_edit::PreparedTheme,
+    source: ThemePublicationSource,
+) -> Result<ThemePublicationReceipt, ThemePublishError> {
+    let snapshot = super::types::commit_prepared_theme(expected_revision, prepared, |component| {
+        component.apply(cx)
+    })?;
     windows::notify_all_windows(cx);
+    let native_refresh_requested = !crate::runtime_policy::is_owned_evaluation()
+        && !matches!(
+            source,
+            ThemePublicationSource::ChooserPreview { sync_native: false }
+                | ThemePublicationSource::LivePreview
+        );
+    if native_refresh_requested {
+        super::gpui_integration::sync_native_window_theme_for_theme(
+            &snapshot.theme,
+            source.label(),
+        );
+    }
+    Ok(ThemePublicationReceipt {
+        previous_revision: expected_revision,
+        revision: snapshot.revision,
+        source,
+        invalidation_requested: true,
+        native_refresh_requested,
+    })
 }
 
-fn log_theme_validation_diagnostics(theme_json: &serde_json::Value) -> (usize, usize) {
-    let mut diagnostics = super::validation::ThemeDiagnostics::new();
-    diagnostics.merge(super::validation::validate_theme_json(theme_json));
-    diagnostics.info("/theme", "Theme validation completed");
-
-    let warning_count = diagnostics.warning_count();
-    let error_count = diagnostics.error_count();
-
-    if diagnostics.has_warnings() || diagnostics.has_errors() {
-        debug!(
-            warning_count,
-            error_count,
-            summary = %diagnostics.format_for_log(),
-            "Theme validation reported diagnostics"
-        );
-    } else if diagnostics.is_ok() {
-        debug!(summary = %diagnostics.format_for_log(), "Theme validation passed");
+pub(crate) fn reload_theme(
+    cx: &mut App,
+    source: ThemePublicationSource,
+) -> Result<ThemePublicationReceipt, ThemePublishError> {
+    let expected = theme_revision();
+    let prepared = super::live_edit::prepare_theme(super::types::try_load_theme()?)?;
+    // The watcher also sees our own atomic save. Do not turn an identical
+    // echo into a foreign publication that invalidates the chooser baseline.
+    // Appearance updates still refresh the bridge even with equal file bytes.
+    if source == ThemePublicationSource::FileReload
+        && serde_json::to_value(prepared.theme.as_ref()).map_err(anyhow::Error::from)?
+            == serde_json::to_value(super::get_theme_snapshot().theme.as_ref())
+                .map_err(anyhow::Error::from)?
+    {
+        return Ok(ThemePublicationReceipt {
+            previous_revision: expected,
+            revision: expected,
+            source,
+            invalidation_requested: false,
+            native_refresh_requested: false,
+        });
     }
-
-    for diag in diagnostics.diagnostics {
-        match diag.severity {
-            super::validation::DiagnosticSeverity::Warning => {
-                warn!(
-                    path = %diag.path,
-                    message = %diag.message,
-                    "theme validation warning"
-                );
-            }
-            super::validation::DiagnosticSeverity::Error => {
-                error!(
-                    path = %diag.path,
-                    message = %diag.message,
-                    "theme validation error"
-                );
-            }
-            super::validation::DiagnosticSeverity::Info => {}
-        }
-    }
-
-    (warning_count, error_count)
+    publish_runtime_theme(cx, expected, prepared, source)
 }
 
-fn validate_theme_json_before_reload() {
-    let theme_path = crate::setup::theme_json_path();
-    let contents = match std::fs::read_to_string(&theme_path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            debug!(
-                path = %theme_path.display(),
-                error = ?error,
-                "Skipping theme validation: failed to read theme file"
-            );
-            return;
-        }
-    };
+/// Startup alone permits the historical missing/invalid-file default. Every
+/// later reload is fallible and keeps the last known good snapshot.
+pub fn initialize_theme(cx: &mut App) -> Result<ThemePublicationReceipt, ThemePublishError> {
+    let expected = theme_revision();
+    publish_runtime_theme(
+        cx,
+        expected,
+        super::live_edit::prepare_theme(super::load_theme())?,
+        ThemePublicationSource::Startup,
+    )
+}
 
-    let json_value = match serde_json::from_str::<serde_json::Value>(&contents) {
-        Ok(json_value) => json_value,
-        Err(error) => {
-            debug!(
-                path = %theme_path.display(),
-                error = ?error,
-                "Skipping theme validation: failed to parse theme JSON"
-            );
-            return;
-        }
-    };
-
-    let (warning_count, error_count) = log_theme_validation_diagnostics(&json_value);
-    if warning_count > 0 || error_count > 0 {
-        debug!(
-            path = %theme_path.display(),
-            warning_count,
-            error_count,
-            "Theme validation diagnostics emitted before reload"
-        );
+#[allow(dead_code)]
+pub(crate) fn reapply_runtime_theme_overrides(cx: &mut App) {
+    if let Err(error) = reload_theme(cx, ThemePublicationSource::FileReload) {
+        warn!(%error, "Runtime theme reload retained last known good theme");
     }
 }
 
@@ -234,6 +216,15 @@ fn drain_pending_events<T>(rx: &std::sync::mpsc::Receiver<T>) -> bool {
     has_events
 }
 
+struct ThemeServiceLifetime;
+
+impl Drop for ThemeServiceLifetime {
+    fn drop(&mut self) {
+        THEME_SERVICE_RUNNING.store(false, Ordering::SeqCst);
+        info!("Theme service stopped");
+    }
+}
+
 /// Ensure the global theme service is running.
 ///
 /// This is idempotent - calling it multiple times is safe and will only
@@ -242,6 +233,9 @@ fn drain_pending_events<T>(rx: &std::sync::mpsc::Receiver<T>) -> bool {
 /// # Arguments
 /// * `cx` - The GPUI App context
 pub fn ensure_theme_service(cx: &mut App) {
+    if crate::runtime_policy::is_owned_evaluation() {
+        return;
+    }
     // Use swap to atomically check and set in one operation
     if THEME_SERVICE_RUNNING.swap(true, Ordering::SeqCst) {
         // Already running
@@ -249,13 +243,14 @@ pub fn ensure_theme_service(cx: &mut App) {
     }
 
     info!("Starting global theme service");
+    let lifetime = ThemeServiceLifetime;
 
     cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        let _lifetime = lifetime;
         let (mut watcher, rx) = ThemeWatcher::new();
 
         if let Err(error) = watcher.start() {
             warn!(error = ?error, "Failed to start theme file watcher");
-            THEME_SERVICE_RUNNING.store(false, Ordering::SeqCst);
             return;
         }
 
@@ -296,24 +291,18 @@ pub fn ensure_theme_service(cx: &mut App) {
 
                 if file_changed {
                     info!("Theme changed, syncing to all windows");
-                    validate_theme_json_before_reload();
                 }
 
-                let update_result: Result<bool, anyhow::Error> = Ok(cx.update(|cx| {
-                    // Keep cache update + gpui sync + revision bump in one app update.
-                    let theme = reload_theme_cache_sync_and_bump_revision(cx);
-                    let updated_auto_appearance = matches!(theme.appearance, AppearanceMode::Auto);
-
-                    // Notify all registered windows to re-render
-                    windows::notify_all_windows(cx);
-                    updated_auto_appearance
-                }));
+                let update_result = cx.update(|cx| {
+                    reload_theme(cx, if file_changed { ThemePublicationSource::FileReload } else { ThemePublicationSource::Appearance })
+                        .map(|_| matches!(super::get_theme_snapshot().theme.appearance, AppearanceMode::Auto))
+                });
 
                 let updated_auto_appearance = match update_result {
                     Ok(updated_auto_appearance) => updated_auto_appearance,
                     Err(error) => {
-                        warn!(error = ?error, "App context gone, stopping theme service");
-                        break;
+                        warn!(error = ?error, "Theme reload failed; retaining last known good publication");
+                        continue;
                     }
                 };
 
@@ -336,9 +325,6 @@ pub fn ensure_theme_service(cx: &mut App) {
                 idle_count = idle_count.saturating_add(1);
             }
         }
-
-        THEME_SERVICE_RUNNING.store(false, Ordering::SeqCst);
-        info!("Theme service stopped");
     })
     .detach();
 }
@@ -356,18 +342,16 @@ pub(crate) fn persist_theme_and_sync_all_windows(
     theme: &crate::theme::Theme,
     source: &'static str,
 ) -> anyhow::Result<super::types::Theme> {
-    crate::theme::presets::write_theme_to_disk(theme)?;
-    let applied_theme = reload_theme_cache_sync_and_bump_revision(cx);
-    windows::notify_all_windows(cx);
-
-    let chrome = crate::theme::chrome::AppChromeColors::from_theme(&applied_theme);
+    let expected = theme_revision();
+    let prepared = super::live_edit::prepare_theme(theme.clone())?;
+    crate::theme::presets::write_theme_to_disk(&prepared.theme)?;
+    let receipt = publish_runtime_theme(cx, expected, prepared, ThemePublicationSource::Persisted)?;
     info!(
         source,
-        theme_revision = theme_revision(),
-        accent_hex = chrome.accent_hex,
+        revision = receipt.revision,
         "theme_persisted_and_synced_all_windows"
     );
-    Ok(applied_theme)
+    Ok(super::get_cached_theme())
 }
 
 /// Check if the theme service is currently running.
@@ -405,23 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bump_increments_revision() {
-        let before = theme_revision();
-        bump_theme_revision();
-        let after = theme_revision();
-        assert!(after > before);
-    }
-
-    #[test]
-    fn test_reload_theme_cache_and_bump_revision_increments_revision() {
-        let before = theme_revision();
-        let _ = reload_theme_cache_and_bump_revision();
-        let after = theme_revision();
-        assert!(after > before);
-    }
-
-    #[test]
-    fn test_log_theme_validation_diagnostics_counts_errors_and_warnings_for_invalid_theme_json() {
+    fn test_decode_theme_json_reports_errors_and_warnings_for_invalid_theme_json() {
         let invalid_theme_json = serde_json::json!({
             "colors": {
                 "background": {
@@ -431,14 +399,16 @@ mod tests {
             "unexpected_key": true
         });
 
-        let (warning_count, error_count) = log_theme_validation_diagnostics(&invalid_theme_json);
+        let error = super::super::types::decode_theme_json(&invalid_theme_json.to_string(), true)
+            .expect_err("invalid color must prevent theme loading")
+            .to_string();
 
-        assert!(warning_count > 0);
-        assert!(error_count > 0);
+        assert!(error.contains("[WARN] /unexpected_key:"));
+        assert!(error.contains("[ERROR] /colors/background/main:"));
     }
 
     #[test]
-    fn test_log_theme_validation_diagnostics_returns_zero_for_valid_theme_json() {
+    fn test_decode_theme_json_loads_valid_theme_json() {
         let valid_theme_json = serde_json::json!({
             "colors": {
                 "background": {
@@ -451,10 +421,10 @@ mod tests {
             }
         });
 
-        let (warning_count, error_count) = log_theme_validation_diagnostics(&valid_theme_json);
+        let theme = super::super::types::decode_theme_json(&valid_theme_json.to_string(), true)
+            .expect("valid theme must load");
 
-        assert_eq!(warning_count, 0);
-        assert_eq!(error_count, 0);
+        assert_eq!(theme.colors.background.main, 0x111111);
     }
 
     #[test]

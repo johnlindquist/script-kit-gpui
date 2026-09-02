@@ -31,6 +31,33 @@ pub struct VisualTestAppContext {
     text_system: Arc<TextSystem>,
 }
 
+/// Actual bounded progress since one pump began. Pending timers are not called settled.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OwnedWorkProgress {
+    /// Scheduler callbacks actually executed during this pump.
+    pub scheduler_steps: usize,
+    /// App effects actually processed during this pump.
+    pub effects_executed: usize,
+    /// Entity lifetimes actually released through their normal callbacks.
+    pub entities_released: usize,
+    /// Native frames completed during this pump.
+    pub frames_completed: u64,
+    /// Foreground callbacks still queued after the pump.
+    pub pending_foreground_tasks: usize,
+    /// Background callbacks still queued after the pump.
+    pub pending_background_tasks: usize,
+    /// App effects still queued after the pump.
+    pub pending_effects: usize,
+    /// Zero-reference entity lifetimes still awaiting release callbacks.
+    pub pending_entity_releases: usize,
+    /// Live windows still requiring a draw after the pump.
+    pub pending_dirty_windows: usize,
+    /// Whether queued work or future timers remain; not a settled assertion.
+    pub has_pending_tasks_or_timers: bool,
+    /// Whether runnable work remained when the step limit was reached.
+    pub budget_exhausted: bool,
+}
+
 impl VisualTestAppContext {
     /// Creates a new `VisualTestAppContext` with real macOS platform rendering
     /// but deterministic task scheduling via TestDispatcher.
@@ -63,7 +90,23 @@ impl VisualTestAppContext {
         // Create a visual test platform that combines real Mac rendering
         // with controllable TestDispatcher for deterministic task scheduling
         let platform = Rc::new(VisualTestPlatform::new(platform, seed));
+        Self::from_visual_platform(platform, asset_source)
+    }
 
+    /// Construct only around a native platform that installed its guard before initialization.
+    pub fn with_owned_hidden_platform(
+        platform: Rc<dyn Platform>,
+        dispatcher: TestDispatcher,
+        asset_source: Arc<dyn AssetSource>,
+    ) -> Result<Self> {
+        let platform = Rc::new(VisualTestPlatform::owned_hidden(platform, dispatcher)?);
+        Ok(Self::from_visual_platform(platform, asset_source))
+    }
+
+    fn from_visual_platform(
+        platform: Rc<VisualTestPlatform>,
+        asset_source: Arc<dyn AssetSource>,
+    ) -> Self {
         // Get the dispatcher and executors from the platform
         let dispatcher = platform.dispatcher().clone();
         let background_executor = platform.background_executor();
@@ -71,7 +114,15 @@ impl VisualTestAppContext {
 
         let text_system = Arc::new(TextSystem::new(platform.text_system()));
 
-        let http_client = http_client::FakeHttpClient::with_404_response();
+        let http_client = if platform.owned_hidden_guard().is_some() {
+            Arc::new(http_client::HttpClientWithUrl::new_url(
+                Arc::new(http_client::BlockedHttpClient::new()),
+                "",
+                None,
+            ))
+        } else {
+            http_client::FakeHttpClient::with_404_response()
+        };
 
         let mut app = App::new_app(platform.clone(), asset_source, http_client);
         app.borrow_mut().mode = GpuiMode::test();
@@ -84,6 +135,134 @@ impl VisualTestAppContext {
             platform,
             text_system,
         }
+    }
+
+    /// Open the actual production root under explicit non-presenting window options.
+    pub fn open_owned_hidden_window<V: Render + 'static>(
+        &mut self,
+        options: WindowOptions,
+        build_root: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+    ) -> Result<WindowHandle<V>> {
+        anyhow::ensure!(
+            self.platform.owned_hidden_guard().is_some(),
+            "owned_hidden_context_required"
+        );
+        self.app.borrow_mut().open_window(options, build_root)
+    }
+
+    /// Mount a fallible production root without a placeholder or panic on preparation failure.
+    pub fn open_owned_hidden_window_fallible<V: Render + 'static>(
+        &mut self,
+        options: WindowOptions,
+        build_root: impl FnOnce(&mut Window, &mut App) -> Result<Entity<V>>,
+    ) -> Result<WindowHandle<V>> {
+        anyhow::ensure!(
+            self.platform.owned_hidden_guard().is_some(),
+            "owned_hidden_context_required"
+        );
+        self.app
+            .borrow_mut()
+            .open_window_fallible(options, build_root)
+    }
+    /// Bound scheduler, effects and completed frames. No unbounded dispatcher drain or sleep.
+    /// A zero frame budget still advances timers, scheduler tasks and app effects.
+    pub fn pump_owned_work(
+        &mut self,
+        max_steps: usize,
+        advance: Duration,
+        max_frames: u64,
+    ) -> Result<OwnedWorkProgress> {
+        anyhow::ensure!(
+            self.platform.owned_hidden_guard().is_some(),
+            "owned_hidden_context_required"
+        );
+        anyhow::ensure!(
+            max_steps <= 4096 && advance <= Duration::from_secs(1),
+            "owned_work_budget_invalid"
+        );
+        let before = self.owned_hidden_observation();
+        self.dispatcher.advance_clock_without_running(advance);
+        let mut progress = OwnedWorkProgress::default();
+        // A frame callback may invalidate its own window for the next frame.
+        // Keep that work queued for the next pump instead of rendering the same
+        // animation repeatedly at one clock instant and starving other windows.
+        let mut drawn_windows = smallvec::SmallVec::<[crate::WindowId; 8]>::new();
+        let mut steps = 0;
+        while steps < max_steps {
+            let mut worked = false;
+            if self.dispatcher.run_bounded(1) != 0 {
+                progress.scheduler_steps += 1;
+                steps += 1;
+                worked = true;
+            }
+            if steps < max_steps {
+                let effects = self.app.borrow_mut().flush_owned_effects(1)?;
+                progress.effects_executed += effects.effects_executed;
+                progress.entities_released += effects.entities_released;
+                let work = effects.effects_executed + effects.entities_released;
+                steps += work;
+                worked |= work != 0;
+            }
+            if steps < max_steps
+                && self.owned_hidden_observation().completed_frames - before.completed_frames
+                    < max_frames
+            {
+                let dirty = self
+                    .app
+                    .borrow()
+                    .windows
+                    .values()
+                    .filter_map(|window| window.as_deref())
+                    .find(|window| {
+                        window.invalidator.is_dirty()
+                            && !drawn_windows.contains(&window.handle.window_id())
+                    })
+                    .map(|window| window.handle);
+                if let Some(handle) = dirty {
+                    self.update_window(handle, |_, window, cx| {
+                        window.draw_scheduled_owned_frame(cx)
+                    })??;
+                    drawn_windows.push(handle.window_id());
+                    steps += 1;
+                    worked = true;
+                }
+            }
+            if !worked {
+                break;
+            }
+        }
+        let (foreground, background) = self.dispatcher.pending_task_counts();
+        let app = self.app.borrow();
+        progress.pending_foreground_tasks = foreground;
+        progress.pending_background_tasks = background;
+        progress.pending_effects = app.pending_effects.len();
+        progress.pending_entity_releases = app.entities.pending_dropped_count();
+        progress.pending_dirty_windows = app
+            .windows
+            .values()
+            .filter_map(|window| window.as_deref())
+            .filter(|window| window.invalidator.is_dirty())
+            .count();
+        progress.has_pending_tasks_or_timers = self.dispatcher.has_pending_work();
+        progress.frames_completed =
+            self.owned_hidden_observation().completed_frames - before.completed_frames;
+        progress.budget_exhausted = (steps == max_steps
+            && (foreground
+                + background
+                + progress.pending_effects
+                + progress.pending_entity_releases
+                != 0))
+            || (progress.pending_dirty_windows != 0
+                && (steps == max_steps || progress.frames_completed >= max_frames));
+        Ok(progress)
+    }
+
+    /// Snapshot the installed native authority without progressing any work.
+    pub fn owned_hidden_observation(&self) -> crate::OwnedHiddenObservation {
+        self.platform
+            .owned_hidden_guard()
+            .map(|guard| guard.observation())
+            .unwrap_or_default()
     }
 
     /// Opens a window positioned off-screen for invisible rendering.
@@ -150,6 +329,10 @@ impl VisualTestAppContext {
     /// Runs all pending foreground and background tasks until there's nothing left to do.
     /// This is essential for processing async operations like tooltip timers.
     pub fn run_until_parked(&self) {
+        assert!(
+            self.platform.owned_hidden_guard().is_none(),
+            "owned host requires pump_owned_work"
+        );
         self.dispatcher.run_until_parked();
     }
 
@@ -157,6 +340,10 @@ impl VisualTestAppContext {
     /// that become ready. This is essential for testing time-based behaviors like
     /// tooltip delays.
     pub fn advance_clock(&self, duration: Duration) {
+        assert!(
+            self.platform.owned_hidden_guard().is_none(),
+            "owned host requires pump_owned_work"
+        );
         self.dispatcher.advance_clock(duration);
     }
 

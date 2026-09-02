@@ -130,6 +130,7 @@ mod tests {
             semantic_surface: None,
             bounds,
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: None,
             generation: None,

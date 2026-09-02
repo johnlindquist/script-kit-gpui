@@ -38,15 +38,15 @@ enum SettingsActivationSource {
     GpuiFallback,
 }
 
-/// Runtime wrapper: the ONLY place the live window-state config feeds the
-/// settings census. Everything downstream (renderer, exporter, tests) goes
-/// through the pure `get_settings_items_for(has_custom_positions)` in
-/// `settings_contract.rs`.
-fn get_settings_items() -> Vec<SettingsItem> {
-    get_settings_items_for(crate::window_state::has_custom_positions())
-}
-
 impl ScriptListApp {
+    pub(crate) fn get_settings_items(&self) -> Vec<SettingsItem> {
+        let has_custom_positions = match self.main_services.owned_sources() {
+            Some(sources) => sources.has_custom_positions,
+            None => crate::window_state::has_custom_positions(),
+        };
+        get_settings_items_for(has_custom_positions)
+    }
+
     fn settings_visible_row_names(&self, filter: &str) -> Vec<String> {
         self.settings_visible_row_labels(filter)
     }
@@ -60,7 +60,7 @@ impl ScriptListApp {
     }
 
     fn settings_visible_row_labels(&self, filter: &str) -> Vec<String> {
-        let items = get_settings_items();
+        let items = self.get_settings_items();
         self.settings_filtered_rows(&items, filter)
             .into_iter()
             .map(|item| item.name.to_string())
@@ -68,13 +68,13 @@ impl ScriptListApp {
     }
 
     fn settings_dataset_and_visible_counts(&self, filter: &str) -> (usize, usize) {
-        let items = get_settings_items();
+        let items = self.get_settings_items();
         let visible_count = self.settings_filtered_rows(&items, filter).len();
         (items.len(), visible_count)
     }
 
     fn settings_selected_visible_row(&self, filter: &str, selected_index: usize) -> Option<String> {
-        let items = get_settings_items();
+        let items = self.get_settings_items();
         self.settings_filtered_rows(&items, filter)
             .get(selected_index)
             .map(|item| item.name.to_string())
@@ -92,6 +92,11 @@ impl ScriptListApp {
     /// honest disabled state is a missing configure-snap-mode builtin; do
     /// not manufacture others.
     fn settings_action_availability(&self) -> SettingsActionAvailability {
+        if let Some(sources) = self.main_services.owned_sources() {
+            return SettingsActionAvailability {
+                configure_snap_mode: sources.configure_snap_mode_available,
+            };
+        }
         SettingsActionAvailability {
             configure_snap_mode: crate::builtins::get_builtin_entries(&self.config.get_builtins())
                 .iter()
@@ -179,7 +184,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::SelectMicrophone => {
                 let entry = crate::builtins::BuiltInEntry {
@@ -202,7 +207,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::ClearSuggested => {
                 let entry = crate::builtins::BuiltInEntry {
@@ -224,7 +229,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::CheckPermissions => {
                 let entry = crate::builtins::BuiltInEntry {
@@ -244,7 +249,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::SetupPermissions => {
                 self.open_permissions_wizard(cx);
@@ -268,7 +273,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::AllowScreenRecording => {
                 let entry = crate::builtins::BuiltInEntry {
@@ -292,7 +297,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::RequestAccessibilityPermission => {
                 let entry = crate::builtins::BuiltInEntry {
@@ -315,7 +320,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::OpenAccessibilitySettings => {
                 let entry = crate::builtins::BuiltInEntry {
@@ -337,7 +342,7 @@ impl ScriptListApp {
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
             }
             SettingsAction::ConfigureSnapMode => {
                 let entry = crate::builtins::get_builtin_entries(&self.config.get_builtins())
@@ -345,7 +350,7 @@ impl ScriptListApp {
                     .find(|entry| entry.id == "builtin/configure-snap-mode");
 
                 if let Some(entry) = entry {
-                    self.execute_builtin(&entry, cx);
+                    let _outcome = self.execute_builtin(&entry, cx);
                 } else {
                     // Defensive: availability rechecked above should have
                     // refused already; keep the exact legacy feedback.
@@ -380,7 +385,7 @@ impl ScriptListApp {
 
         let chrome = theme::AppChromeColors::from_theme(&self.theme);
 
-        let items = get_settings_items();
+        let items = self.get_settings_items();
         let filtered_items = filtered_settings_items(&items, &filter);
         let item_count = filtered_items.len();
         let list_colors = ListItemColors::from_theme(&self.theme);
@@ -465,7 +470,7 @@ impl ScriptListApp {
                     return;
                 };
 
-                let settings_items = get_settings_items();
+                let settings_items = this.get_settings_items();
                 let filtered_items = filtered_settings_items(&settings_items, &current_filter);
                 let filtered_count = filtered_items.len();
 
@@ -551,16 +556,15 @@ impl ScriptListApp {
                                     // GEO-006: the executing click resolves the
                                     // SAME selected descriptor as Enter and
                                     // submits its action ID.
-                                    let current_filter = if let AppView::SettingsView {
-                                        filter,
-                                        ..
-                                    } = &this.current_view
-                                    {
-                                        filter.clone()
-                                    } else {
-                                        String::new()
-                                    };
-                                    let settings_items = get_settings_items();
+                                    let current_filter =
+                                        if let AppView::SettingsView { filter, .. } =
+                                            &this.current_view
+                                        {
+                                            filter.clone()
+                                        } else {
+                                            String::new()
+                                        };
+                                    let settings_items = this.get_settings_items();
                                     if let Some(descriptor) = selected_settings_action_descriptor(
                                         &settings_items,
                                         &current_filter,
@@ -674,11 +678,10 @@ impl ScriptListApp {
             ],
             None => vec![gpui::SharedString::from("Esc Back")],
         };
-        let footer = self
-            .main_window_footer_slot(crate::components::render_simple_hint_strip(
-                footer_hints,
-                None,
-            ));
+        let footer = self.main_window_footer_slot(crate::components::render_simple_hint_strip(
+            footer_hints,
+            None,
+        ));
 
         let shell = menu_def.shell;
 

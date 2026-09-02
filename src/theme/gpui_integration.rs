@@ -169,7 +169,7 @@ pub fn map_scriptkit_to_gpui_theme(sk_theme: &Theme, is_dark: bool) -> ThemeColo
         // Glass mode: the native NSGlassEffectView backdrop supplies its own
         // frost, so the Root veil is the theme's glass_veil_opacity slider
         // value (default: the bare-glass cap).
-        let bg_alpha = if crate::platform::tahoe_liquid_glass_available() {
+        let bg_alpha = if crate::platform::tahoe_native_glass_composition_available() {
             opacity
                 .glass_veil_opacity
                 .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
@@ -376,7 +376,7 @@ fn resolve_mode_and_colors(sk_theme: &Theme) -> (ThemeMode, ThemeColor) {
 }
 
 /// Apply native window vibrancy/material for the given theme.
-fn sync_native_window_theme_for_theme(sk_theme: &Theme, source: &'static str) {
+pub(super) fn sync_native_window_theme_for_theme(sk_theme: &Theme, source: &'static str) {
     let vibrancy = sk_theme.get_vibrancy();
     let use_dark_vibrancy = sk_theme.should_use_dark_vibrancy();
     crate::platform::configure_window_vibrancy_material_for_appearance(
@@ -410,7 +410,7 @@ pub fn sync_gpui_component_theme(cx: &mut App) {
 ///
 /// Applies both gpui-component theme state and native vibrancy/material state
 /// in one call, ensuring every sync path gets both updates atomically.
-pub(crate) fn sync_gpui_component_theme_for_theme_with_source(
+pub(super) fn sync_gpui_component_theme_for_theme_with_source(
     cx: &mut App,
     sk_theme: &Theme,
     source: &'static str,
@@ -423,48 +423,49 @@ pub(crate) fn sync_gpui_component_theme_for_theme_with_source(
 /// High-frequency previews, such as dragging Theme Designer sliders, should
 /// update GPUI colors without reconfiguring AppKit vibrancy/material on every
 /// pointer event. Commit-style theme changes keep `sync_native_window` true.
-pub(crate) fn sync_gpui_component_theme_for_theme_with_source_and_native(
+pub(super) fn sync_gpui_component_theme_for_theme_with_source_and_native(
     cx: &mut App,
     sk_theme: &Theme,
     source: &'static str,
     sync_native_window: bool,
 ) {
-    let (mode, custom_colors) = resolve_mode_and_colors(sk_theme);
-    let is_dark = matches!(mode, ThemeMode::Dark);
-    let chrome = crate::theme::chrome::AppChromeColors::from_theme(sk_theme);
-
-    debug!(
-        source,
-        accent_hex = chrome.accent_hex,
-        window_surface_rgba = chrome.window_surface_rgba,
-        input_surface_rgba = chrome.input_surface_rgba,
-        selection_rgba = chrome.selection_rgba,
-        hover_rgba = chrome.hover_rgba,
-        border_rgba = chrome.border_rgba,
-        "gpui_component_theme_chrome_synced"
-    );
-
-    let fonts = sk_theme.get_fonts();
-
-    let theme = GpuiTheme::global_mut(cx);
-    theme.colors = custom_colors;
-    theme.mode = mode;
-    theme.highlight_theme = Arc::new(build_markdown_highlight_theme(sk_theme, is_dark));
-    theme.mono_font_family = fonts.mono_family.clone().into();
-    theme.mono_font_size = gpui::px(fonts.mono_size);
-    theme.font_family = fonts.ui_family.clone().into();
-    theme.font_size = gpui::px(fonts.ui_size);
-
-    debug!(
-        source,
-        mode = ?mode,
-        font_family = %fonts.ui_family,
-        mono_font_family = %fonts.mono_family,
-        "gpui_component_theme_synchronized"
-    );
-
-    if sync_native_window {
+    PreparedComponentTheme::new(sk_theme).apply(cx);
+    if sync_native_window && !crate::runtime_policy::is_owned_evaluation() {
         sync_native_window_theme_for_theme(sk_theme, source);
+    }
+}
+
+/// All allocation/derivation completes before entering the cache transaction.
+pub(super) struct PreparedComponentTheme {
+    mode: ThemeMode,
+    colors: ThemeColor,
+    highlight: Arc<HighlightTheme>,
+    fonts: super::FontConfig,
+}
+
+impl PreparedComponentTheme {
+    pub(super) fn new(theme: &Theme) -> Self {
+        let (mode, colors) = resolve_mode_and_colors(theme);
+        Self {
+            mode,
+            colors,
+            highlight: Arc::new(build_markdown_highlight_theme(
+                theme,
+                matches!(mode, ThemeMode::Dark),
+            )),
+            fonts: theme.get_fonts(),
+        }
+    }
+
+    pub(super) fn apply(self, cx: &mut App) {
+        let theme = GpuiTheme::global_mut(cx);
+        theme.colors = self.colors;
+        theme.mode = self.mode;
+        theme.highlight_theme = self.highlight;
+        theme.mono_font_family = self.fonts.mono_family.into();
+        theme.mono_font_size = gpui::px(self.fonts.mono_size);
+        theme.font_family = self.fonts.ui_family.into();
+        theme.font_size = gpui::px(self.fonts.ui_size);
     }
 }
 

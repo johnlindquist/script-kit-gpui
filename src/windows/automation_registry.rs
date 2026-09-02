@@ -33,6 +33,7 @@ use std::sync::LazyLock;
 #[derive(Debug, Default)]
 struct AutomationRegistryState {
     windows: HashMap<String, AutomationWindowInfo>,
+    target_revisions: HashMap<String, u64>,
     focused_id: Option<String>,
     main_id: Option<String>,
     kind_index: HashMap<AutomationWindowKind, Vec<String>>,
@@ -59,6 +60,7 @@ fn kind_rank(kind: AutomationWindowKind) -> u8 {
         AutomationWindowKind::ActionsDialog => 7,
         AutomationWindowKind::PromptPopup => 8,
         AutomationWindowKind::Hud => 9,
+        AutomationWindowKind::SnapOverlay => 10,
     }
 }
 
@@ -110,12 +112,22 @@ pub fn upsert_automation_window(mut info: AutomationWindowInfo) {
     } else if let Some(generation) = info.generation {
         state.next_generation = state.next_generation.max(generation);
     }
+    let metadata_changed = state.windows.get(&info.id) != Some(&info);
     if info.focused {
+        if let Some(previous) = state.focused_id.clone().filter(|id| id != &info.id) {
+            if let Some(revision) = state.target_revisions.get_mut(&previous) {
+                *revision = revision.saturating_add(1);
+            }
+        }
         for existing in state.windows.values_mut() {
             existing.focused = false;
         }
     }
     let id = info.id.clone();
+    if metadata_changed {
+        let revision = state.target_revisions.entry(id.clone()).or_insert(0);
+        *revision = revision.saturating_add(1);
+    }
     state.windows.insert(id.clone(), info);
     rebuild_indexes(&mut state);
     tracing::debug!(
@@ -125,6 +137,61 @@ pub fn upsert_automation_window(mut info: AutomationWindowInfo) {
         main_id = ?state.main_id,
         "automation_window_upserted"
     );
+}
+
+/// Allocate a fresh lifetime, without replacing an existing window.
+pub(super) fn insert_window_instance(
+    mut info: AutomationWindowInfo,
+) -> Result<AutomationWindowInfo> {
+    let mut state = AUTOMATION_WINDOWS.lock();
+    anyhow::ensure!(
+        !info.id.is_empty() && info.generation.is_none(),
+        "invalid_new_window_identity"
+    );
+    anyhow::ensure!(
+        !state.windows.contains_key(&info.id),
+        "window_identity_already_registered"
+    );
+    if let Some(parent_id) = info.parent_window_id.as_deref() {
+        let parent = state
+            .windows
+            .get(parent_id)
+            .ok_or_else(|| anyhow!("parent_window_missing"))?;
+        let generation = parent
+            .generation
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow!("parent_generation_missing"))?;
+        anyhow::ensure!(
+            info.parent_window_generation
+                .is_none_or(|expected| expected == generation),
+            "stale_parent_window_generation"
+        );
+        anyhow::ensure!(
+            info.parent_kind.is_none_or(|kind| kind == parent.kind),
+            "parent_window_kind_mismatch"
+        );
+        info.parent_window_generation = Some(generation);
+        info.parent_kind = Some(parent.kind);
+    } else {
+        anyhow::ensure!(
+            info.parent_window_generation.is_none() && info.parent_kind.is_none(),
+            "parent_identity_incomplete"
+        );
+    }
+    state.next_generation = state
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("window_generation_exhausted"))?;
+    info.generation = Some(state.next_generation);
+    if info.focused {
+        for existing in state.windows.values_mut() {
+            existing.focused = false;
+        }
+    }
+    state.windows.insert(info.id.clone(), info.clone());
+    state.target_revisions.insert(info.id.clone(), 1);
+    rebuild_indexes(&mut state);
+    Ok(info)
 }
 
 /// Register an attached popup window with its parent identity.
@@ -180,7 +247,7 @@ pub fn register_attached_popup_instance(
         )
     })?;
 
-    let (parent_window_id, parent_kind) = {
+    let (parent_window_id, parent_kind, parent_window_generation) = {
         let state = AUTOMATION_WINDOWS.lock();
         let parent_info = state.windows.get(pid).ok_or_else(|| {
             tracing::warn!(
@@ -197,7 +264,11 @@ pub fn register_attached_popup_instance(
                 pid
             )
         })?;
-        (parent_info.id.clone(), parent_info.kind)
+        (
+            parent_info.id.clone(),
+            parent_info.kind,
+            parent_info.generation,
+        )
     };
 
     let info = AutomationWindowInfo {
@@ -209,6 +280,7 @@ pub fn register_attached_popup_instance(
         semantic_surface,
         bounds,
         parent_window_id: Some(parent_window_id.clone()),
+        parent_window_generation,
         parent_kind: Some(parent_kind),
         generation,
         pid: Some(std::process::id()),
@@ -235,6 +307,7 @@ pub fn register_attached_popup_instance(
 pub fn remove_automation_window(id: &str) -> Option<AutomationWindowInfo> {
     let mut state = AUTOMATION_WINDOWS.lock();
     let removed = state.windows.remove(id);
+    state.target_revisions.remove(id);
     if removed.is_some() {
         rebuild_indexes(&mut state);
         tracing::debug!(
@@ -259,6 +332,7 @@ pub fn remove_automation_window_if_generation(
         return None;
     }
     let removed = state.windows.remove(id);
+    state.target_revisions.remove(id);
     if removed.is_some() {
         rebuild_indexes(&mut state);
         tracing::debug!(
@@ -323,6 +397,17 @@ pub fn set_automation_focus(new_focused_id: &str) -> bool {
     if !state.windows.contains_key(new_focused_id) {
         return false;
     }
+    if state.focused_id.as_deref() == Some(new_focused_id) {
+        return true;
+    }
+    if let Some(previous) = state.focused_id.clone() {
+        if let Some(revision) = state.target_revisions.get_mut(&previous) {
+            *revision = revision.saturating_add(1);
+        }
+    }
+    if let Some(revision) = state.target_revisions.get_mut(new_focused_id) {
+        *revision = revision.saturating_add(1);
+    }
     for (id, info) in state.windows.iter_mut() {
         info.focused = id.as_str() == new_focused_id;
     }
@@ -360,6 +445,9 @@ pub fn update_automation_semantic_surface(id: &str, surface: Option<String>) -> 
             "automation_window_semantic_surface_changed"
         );
         info.semantic_surface = surface;
+        if let Some(revision) = state.target_revisions.get_mut(id) {
+            *revision = revision.saturating_add(1);
+        }
     }
     true
 }
@@ -376,6 +464,9 @@ pub fn set_automation_visibility(id: &str, visible: bool) {
                 visible = visible,
                 "automation_window_visibility_changed"
             );
+            if let Some(revision) = state.target_revisions.get_mut(id) {
+                *revision = revision.saturating_add(1);
+            }
         }
     }
 }
@@ -403,8 +494,48 @@ pub fn set_automation_bounds(id: &str, bounds: Option<AutomationWindowBounds>) -
             "automation_window_bounds_changed"
         );
         info.bounds = bounds;
+        if let Some(revision) = state.target_revisions.get_mut(id) {
+            *revision = revision.saturating_add(1);
+        }
     }
     true
+}
+
+/// Update geometry only for the lifetime that produced the observation.
+pub fn set_automation_bounds_if_generation(
+    id: &str,
+    generation: u64,
+    bounds: Option<AutomationWindowBounds>,
+) -> bool {
+    let mut state = AUTOMATION_WINDOWS.lock();
+    let Some(info) = state.windows.get_mut(id) else {
+        return false;
+    };
+    if generation == 0 || info.generation != Some(generation) {
+        return false;
+    }
+    if info.bounds != bounds {
+        tracing::debug!(
+            target: "script_kit::automation",
+            id = %id,
+            generation,
+            bounds = ?bounds,
+            "automation_window_bounds_changed"
+        );
+        info.bounds = bounds;
+        if let Some(revision) = state.target_revisions.get_mut(id) {
+            *revision = revision.saturating_add(1);
+        }
+    }
+    true
+}
+
+/// Read an epoch advanced by metadata owners, never by an inspection.
+pub fn automation_target_revision(id: &str, generation: u64) -> Option<u64> {
+    let state = AUTOMATION_WINDOWS.lock();
+    (generation > 0 && state.windows.get(id)?.generation == Some(generation))
+        .then(|| state.target_revisions.get(id).copied())
+        .flatten()
 }
 
 /// Resolve an [`AutomationWindowTarget`] to a single
@@ -536,7 +667,7 @@ pub fn resolve_automation_window(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::protocol::{
         AutomationWindowBounds, AutomationWindowInfo, AutomationWindowKind, AutomationWindowTarget,
@@ -559,7 +690,7 @@ mod tests {
     // are sub-millisecond so this costs nothing.
     static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
         REGISTRY_TEST_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -575,6 +706,7 @@ mod tests {
             semantic_surface: None,
             bounds: None,
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: Some(std::process::id()),
             generation: None,
@@ -819,6 +951,7 @@ mod tests {
                 height: 600.0,
             }),
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: Some(std::process::id()),
             generation: None,
@@ -1039,6 +1172,7 @@ mod tests {
             semantic_surface: Some("promptPopup".into()),
             bounds: None,
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: None,
             generation: None,
@@ -1052,6 +1186,7 @@ mod tests {
             semantic_surface: Some("promptPopup".into()),
             bounds: None,
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: None,
             generation: None,

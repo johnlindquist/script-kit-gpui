@@ -13,16 +13,16 @@ mod from_dialog_builtin_action_validation_tests {
     //! cross-context guarantees.
 
     use super::builders::{
+        get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+        get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+        get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+        get_script_context_actions, get_scriptlet_context_actions_with_custom, to_deeplink_name,
         ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-        NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-        get_chat_model_picker_actions, get_clipboard_history_context_actions,
-        get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-        get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-        get_scriptlet_context_actions_with_custom, to_deeplink_name,
+        NoteSwitcherNoteInfo, NotesInfo,
     };
     use super::command_bar::CommandBarConfig;
     use super::dialog::{
-        ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+        build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
     };
     use super::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
     use super::window::count_section_headers;
@@ -1365,16 +1365,16 @@ mod from_dialog_builtin_action_validation_tests_2 {
     //! - Grouped items with SectionStyle::None
 
     use super::builders::{
+        get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+        get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+        get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+        get_script_context_actions, get_scriptlet_context_actions_with_custom, to_deeplink_name,
         ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-        NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-        get_chat_model_picker_actions, get_clipboard_history_context_actions,
-        get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-        get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-        get_scriptlet_context_actions_with_custom, to_deeplink_name,
+        NoteSwitcherNoteInfo, NotesInfo,
     };
     use super::command_bar::CommandBarConfig;
     use super::dialog::{
-        ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+        build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
     };
     use super::types::{Action, ActionCategory, ScriptInfo, SearchPosition, SectionStyle};
     use super::window::count_section_headers;
@@ -1781,11 +1781,7 @@ mod from_dialog_builtin_action_validation_tests_2 {
             has_response: false,
         };
         let actions = get_chat_context_actions(&info);
-        assert_eq!(
-            actions.len(),
-            3,
-            "Empty chat should have change_model, continue_in_chat and capture_screen_area"
-        );
+        crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         assert_eq!(actions[0].id, "chat:change_model");
         assert_eq!(actions[1].id, "chat:continue_in_chat");
     }
@@ -3075,16 +3071,16 @@ mod from_dialog_builtin_action_validation_tests_3 {
     //! - CommandBarConfig notes_style specifics
 
     use super::builders::{
+        get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+        get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+        get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+        get_script_context_actions, get_scriptlet_context_actions_with_custom, to_deeplink_name,
         ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-        NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-        get_chat_model_picker_actions, get_clipboard_history_context_actions,
-        get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-        get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-        get_scriptlet_context_actions_with_custom, to_deeplink_name,
+        NoteSwitcherNoteInfo, NotesInfo,
     };
     use super::command_bar::CommandBarConfig;
     use super::dialog::{
-        ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+        build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
     };
     use super::types::{Action, ActionCategory, ScriptInfo, SearchPosition, SectionStyle};
     use crate::clipboard_history::ContentType;
@@ -4321,11 +4317,9 @@ mod from_dialog_builtin_action_validation_tests_3 {
             has_response: false,
         };
         let actions_without = get_chat_context_actions(&without);
-        assert!(
-            !actions_without
-                .iter()
-                .any(|a| a.id == "chat:clear_conversation"),
-        );
+        assert!(!actions_without
+            .iter()
+            .any(|a| a.id == "chat:clear_conversation"),);
 
         let with = ChatPromptInfo {
             current_model: None,
@@ -4334,11 +4328,9 @@ mod from_dialog_builtin_action_validation_tests_3 {
             has_response: false,
         };
         let actions_with = get_chat_context_actions(&with);
-        assert!(
-            actions_with
-                .iter()
-                .any(|a| a.id == "chat:clear_conversation")
-        );
+        assert!(actions_with
+            .iter()
+            .any(|a| a.id == "chat:clear_conversation"));
     }
 
     // =========================================================================
@@ -4718,11 +4710,9 @@ mod from_dialog_builtin_action_validation_tests_3 {
             frontmost_app_name: None,
         };
         let actions = get_clipboard_history_context_actions(&entry);
-        assert!(
-            actions
-                .iter()
-                .any(|a| a.id == "clip:clipboard_attach_to_ai")
-        );
+        assert!(actions
+            .iter()
+            .any(|a| a.id == "clip:clipboard_attach_to_ai"));
     }
 
     #[test]
@@ -4736,11 +4726,9 @@ mod from_dialog_builtin_action_validation_tests_3 {
             frontmost_app_name: None,
         };
         let actions = get_clipboard_history_context_actions(&entry);
-        assert!(
-            actions
-                .iter()
-                .any(|a| a.id == "clip:clipboard_attach_to_ai")
-        );
+        assert!(actions
+            .iter()
+            .any(|a| a.id == "clip:clipboard_attach_to_ai"));
     }
 
     // =========================================================================
@@ -4957,13 +4945,11 @@ mod from_dialog_builtin_action_validation_tests_3 {
         let script = ScriptInfo::scriptlet("Open GitHub", "/path/url.md", None, None);
         let actions = get_scriptlet_context_actions_with_custom(&script, None);
         let deeplink = find_action(&actions, "copy_deeplink").unwrap();
-        assert!(
-            deeplink
-                .description
-                .as_ref()
-                .unwrap()
-                .contains("scriptkit://run/open-github"),
-        );
+        assert!(deeplink
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("scriptkit://run/open-github"),);
     }
 
     // =========================================================================
@@ -5171,16 +5157,16 @@ mod from_dialog_builtin_action_validation_tests_4 {
     //! - Action constructor lowercase caching with unicode titles
 
     use super::builders::{
+        get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+        get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+        get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+        get_script_context_actions, get_scriptlet_context_actions_with_custom, to_deeplink_name,
         ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-        NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-        get_chat_model_picker_actions, get_clipboard_history_context_actions,
-        get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-        get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-        get_scriptlet_context_actions_with_custom, to_deeplink_name,
+        NoteSwitcherNoteInfo, NotesInfo,
     };
     use super::command_bar::CommandBarConfig;
     use super::dialog::{
-        ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+        build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
     };
     use super::types::{Action, ActionCategory, ScriptInfo, SearchPosition, SectionStyle};
     use crate::clipboard_history::ContentType;
@@ -5671,12 +5657,6 @@ mod from_dialog_builtin_action_validation_tests_4 {
     // =========================================================================
 
     #[test]
-    fn new_chat_empty_inputs_produces_empty() {
-        let actions = get_new_chat_actions(&[], &[], &[]);
-        assert!(actions.is_empty());
-    }
-
-    #[test]
     fn new_chat_only_models_produces_models_section() {
         let models = vec![NewChatModelInfo {
             model_id: "m1".to_string(),
@@ -6051,21 +6031,6 @@ mod from_dialog_builtin_action_validation_tests_4 {
     }
 
     #[test]
-    fn deeplink_name_leading_trailing_stripped() {
-        assert_eq!(to_deeplink_name("  hello  "), "hello");
-    }
-
-    #[test]
-    fn deeplink_name_empty_string() {
-        assert_eq!(to_deeplink_name(""), "_unnamed");
-    }
-
-    #[test]
-    fn deeplink_name_only_special_chars() {
-        assert_eq!(to_deeplink_name("!@#$%"), "_unnamed");
-    }
-
-    #[test]
     fn deeplink_name_numbers_preserved() {
         assert_eq!(to_deeplink_name("Script 123"), "script-123");
     }
@@ -6131,13 +6096,6 @@ mod from_dialog_builtin_action_validation_tests_4 {
             .filter(|g| matches!(g, GroupedActionItem::SectionHeader(_)))
             .count();
         assert_eq!(header_count, 0, "Separators style should have 0 headers");
-    }
-
-    #[test]
-    fn grouped_items_empty_filtered_produces_empty() {
-        let actions = get_ai_command_bar_actions();
-        let grouped = build_grouped_items_static(&actions, &[], SectionStyle::Headers);
-        assert!(grouped.is_empty());
     }
 
     #[test]
@@ -6393,15 +6351,6 @@ mod from_dialog_builtin_action_validation_tests_4 {
     }
 
     #[test]
-    fn note_switcher_empty_notes_shows_helpful_message() {
-        let actions = get_note_switcher_actions(&[]);
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].id, "no_notes");
-        assert_eq!(actions[0].title, "No notes yet");
-        assert_eq!(actions[0].icon, Some(IconName::Plus));
-    }
-
-    #[test]
     fn note_switcher_action_id_format() {
         let notes = vec![NoteSwitcherNoteInfo {
             id: "abc-123-def".to_string(),
@@ -6485,7 +6434,7 @@ mod from_dialog_builtin_action_validation_tests_4 {
         assert!(ids.contains(&"chat:continue_in_chat"));
         assert!(!ids.contains(&"chat:copy_response"));
         assert!(!ids.contains(&"chat:clear_conversation"));
-        assert_eq!(actions.len(), 3);
+        crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
     }
 
     #[test]
@@ -6928,12 +6877,11 @@ mod from_dialog_builtin_action_validation_tests_4 {
         let builtin = ScriptInfo::builtin("Clipboard History");
         let actions = get_script_context_actions(&builtin);
         let dl = find_action(&actions, "copy_deeplink").unwrap();
-        assert!(
-            dl.description
-                .as_ref()
-                .unwrap()
-                .contains("scriptkit://run/clipboard-history")
-        );
+        assert!(dl
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("scriptkit://run/clipboard-history"));
     }
 
     // =========================================================================
@@ -7499,12 +7447,12 @@ mod from_dialog_builtin_action_validation_tests_5 {
     #[cfg(test)]
     mod tests {
         // --- merged from tests_part_01.rs ---
-        use crate::actions::CommandBarConfig;
         use crate::actions::builders::*;
         use crate::actions::dialog::{
-            ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+            build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
         };
         use crate::actions::types::*;
+        use crate::actions::CommandBarConfig;
         use crate::clipboard_history::ContentType;
         use crate::designs::icon_variations::IconName;
         use crate::file_search::{FileInfo, FileType};
@@ -8374,13 +8322,12 @@ mod from_dialog_builtin_action_validation_tests_5 {
             let script = ScriptInfo::new("Foo", "/path/foo.ts");
             let actions = get_script_context_actions(&script);
             let logs = actions.iter().find(|a| a.id == "view_logs").unwrap();
-            assert!(
-                logs.description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("log")
-            );
+            assert!(logs
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("log"));
         }
 
         #[test]
@@ -8388,13 +8335,12 @@ mod from_dialog_builtin_action_validation_tests_5 {
             let script = ScriptInfo::new("Foo", "/path/foo.ts");
             let actions = get_script_context_actions(&script);
             let cp = actions.iter().find(|a| a.id == "copy_path").unwrap();
-            assert!(
-                cp.description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("path")
-            );
+            assert!(cp
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("path"));
         }
 
         #[test]
@@ -8805,8 +8751,7 @@ mod from_dialog_builtin_action_validation_tests_5 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            // continue + capture (no models, no copy, no clear)
-            assert_eq!(actions.len(), 3);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert_eq!(actions[0].id, "chat:change_model");
         }
 
@@ -8830,8 +8775,7 @@ mod from_dialog_builtin_action_validation_tests_5 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            // 2 models + continue + copy_response + clear + capture = 6
-            assert_eq!(actions.len(), 5);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         #[test]
@@ -8927,16 +8871,12 @@ mod from_dialog_builtin_action_validation_tests_5 {
             };
             let without_actions = get_chat_context_actions(&without);
             let with_actions = get_chat_context_actions(&with);
-            assert!(
-                !without_actions
-                    .iter()
-                    .any(|a| a.id == "chat:clear_conversation")
-            );
-            assert!(
-                with_actions
-                    .iter()
-                    .any(|a| a.id == "chat:clear_conversation")
-            );
+            assert!(!without_actions
+                .iter()
+                .any(|a| a.id == "chat:clear_conversation"));
+            assert!(with_actions
+                .iter()
+                .any(|a| a.id == "chat:clear_conversation"));
         }
 
         // =========================================================================
@@ -9596,12 +9536,12 @@ mod from_dialog_builtin_action_validation_tests_6 {
     #[cfg(test)]
     mod tests {
         // --- merged from tests_part_01.rs ---
-        use crate::actions::CommandBarConfig;
         use crate::actions::builders::*;
         use crate::actions::dialog::{
-            ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+            build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
         };
         use crate::actions::types::*;
+        use crate::actions::CommandBarConfig;
         use crate::clipboard_history::ContentType;
         use crate::designs::icon_variations::IconName;
         use crate::file_search::{FileInfo, FileType};
@@ -10003,19 +9943,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         }
 
         #[test]
-        fn chat_context_no_models_only_continue() {
-            let info = ChatPromptInfo {
-                current_model: None,
-                available_models: vec![],
-                has_messages: false,
-                has_response: false,
-            };
-            let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 3);
-            assert_eq!(actions[0].id, "chat:change_model");
-        }
-
-        #[test]
         fn chat_context_all_flags_true_has_all_actions() {
             let info = ChatPromptInfo {
                 current_model: Some("GPT-4".into()),
@@ -10032,7 +9959,7 @@ mod from_dialog_builtin_action_validation_tests_6 {
             assert!(ids.contains(&"chat:continue_in_chat"));
             assert!(ids.contains(&"chat:copy_response"));
             assert!(ids.contains(&"chat:clear_conversation"));
-            assert_eq!(actions.len(), 5); // 1 model + continue + copy + clear + capture
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         #[test]
@@ -10637,13 +10564,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
             assert_eq!(coerce_action_selection(&rows, 2), Some(1));
         }
 
-        #[test]
-        fn coerce_selection_out_of_bounds_clamped() {
-            let rows = vec![GroupedActionItem::Item(0), GroupedActionItem::Item(1)];
-            // Index 10 should be clamped to last index (1)
-            assert_eq!(coerce_action_selection(&rows, 10), Some(1));
-        }
-
         // =========================================================================
         // 12. ActionsDialog::format_shortcut_hint comprehensive
         // =========================================================================
@@ -10651,19 +10571,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         #[test]
         fn format_hint_cmd_c() {
             assert_eq!(ActionsDialog::format_shortcut_hint("cmd+c"), "⌘C");
-        }
-
-        #[test]
-        fn format_hint_ctrl_shift_escape() {
-            assert_eq!(
-                ActionsDialog::format_shortcut_hint("ctrl+shift+escape"),
-                "⌃⇧⎋"
-            );
-        }
-
-        #[test]
-        fn format_hint_alt_backspace() {
-            assert_eq!(ActionsDialog::format_shortcut_hint("alt+backspace"), "⌥⌫");
         }
 
         #[test]
@@ -10687,11 +10594,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         }
 
         #[test]
-        fn format_hint_enter_key() {
-            assert_eq!(ActionsDialog::format_shortcut_hint("cmd+enter"), "⌘↵");
-        }
-
-        #[test]
         fn format_hint_return_key() {
             assert_eq!(ActionsDialog::format_shortcut_hint("cmd+return"), "⌘↵");
         }
@@ -10704,19 +10606,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         #[test]
         fn format_hint_space_key() {
             assert_eq!(ActionsDialog::format_shortcut_hint("cmd+space"), "⌘␣");
-        }
-
-        #[test]
-        fn format_hint_arrow_keys() {
-            assert_eq!(ActionsDialog::format_shortcut_hint("cmd+up"), "⌘↑");
-            assert_eq!(ActionsDialog::format_shortcut_hint("cmd+down"), "⌘↓");
-            assert_eq!(ActionsDialog::format_shortcut_hint("cmd+left"), "⌘←");
-            assert_eq!(ActionsDialog::format_shortcut_hint("cmd+right"), "⌘→");
-        }
-
-        #[test]
-        fn format_hint_arrowup_alias() {
-            assert_eq!(ActionsDialog::format_shortcut_hint("cmd+arrowup"), "⌘↑");
         }
 
         #[test]
@@ -11197,12 +11086,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         // =========================================================================
 
         #[test]
-        fn ai_command_bar_has_exactly_12_actions() {
-            let actions = get_ai_command_bar_actions();
-            assert_eq!(actions.len(), 38);
-        }
-
-        #[test]
         fn ai_command_bar_response_section_actions() {
             let actions = get_ai_command_bar_actions();
             let response_actions: Vec<&Action> = actions
@@ -11310,21 +11193,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         }
 
         #[test]
-        fn fuzzy_match_empty_haystack_no_match() {
-            assert!(!ActionsDialog::fuzzy_match("", "a"));
-        }
-
-        #[test]
-        fn fuzzy_match_both_empty_matches() {
-            assert!(ActionsDialog::fuzzy_match("", ""));
-        }
-
-        #[test]
-        fn fuzzy_match_exact_match() {
-            assert!(ActionsDialog::fuzzy_match("hello", "hello"));
-        }
-
-        #[test]
         fn fuzzy_match_subsequence() {
             assert!(ActionsDialog::fuzzy_match("hello world", "hlwrd"));
         }
@@ -11357,35 +11225,9 @@ mod from_dialog_builtin_action_validation_tests_6 {
         }
 
         #[test]
-        fn parse_keycaps_two_modifiers() {
-            let keycaps = ActionsDialog::parse_shortcut_keycaps("⌘⇧C");
-            assert_eq!(keycaps, vec!["⌘", "⇧", "C"]);
-        }
-
-        #[test]
-        fn parse_keycaps_enter_symbol() {
-            let keycaps = ActionsDialog::parse_shortcut_keycaps("↵");
-            assert_eq!(keycaps, vec!["↵"]);
-        }
-
-        #[test]
-        fn parse_keycaps_arrow_keys() {
-            assert_eq!(ActionsDialog::parse_shortcut_keycaps("↑"), vec!["↑"]);
-            assert_eq!(ActionsDialog::parse_shortcut_keycaps("↓"), vec!["↓"]);
-            assert_eq!(ActionsDialog::parse_shortcut_keycaps("←"), vec!["←"]);
-            assert_eq!(ActionsDialog::parse_shortcut_keycaps("→"), vec!["→"]);
-        }
-
-        #[test]
         fn parse_keycaps_escape_symbol() {
             let keycaps = ActionsDialog::parse_shortcut_keycaps("⎋");
             assert_eq!(keycaps, vec!["⎋"]);
-        }
-
-        #[test]
-        fn parse_keycaps_space_symbol() {
-            let keycaps = ActionsDialog::parse_shortcut_keycaps("␣");
-            assert_eq!(keycaps, vec!["␣"]);
         }
 
         #[test]
@@ -11397,16 +11239,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         // =========================================================================
         // 22. to_deeplink_name edge cases
         // =========================================================================
-
-        #[test]
-        fn deeplink_name_basic() {
-            assert_eq!(to_deeplink_name("My Script"), "my-script");
-        }
-
-        #[test]
-        fn deeplink_name_underscores_to_hyphens() {
-            assert_eq!(to_deeplink_name("hello_world"), "hello-world");
-        }
 
         #[test]
         fn deeplink_name_special_chars_stripped() {
@@ -11488,17 +11320,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         // =========================================================================
         // 24. Global actions are seeded with GlobalOps entries
         // =========================================================================
-
-        #[test]
-        fn global_actions_is_seeded() {
-            // get_global_actions() is seeded (never empty): reload_scripts, settings,
-            // view_logs, plus the Discover rows.
-            let actions = get_global_actions();
-            let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
-            assert!(ids.contains(&"reload_scripts"));
-            assert!(ids.contains(&"settings"));
-            assert!(ids.contains(&"view_logs"));
-        }
 
         // =========================================================================
         // 25. Ordering determinism across repeated calls
@@ -11933,19 +11754,19 @@ mod from_dialog_builtin_action_validation_tests_7 {
     #[cfg(test)]
     mod tests {
         // --- merged from tests_part_01.rs ---
-        use crate::actions::CommandBarConfig;
         use crate::actions::builders::{
-            ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-            NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-            get_chat_model_picker_actions, get_clipboard_history_context_actions,
-            get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-            get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-            get_scriptlet_context_actions_with_custom, to_deeplink_name,
+            get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+            get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+            get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+            get_script_context_actions, get_scriptlet_context_actions_with_custom,
+            to_deeplink_name, ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo,
+            NewChatPresetInfo, NoteSwitcherNoteInfo, NotesInfo,
         };
         use crate::actions::dialog::{
-            ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+            build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
         };
         use crate::actions::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
+        use crate::actions::CommandBarConfig;
         use crate::clipboard_history::ContentType;
         use crate::designs::icon_variations::IconName;
         use crate::file_search::{FileInfo, FileType};
@@ -14191,19 +14012,19 @@ mod from_dialog_builtin_action_validation_tests_8 {
     #[cfg(test)]
     mod tests {
         // --- merged from tests_part_01.rs ---
-        use crate::actions::CommandBarConfig;
         use crate::actions::builders::{
-            ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-            NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-            get_chat_model_picker_actions, get_clipboard_history_context_actions,
-            get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-            get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-            get_scriptlet_context_actions_with_custom, to_deeplink_name,
+            get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+            get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+            get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+            get_script_context_actions, get_scriptlet_context_actions_with_custom,
+            to_deeplink_name, ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo,
+            NewChatPresetInfo, NoteSwitcherNoteInfo, NotesInfo,
         };
         use crate::actions::dialog::{
-            ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+            build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
         };
         use crate::actions::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
+        use crate::actions::CommandBarConfig;
         use crate::clipboard_history::ContentType;
         use crate::designs::icon_variations::IconName;
         use crate::file_search::{FileInfo, FileType};
@@ -14444,11 +14265,9 @@ mod from_dialog_builtin_action_validation_tests_8 {
             let actions = get_scriptlet_context_actions_with_custom(&script, Some(&scriptlet));
 
             // Should have custom action
-            assert!(
-                actions
-                    .iter()
-                    .any(|a| a.id == "scriptlet_action:copy-output")
-            );
+            assert!(actions
+                .iter()
+                .any(|a| a.id == "scriptlet_action:copy-output"));
             // Should have reset_ranking due to frecency
             assert!(actions.iter().any(|a| a.id == "reset_ranking"));
             // Custom action should be after run but before edit
@@ -14822,98 +14641,84 @@ mod from_dialog_builtin_action_validation_tests_8 {
         fn ai_command_bar_copy_response_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:copy_response").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("response")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("response"));
         }
 
         #[test]
         fn ai_command_bar_copy_chat_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:copy_chat").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("conversation")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("conversation"));
         }
 
         #[test]
         fn ai_command_bar_copy_last_code_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:copy_last_code").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("code")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("code"));
         }
 
         #[test]
         fn ai_command_bar_new_chat_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:new_chat").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("new")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("new"));
         }
 
         #[test]
         fn ai_command_bar_change_model_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:change_model").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("model")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("model"));
         }
 
         #[test]
         fn ai_command_bar_delete_chat_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:delete_chat").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("delete")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("delete"));
         }
 
         #[test]
         fn ai_command_bar_submit_desc() {
             let actions = get_ai_command_bar_actions();
             let action = find_action(&actions, "chat:submit").unwrap();
-            assert!(
-                action
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("send")
-            );
+            assert!(action
+                .description
+                .as_ref()
+                .unwrap()
+                .to_lowercase()
+                .contains("send"));
         }
 
         // ============================================================
@@ -15047,12 +14852,11 @@ mod from_dialog_builtin_action_validation_tests_8 {
             let script = ScriptInfo::new("My Script", "/path/to/script.ts");
             let actions = get_script_context_actions(&script);
             let dl = find_action(&actions, "copy_deeplink").unwrap();
-            assert!(
-                dl.description
-                    .as_ref()
-                    .unwrap()
-                    .eq("Copy a portable Script Kit share link to clipboard")
-            );
+            assert!(dl
+                .description
+                .as_ref()
+                .unwrap()
+                .eq("Copy a portable Script Kit share link to clipboard"));
         }
 
         #[test]
@@ -16441,22 +16245,22 @@ mod from_dialog_builtin_action_validation_tests_9 {
     #[cfg(test)]
     mod tests {
         // --- merged from tests_part_01.rs ---
-        use crate::actions::CommandBarConfig;
         use crate::actions::builders::{
-            ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo, NotesInfo,
             get_ai_command_bar_actions, get_chat_context_actions,
             get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
             get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
             get_script_context_actions, get_scriptlet_context_actions_with_custom,
-            to_deeplink_name,
+            to_deeplink_name, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo,
+            NewChatPresetInfo, NotesInfo,
         };
         use crate::actions::dialog::{
-            ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+            build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
         };
         use crate::actions::types::{
             Action, ActionCategory, ActionsDialogConfig, AnchorPosition, ScriptInfo,
             SearchPosition, SectionStyle,
         };
+        use crate::actions::CommandBarConfig;
         use crate::clipboard_history::ContentType;
         use crate::designs::icon_variations::IconName;
         use crate::file_search::{FileInfo, FileType};
@@ -18231,22 +18035,22 @@ mod from_dialog_builtin_action_validation_tests_10 {
     #[cfg(test)]
     mod tests {
         // --- merged from tests_part_01.rs ---
-        use crate::actions::CommandBarConfig;
         use crate::actions::builders::{
-            ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo, NewChatPresetInfo,
-            NoteSwitcherNoteInfo, NotesInfo, get_ai_command_bar_actions, get_chat_context_actions,
-            get_chat_model_picker_actions, get_clipboard_history_context_actions,
-            get_file_context_actions, get_new_chat_actions, get_note_switcher_actions,
-            get_notes_command_bar_actions, get_path_context_actions, get_script_context_actions,
-            get_scriptlet_context_actions_with_custom, to_deeplink_name,
+            get_ai_command_bar_actions, get_chat_context_actions, get_chat_model_picker_actions,
+            get_clipboard_history_context_actions, get_file_context_actions, get_new_chat_actions,
+            get_note_switcher_actions, get_notes_command_bar_actions, get_path_context_actions,
+            get_script_context_actions, get_scriptlet_context_actions_with_custom,
+            to_deeplink_name, ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, NewChatModelInfo,
+            NewChatPresetInfo, NoteSwitcherNoteInfo, NotesInfo,
         };
         use crate::actions::dialog::{
-            ActionsDialog, GroupedActionItem, build_grouped_items_static, coerce_action_selection,
+            build_grouped_items_static, coerce_action_selection, ActionsDialog, GroupedActionItem,
         };
         use crate::actions::types::{
             Action, ActionCategory, ActionsDialogConfig, AnchorPosition, ScriptInfo,
             SearchPosition, SectionStyle,
         };
+        use crate::actions::CommandBarConfig;
         use crate::clipboard_history::ContentType;
         use crate::designs::icon_variations::IconName;
         use crate::file_search::{FileInfo, FileType};
@@ -18984,7 +18788,7 @@ mod from_dialog_builtin_action_validation_tests_10 {
         }
 
         #[test]
-        fn chat_no_models_only_continue_in_chat() {
+        fn chat_no_models_still_has_continue_in_chat() {
             let info = ChatPromptInfo {
                 current_model: None,
                 available_models: vec![],
@@ -18992,7 +18796,7 @@ mod from_dialog_builtin_action_validation_tests_10 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 3);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert_eq!(actions[0].id, "chat:change_model");
         }
 

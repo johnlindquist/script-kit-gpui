@@ -97,7 +97,7 @@ try {
 	const waitForRecovery = async (): Promise<Json> => {
 		const state = await driver.request(
 			{ type: "getAgentChatState", target: { type: "id", id: "main" } },
-			{ expect: "agentChatStateResult", timeoutMs: 8_000 },
+			{ expect: "agent_chatStateResult", timeoutMs: 8_000 },
 		);
 		if ((state.reliability as Json | undefined)?.phase === "awaitingRecovery") {
 			return state;
@@ -143,7 +143,7 @@ try {
 	const waitForSuccess = async (): Promise<Json> => {
 		const state = await driver.request(
 			{ type: "getAgentChatState", target: { type: "id", id: "main" } },
-			{ expect: "agentChatStateResult", timeoutMs: 8_000 },
+			{ expect: "agent_chatStateResult", timeoutMs: 8_000 },
 		);
 		if ((state.reliability as Json | undefined)?.phase === "succeeded") {
 			return state;

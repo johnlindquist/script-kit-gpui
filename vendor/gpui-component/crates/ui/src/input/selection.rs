@@ -51,8 +51,10 @@ impl InputState {
             return;
         };
 
+        let previous = self.selection_revision_state();
         self.selected_range = (range.start..range.end).into();
         self.selected_word_range = Some(self.selected_range);
+        self.record_selection_change(previous);
         cx.notify()
     }
 }

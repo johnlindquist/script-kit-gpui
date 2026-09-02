@@ -310,8 +310,6 @@ pub(super) fn get_window_bool_attribute(window: AXUIElementRef, attribute: &str)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Live probe for the public batch-attribute API (decision rule:
     /// "Public batch AX reads"). Requires Accessibility permission and a
     /// finder/system process with windows; ignored by default.

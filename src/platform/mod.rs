@@ -26,6 +26,16 @@ pub mod permiso;
 pub mod permiso_detect;
 pub mod visual_context;
 
+fn native_effect_allowed(effect: crate::runtime_policy::ExternalEffect) -> bool {
+    match crate::runtime_policy::check(effect) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "Native effect refused");
+            false
+        }
+    }
+}
+
 include!("app_window_management.rs");
 include!("visibility_focus.rs");
 include!("vibrancy_swizzle_materials.rs");

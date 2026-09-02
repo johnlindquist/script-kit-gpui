@@ -34,6 +34,12 @@ pub mod computer_use;
 // Supports gpui_component IconName, embedded SVGs, SF Symbols, app bundles
 pub mod debug_grid;
 pub mod design_contract;
+// Ordinary macOS libtests exercise catalogue data without compiling native evaluation.
+#[cfg(all(test, target_os = "macos"))]
+mod design_evaluation {
+    mod catalog;
+    pub(crate) mod fixture_ids;
+}
 pub mod designs;
 pub mod dev_marker;
 pub mod editor;
@@ -51,6 +57,8 @@ pub mod formatting;
 mod gpui_debug_bounds_tests;
 pub mod hotkeys;
 pub mod icons;
+#[cfg(test)]
+pub(crate) mod launch_filter_policy;
 pub mod list_item;
 pub mod logging;
 pub mod menu_syntax;
@@ -60,8 +68,11 @@ pub mod pasted_image;
 pub mod pasted_text;
 pub mod perf;
 pub mod platform;
+#[cfg(test)]
+mod prompt_completion;
 pub mod prompts;
 pub mod protocol;
+pub mod runtime_policy;
 pub mod scripts;
 pub mod scrolling;
 pub mod selected_text;
@@ -151,6 +162,7 @@ pub mod browser_tabs;
 pub mod builtins;
 pub mod day_page;
 pub mod favicons;
+pub mod hud_manager;
 
 // Typed handle for path-prompt action ids. Physically lives under
 // `src/app_impl/` (pulled into the binary via `include!`); the lib
@@ -417,6 +429,21 @@ pub fn get_main_window_handle() -> Option<gpui::AnyWindowHandle> {
         .and_then(|guard| *guard)
 }
 
+/// Retire only the lifetime being closed; delayed cleanup cannot clear a reopen.
+pub fn clear_main_window_handle_if_matches(handle: gpui::AnyWindowHandle) -> bool {
+    let Some(storage) = MAIN_WINDOW_HANDLE.get() else {
+        return false;
+    };
+    let Ok(mut current) = storage.lock() else {
+        return false;
+    };
+    if *current != Some(handle) {
+        return false;
+    }
+    *current = None;
+    true
+}
+
 /// Global state tracking whether the main window is visible
 /// - Used by hotkey toggle to show/hide main window
 /// - Used by Notes/AI to prevent main window from appearing when they close
@@ -592,20 +619,6 @@ mod main_menu_input_guard_tests {
             "execute_selected must not drop user activation during the focus-loss grace window"
         );
 
-        let execute_fallback_pos = selection_fallback
-            .find("pub fn execute_selected_fallback")
-            .expect("execute_selected_fallback not found");
-        let execute_fallback_end = (execute_fallback_pos + 260).min(selection_fallback.len());
-        let execute_fallback_section =
-            &selection_fallback[execute_fallback_pos..execute_fallback_end];
-        assert!(
-            !execute_fallback_section.contains("is_within_focus_grace_period")
-                && !execute_fallback_section.contains(
-                    "should_ignore_selection_event_during_main_menu_open_guard"
-                ),
-            "execute_selected_fallback must not drop fallback activation during the focus-loss grace window"
-        );
-
         let press_enter_pos = startup
             .find("InputEvent::PressEnter")
             .expect("PressEnter branch not found");
@@ -644,9 +657,6 @@ mod main_menu_input_guard_tests {
         let spine_pos = physical_enter_section
             .find("this.try_handle_spine_enter(window, cx)")
             .expect("physical Enter must preserve Spine row acceptance");
-        let fallback_pos = physical_enter_section
-            .find("this.execute_selected_fallback(cx);")
-            .expect("physical Enter must preserve fallback execution");
         let execute_pos = physical_enter_section
             .find("this.execute_selected(cx);")
             .expect("physical Enter must execute selected ScriptList rows");
@@ -659,10 +669,8 @@ mod main_menu_input_guard_tests {
                 && object_popup_pos < trigger_picker_pos
                 && trigger_picker_pos < script_list_pos
                 && script_list_pos < spine_pos
-                && spine_pos < fallback_pos
-                && fallback_pos < execute_pos
                 && execute_pos < agent_chat_pos,
-            "physical plain Enter must keep ScriptIssues/menu-syntax Accept ahead of ScriptList submit, then Spine, fallback/selected execution, and only later Agent Chat handling"
+            "physical plain Enter must keep ScriptIssues/menu-syntax Accept ahead of ScriptList submit, then Spine/canonical selected execution, and only later Agent Chat handling"
         );
         assert!(
             physical_enter_section.contains("!crate::actions::is_actions_window_open()"),

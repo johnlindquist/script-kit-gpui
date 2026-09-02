@@ -233,24 +233,31 @@ pub fn close_window_with_bounds(role: WindowRole, cx: &mut App) {
 /// # Arguments
 /// * `cx` - The GPUI App context
 pub fn notify_all_windows(cx: &mut App) {
-    // Collect handles first (release lock before calling update)
-    let handles: Vec<WindowHandle<Root>> = registry()
-        .lock()
-        .ok()
-        .map(|reg| reg.handles.values().copied().collect())
-        .unwrap_or_default();
-
-    let count = handles.len();
-
-    // Notify each window (WindowHandle is Copy so we can iterate directly)
-    for handle in handles {
-        let _ = handle.update(cx, |_root, _window, cx| {
-            cx.notify();
-        });
+    // Release both registries before touching GPUI. A window shared by the role
+    // and exact-runtime maps receives one publication, not two.
+    let mut handles = super::automation_runtime_handles::runtime_window_handles();
+    if let Ok(registry) = registry().lock() {
+        for handle in registry.handles.values() {
+            let handle: gpui::AnyWindowHandle = (*handle).into();
+            if !handles.contains(&handle) {
+                handles.push(handle);
+            }
+        }
     }
-
-    if count > 0 {
-        crate::logging::log("WINDOW_REG", &format!("Notified {} window(s)", count));
+    let revision = crate::theme::service::theme_revision();
+    for handle in handles {
+        if !super::automation_runtime_handles::should_deliver_theme(handle) {
+            continue;
+        }
+        if handle
+            .update(cx, |root, window, cx| {
+                window.refresh();
+                cx.notify(root.entity_id());
+            })
+            .is_ok()
+        {
+            super::automation_runtime_handles::record_theme_delivery(handle, revision);
+        }
     }
 }
 

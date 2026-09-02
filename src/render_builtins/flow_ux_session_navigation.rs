@@ -229,26 +229,29 @@ impl ScriptListApp {
                         .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                 }
                 self.current_view = view;
+                self.note_main_route_changed();
                 self.pending_placeholder = Some("Search flows...".to_string());
                 self.restore_flow_input_return_state(&state.input, "Search flows...", window, cx);
                 cx.notify();
             }
             FlowConversationReturnRoute::Main(state) => {
                 self.current_view = state.view.clone();
+                self.note_main_route_changed();
                 self.filter_text = state.raw_filter_text.clone();
                 self.computed_filter_text = state.computed_filter_text.clone();
                 self.pending_placeholder = state.pending_placeholder.clone();
                 self.invalidate_grouped_cache();
-                let _ = self
-                    .restore_main_menu_selection_from_snapshot(state.interaction.selection.clone());
-                self.sync_list_state_for_filter_replacement(
-                    MainListReplacementPolicy::PreserveViewport(state.interaction.viewport.clone()),
-                );
                 self.restore_flow_input_return_state(
                     &state.input,
                     crate::ROOT_LAUNCHER_PLACEHOLDER,
                     window,
                     cx,
+                );
+                self.flush_pending_main_menu_query(cx);
+                let _ = self
+                    .restore_main_menu_selection_from_snapshot(state.interaction.selection.clone());
+                self.sync_list_state_for_filter_replacement(
+                    MainListReplacementPolicy::PreserveViewport(state.interaction.viewport.clone()),
                 );
                 self.opened_from_main_menu = false;
                 self.clear_actions_popup_state();
@@ -272,6 +275,7 @@ impl ScriptListApp {
         self.conversations.flow_sessions[index].0.touch_now();
         self.flow_session_return_route = self.capture_flow_conversation_return_route(cx);
         self.current_view = AppView::FlowSessionView { session_id };
+        self.note_main_route_changed();
         // The main input is only the visible projection of the active
         // session-owned draft. Archive browsing keeps the draft hidden.
         if self.conversations.flow_sessions[index]
@@ -688,6 +692,16 @@ impl ScriptListApp {
         else {
             return;
         };
+        if crate::runtime_policy::is_owned_evaluation() {
+            self.finish_flow_turn(
+                session_id,
+                crate::flows::session::SessionState::NeedsYou,
+                FlowTurnOutcome::Stopped,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         match self.conversations.flow_sessions[index].0.transport {
             crate::flows::session::SessionTransport::CodexThread => {
                 crate::flows::codex_client::codex_app_server().interrupt(session_id);

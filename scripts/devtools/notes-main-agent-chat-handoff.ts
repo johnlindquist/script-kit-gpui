@@ -144,7 +144,7 @@ async function main() {
       const chatA = asObject(
         await driver.request(
           { type: "getAgentChatState" },
-          { expect: "agentChatStateResult", timeoutMs: 10000 },
+          { expect: "agent_chatStateResult", timeoutMs: 10000 },
         ),
       );
       const stateA = asObject(chatA.state ?? chatA);
@@ -178,7 +178,7 @@ async function main() {
         asObject(
           await driver.request(
             { type: "getAgentChatState" },
-            { expect: "agentChatStateResult", timeoutMs: 8000 },
+            { expect: "agent_chatStateResult", timeoutMs: 8000 },
           ),
         ),
       (chat) => asObject(chat.state ?? chat).messageCount === 2,
@@ -192,7 +192,7 @@ async function main() {
         asObject(
           await driver.request(
             { type: "getAgentChatState" },
-            { expect: "agentChatStateResult", timeoutMs: 8000 },
+            { expect: "agent_chatStateResult", timeoutMs: 8000 },
           ),
         ),
       (chat) => String(asObject(chat.state ?? chat).inputText ?? "") === "keep this draft",
@@ -218,7 +218,7 @@ async function main() {
     const chatB = asObject(
       await driver.request(
         { type: "getAgentChatState" },
-        { expect: "agentChatStateResult", timeoutMs: 10000 },
+        { expect: "agent_chatStateResult", timeoutMs: 10000 },
       ),
     );
     const stateB = asObject(chatB.state ?? chatB);

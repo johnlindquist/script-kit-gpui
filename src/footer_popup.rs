@@ -681,21 +681,6 @@ fn footer_dot_hex(
     }
 }
 
-static FOOTER_ACTION_CHANNEL: std::sync::LazyLock<(
-    async_channel::Sender<FooterAction>,
-    async_channel::Receiver<FooterAction>,
-)> = std::sync::LazyLock::new(|| async_channel::bounded(32));
-
-static DICTATION_FOOTER_ACTION_CHANNEL: std::sync::LazyLock<(
-    async_channel::Sender<FooterAction>,
-    async_channel::Receiver<FooterAction>,
-)> = std::sync::LazyLock::new(|| async_channel::bounded(32));
-
-static AGENT_CHAT_FOOTER_ACTION_CHANNEL: std::sync::LazyLock<(
-    async_channel::Sender<FooterAction>,
-    async_channel::Receiver<FooterAction>,
-)> = std::sync::LazyLock::new(|| async_channel::bounded(32));
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MainWindowFooterHostSnapshot {
     pub requested_surface: Option<&'static str>,
@@ -703,16 +688,10 @@ pub(crate) struct MainWindowFooterHostSnapshot {
     pub native_host_installed: bool,
 }
 
-static MAIN_WINDOW_FOOTER_HOST_STATE: std::sync::Mutex<MainWindowFooterHostSnapshot> =
-    std::sync::Mutex::new(MainWindowFooterHostSnapshot {
-        requested_surface: None,
-        installed_surface: None,
-        native_host_installed: false,
-    });
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MainWindowFooterRefreshSignature {
     config: MainWindowFooterConfig,
+    theme_revision: u64,
     content_width_bits: u64,
     dark: bool,
     material: crate::theme::VibrancyMaterial,
@@ -742,6 +721,58 @@ struct MainWindowFooterRefreshSignature {
     /// the AppKit dot layer is created inside the content rebuild, so this is
     /// folded into `footer_content_changed`.
     button_leading_dot_hexes: Vec<Option<u32>>,
+}
+
+#[cfg(target_os = "macos")]
+fn native_footer_refresh_signature(
+    config: &MainWindowFooterConfig,
+    snapshot: &crate::theme::live_edit::PublishedTheme,
+    content_width: f64,
+    gpui_overlay_owns_glyphs: bool,
+) -> MainWindowFooterRefreshSignature {
+    let theme = snapshot.theme.as_ref();
+    let chrome = crate::theme::AppChromeColors::from_theme(theme);
+    MainWindowFooterRefreshSignature {
+        config: config.clone(),
+        theme_revision: snapshot.revision,
+        content_width_bits: content_width.to_bits(),
+        dark: theme.should_use_dark_vibrancy(),
+        material: theme.get_vibrancy().material,
+        divider_rgba: chrome.divider_rgba,
+        text_primary_hex: theme.colors.text.primary,
+        background_hex: theme.colors.background.main,
+        glass_tint_opacity_bits: theme
+            .get_opacity()
+            .glass_tint_opacity
+            .unwrap_or(0.0)
+            .to_bits(),
+        accent_hex: chrome.accent_hex,
+        selection_rgba: chrome.selection_rgba,
+        hover_rgba: chrome.hover_rgba,
+        left_dot_hex: config.left_info.as_ref().and_then(|info| {
+            (!matches!(info.dot_status, FooterDotStatus::Hidden)).then(|| {
+                footer_dot_hex(info.dot_status, theme, info.prefer_accent_for_active_states)
+            })
+        }),
+        native_glass_signature: crate::platform::resolve_native_glass_style(
+            theme,
+            crate::platform::NativeGlassSurfaceRole::FloatingCapsule,
+        )
+        .signature,
+        native_visual_theme: resolve_native_footer_visual_theme(theme),
+        main_menu_theme: crate::designs::current_main_menu_theme() as u8,
+        gpui_overlay_owns_glyphs,
+        button_leading_dot_hexes: config
+            .buttons
+            .iter()
+            .map(|button| {
+                button.leading_dot.and_then(|status| {
+                    (!matches!(status, FooterDotStatus::Hidden))
+                        .then(|| footer_dot_hex(status, theme, true))
+                })
+            })
+            .collect(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -796,32 +827,43 @@ fn native_footer_visual_theme_from_parts(
     }
 }
 
-static MAIN_WINDOW_FOOTER_REFRESH_SIGNATURE: std::sync::Mutex<
-    Option<MainWindowFooterRefreshSignature>,
-> = std::sync::Mutex::new(None);
-
-static MAIN_WINDOW_FOOTER_LAST_CONFIG: std::sync::Mutex<Option<MainWindowFooterConfig>> =
-    std::sync::Mutex::new(None);
+include!("footer_popup_ownership.rs");
 
 include!("footer_popup_fidelity.rs");
+include!("footer_popup_overlay.rs");
+include!("footer_popup_adapters.rs");
 
 struct GpuiFooterOverlay {
     config: MainWindowFooterConfig,
+    binding: FooterBinding,
     overlay_width_px: f32,
     last_reported_row_palette: Option<crate::theme::MainMenuRowStatePalette>,
+    close_subscription: Option<gpui::Subscription>,
+    painted_binding: Option<FooterBinding>,
+    painted_frame_generation: u64,
 }
 
 impl GpuiFooterOverlay {
-    fn new(config: MainWindowFooterConfig, overlay_width_px: f32) -> Self {
+    fn new(config: MainWindowFooterConfig, binding: FooterBinding, overlay_width_px: f32) -> Self {
         Self {
             config,
+            binding,
             overlay_width_px,
             last_reported_row_palette: None,
+            close_subscription: None,
+            painted_binding: None,
+            painted_frame_generation: 0,
         }
     }
 
-    fn set_config(&mut self, config: MainWindowFooterConfig, overlay_width_px: f32) {
+    fn set_config(
+        &mut self,
+        config: MainWindowFooterConfig,
+        binding: FooterBinding,
+        overlay_width_px: f32,
+    ) {
         self.config = config;
+        self.binding = binding;
         self.overlay_width_px = overlay_width_px;
     }
 
@@ -865,6 +907,7 @@ impl GpuiFooterOverlay {
             .overflow_hidden();
 
         if let Some(action) = info.action {
+            let binding = self.binding.clone();
             // Clickable left-info markers (footer tip, Agent Chat profile)
             // are real footer buttons: same hover pill, radius, and pressed
             // fill as the trailing action buttons, with label/keycap/glyph
@@ -890,11 +933,10 @@ impl GpuiFooterOverlay {
                     MouseButton::Left,
                     move |_event: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
-                        if matches!(action, FooterAction::Tips) {
-                            send_footer_action_to_channel(action, false);
-                        } else {
-                            dispatch_agent_chat_footer_action(action);
+                        if record_footer_held_action(&binding, Some(action)) {
+                            _window.refresh();
                         }
+                        dispatch_bound_footer_action(&binding, action);
                     },
                 );
         } else {
@@ -1110,7 +1152,10 @@ impl GpuiFooterOverlay {
                     MouseButton::Left,
                     cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
-                        send_footer_action_to_channel(action, false);
+                        if record_footer_held_action(&_this.binding, Some(action)) {
+                            cx.notify();
+                        }
+                        dispatch_bound_footer_action(&_this.binding, action);
                     }),
                 );
         } else {
@@ -1123,12 +1168,25 @@ impl GpuiFooterOverlay {
 
 impl Render for GpuiFooterOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(parent) = prepare_footer_overlay_render(self, window) else {
+            window.defer(cx, |window, _| window.remove_window());
+            return div().into_any_element();
+        };
+        let parent_id = self.binding.window_id.clone();
+        let painted_binding = self.binding.clone();
+        let overlay = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = overlay.update(cx, |overlay, _| {
+                overlay.painted_binding = Some(painted_binding);
+                overlay.painted_frame_generation = window.rendered_frame_generation();
+            });
+        });
         if window.fidelity_capture_active() {
             // App effects flush after this draw completes, so the deferred
             // callback observes the completed frame rendered below. This is
             // also deterministic on GPUI's test platform, whose platform
             // frame callback is intentionally inert.
-            window.defer(cx, |window, _cx| {
+            window.defer(cx, move |window, _cx| {
                 if !window.fidelity_capture_active() {
                     return;
                 }
@@ -1136,12 +1194,12 @@ impl Render for GpuiFooterOverlay {
                     window,
                     GPUI_FOOTER_OVERLAY_FIDELITY_TARGET_ID,
                     "footerOverlay",
-                    Some("main".to_string()),
+                    Some(parent_id),
                 );
-                store_main_footer_overlay_fidelity_snapshot(snapshot);
+                store_footer_overlay_fidelity_snapshot(parent, snapshot);
             });
         } else {
-            clear_main_footer_overlay_fidelity_snapshot();
+            clear_footer_overlay_fidelity_snapshot(parent);
         }
 
         let theme = crate::theme::get_cached_theme();
@@ -1184,6 +1242,23 @@ impl Render for GpuiFooterOverlay {
         // groups can never overlap regardless of window width.
         div()
             .id(GPUI_FOOTER_OVERLAY_FIDELITY_TARGET_ID)
+            .debug_selector(|| GPUI_FOOTER_OVERLAY_FIDELITY_TARGET_ID.to_string())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|overlay, _, _, cx| {
+                    if record_footer_held_action(&overlay.binding, None) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|overlay, _, _, cx| {
+                    if record_footer_held_action(&overlay.binding, None) {
+                        cx.notify();
+                    }
+                }),
+            )
             .w_full()
             .h_full()
             .px(px(crate::window_resize::main_layout::HINT_STRIP_PADDING_X))
@@ -1226,6 +1301,7 @@ impl Render for GpuiFooterOverlay {
                             .map(|button| self.render_button(button, &theme, cx)),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -1249,11 +1325,13 @@ fn main_footer_gpui_overlay_active() -> bool {
 }
 
 pub(crate) fn main_footer_gpui_overlay_visible() -> bool {
-    main_footer_gpui_overlay_active()
-        && MAIN_WINDOW_GPUI_FOOTER_OVERLAY
-            .get()
-            .and_then(|storage| storage.lock().ok())
-            .is_some_and(|slot| slot.is_some())
+    main_footer_handle().is_some_and(|handle| {
+        FOOTER_HOSTS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&handle.window_id())
+            .is_some_and(|host| host.overlay.is_some())
+    })
 }
 
 fn gpui_footer_overlay_bounds(parent_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -1287,15 +1365,9 @@ fn gpui_footer_overlay_window_options(
 }
 
 fn clear_main_window_footer_refresh_signature() {
-    *MAIN_WINDOW_FOOTER_REFRESH_SIGNATURE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = None;
-}
-
-fn set_main_window_footer_last_config(config: Option<&MainWindowFooterConfig>) {
-    *MAIN_WINDOW_FOOTER_LAST_CONFIG
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = config.cloned();
+    if let Some(handle) = main_footer_handle() {
+        clear_footer_refresh_signature(handle);
+    }
 }
 
 /// Re-apply the last resolved footer config after native geometry, backing
@@ -1304,10 +1376,8 @@ fn set_main_window_footer_last_config(config: Option<&MainWindowFooterConfig>) {
 /// owned by the main NSWindow and removes it when fallback mode is active.
 #[cfg(target_os = "macos")]
 pub(crate) unsafe fn refresh_main_window_footer_from_last_config(ns_window: id) {
-    let config = MAIN_WINDOW_FOOTER_LAST_CONFIG
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
+    let config = native_footer_binding(ns_window)
+        .and_then(|(handle, _, _)| footer_config_for_window(handle));
     sync_main_window_glass_scroll_bands(ns_window);
     if let Some(config) = config.as_ref() {
         let _ = refresh_main_footer_host(ns_window, config);
@@ -1317,15 +1387,8 @@ pub(crate) unsafe fn refresh_main_window_footer_from_last_config(ns_window: id) 
 }
 
 fn close_gpui_footer_overlay(cx: &mut App) {
-    clear_main_footer_overlay_fidelity_snapshot();
-    let storage = MAIN_WINDOW_GPUI_FOOTER_OVERLAY.get_or_init(|| Mutex::new(None));
-    let slot = storage.lock().ok().and_then(|mut guard| guard.take());
-    if let Some(slot) = slot {
-        let _ = slot.handle.update(cx, |_overlay, window, _cx| {
-            window.remove_window();
-        });
-        crate::windows::remove_automation_window(GPUI_FOOTER_OVERLAY_AUTOMATION_ID);
-        crate::windows::remove_runtime_window_handle(GPUI_FOOTER_OVERLAY_AUTOMATION_ID);
+    if let Some(handle) = main_footer_handle() {
+        close_footer_overlay_for_parent(handle, cx);
     }
 }
 
@@ -1357,96 +1420,20 @@ fn sync_gpui_footer_overlay(
     parent_window_handle: AnyWindowHandle,
     parent_bounds: Bounds<Pixels>,
     display_id: Option<DisplayId>,
-    config: MainWindowFooterConfig,
+    _config: MainWindowFooterConfig,
 ) {
-    // Re-check ownership at execution time. Appearance/vibrancy changes can
-    // land between the caller scheduling this work and GPUI running it; a
-    // stale fallback request must never recreate a second footer window after
-    // native one-window glass mode became active.
     if !main_footer_gpui_overlay_active() {
-        close_gpui_footer_overlay(cx);
+        close_footer_overlay_for_parent(parent_window_handle, cx);
         return;
     }
-
-    let bounds = gpui_footer_overlay_bounds(parent_bounds);
-    clear_main_footer_overlay_fidelity_snapshot();
-    let overlay_width_px: f32 = bounds.size.width.into();
-    let storage = MAIN_WINDOW_GPUI_FOOTER_OVERLAY.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = storage.lock() {
-        if let Some(slot) = guard.as_ref() {
-            if slot.parent_window_handle == parent_window_handle {
-                let update_result = slot.handle.update(cx, |overlay, window, cx| {
-                    overlay.set_config(config.clone(), overlay_width_px);
-                    set_gpui_footer_overlay_window_bounds(window, bounds, cx);
-                    cx.notify();
-                });
-                if update_result.is_ok() {
-                    crate::windows::set_automation_bounds(
-                        GPUI_FOOTER_OVERLAY_AUTOMATION_ID,
-                        Some(automation_bounds_from_gpui(bounds)),
-                    );
-                    let overlay_handle = slot.handle;
-                    park_overlay_during_glass_morph(overlay_handle, cx);
-                    return;
-                }
-                *guard = None;
-            } else {
-                let _ = slot.handle.update(cx, |_overlay, window, _cx| {
-                    window.remove_window();
-                });
-                *guard = None;
-            }
-        }
-    }
-
-    let options = gpui_footer_overlay_window_options(bounds, display_id);
-    let Ok(handle) = cx.open_window(options, |_window, cx| {
-        cx.new(|_| GpuiFooterOverlay::new(config.clone(), overlay_width_px))
-    }) else {
-        tracing::warn!(
-            target: "script_kit::footer_popup",
-            event = "gpui_footer_overlay_open_failed",
-            "Failed to open GPUI footer overlay"
-        );
-        return;
-    };
-
-    if configure_gpui_footer_overlay_window(&handle, cx, parent_window_handle).is_err() {
-        let _ = handle.update(cx, |_overlay, window, _cx| {
-            window.remove_window();
-        });
-        return;
-    }
-
-    // Register the overlay's live GPUI handle so simulated pointer events
-    // (hover proofs, click probes) dispatch into this window's own scene
-    // instead of falling back to parent-translated main-window dispatch,
-    // which can never reach elements painted by this renderer.
-    crate::windows::upsert_runtime_window_handle(GPUI_FOOTER_OVERLAY_AUTOMATION_ID, handle.into());
-
-    if let Ok(mut guard) = storage.lock() {
-        *guard = Some(GpuiFooterOverlaySlot {
-            handle,
-            parent_window_handle,
-        });
-    }
-
-    park_overlay_during_glass_morph(handle, cx);
-
-    if let Err(error) = crate::windows::register_attached_popup(
-        GPUI_FOOTER_OVERLAY_AUTOMATION_ID.to_string(),
-        crate::protocol::AutomationWindowKind::PromptPopup,
-        Some(GPUI_FOOTER_OVERLAY_WINDOW_TITLE.to_string()),
-        Some("footerOverlay".to_string()),
-        Some(automation_bounds_from_gpui(bounds)),
-        Some("main"),
+    if let Err(error) = open_or_sync_footer_overlay(
+        parent_window_handle,
+        parent_bounds,
+        display_id,
+        crate::runtime_policy::WindowHostPolicy::Interactive,
+        cx,
     ) {
-        tracing::warn!(
-            target: "script_kit::footer_popup",
-            event = "gpui_footer_overlay_automation_register_failed",
-            %error,
-            "GPUI footer overlay opened but automation registration failed"
-        );
+        tracing::warn!(%error, "Failed to synchronize footer overlay");
     }
 }
 
@@ -1455,19 +1442,25 @@ fn update_main_window_footer_host_state(
     installed_surface: Option<&'static str>,
     native_host_installed: bool,
 ) {
-    *MAIN_WINDOW_FOOTER_HOST_STATE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = MainWindowFooterHostSnapshot {
-        requested_surface,
-        installed_surface,
-        native_host_installed,
-    };
+    if let Some(handle) = main_footer_handle() {
+        if let Some(host) = FOOTER_HOSTS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&handle.window_id())
+        {
+            host.snapshot = MainWindowFooterHostSnapshot {
+                requested_surface,
+                installed_surface,
+                native_host_installed,
+            };
+        }
+    }
 }
 
 pub(crate) fn main_window_footer_host_snapshot() -> MainWindowFooterHostSnapshot {
-    *MAIN_WINDOW_FOOTER_HOST_STATE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
+    main_footer_handle()
+        .map(footer_host_snapshot)
+        .unwrap_or_default()
 }
 
 pub(crate) fn active_main_window_footer_surface() -> Option<&'static str> {
@@ -1485,44 +1478,17 @@ pub(crate) unsafe fn native_footer_host_attached(ns_window: cocoa::base::id) -> 
     ) != cocoa::base::nil
 }
 
-pub(crate) fn footer_action_channel() -> &'static (
-    async_channel::Sender<FooterAction>,
-    async_channel::Receiver<FooterAction>,
-) {
-    &FOOTER_ACTION_CHANNEL
-}
-
-pub(crate) fn dictation_footer_action_channel() -> &'static (
-    async_channel::Sender<FooterAction>,
-    async_channel::Receiver<FooterAction>,
-) {
-    &DICTATION_FOOTER_ACTION_CHANNEL
-}
-
-pub(crate) fn agent_chat_footer_action_channel() -> &'static (
-    async_channel::Sender<FooterAction>,
-    async_channel::Receiver<FooterAction>,
-) {
-    &AGENT_CHAT_FOOTER_ACTION_CHANNEL
-}
-
-pub(crate) fn dispatch_agent_chat_footer_action(action: FooterAction) {
-    if let Err(error) = agent_chat_footer_action_channel().0.try_send(action) {
-        tracing::warn!(
-            target: "script_kit::footer_popup",
-            event = "agent_chat_footer_left_info_action_send_failed",
-            action = footer_action_key(action),
-            %error,
-            "Failed to enqueue Agent Chat footer left-info action"
-        );
-    }
-}
-
 pub(crate) fn sync_main_footer_popup(
     window: &mut Window,
     config: Option<&MainWindowFooterConfig>,
     cx: &mut App,
 ) {
+    sync_footer_owner(window, config);
+    notify_changed_footer_overlay(window.window_handle(), cx);
+    if window.is_owned_hidden() {
+        // The evaluator mounts the same overlay factory explicitly; no native material claims.
+        return;
+    }
     // Logical visibility flips before the native exit fade begins so rapid
     // hotkeys can supersede it. A render in that interval resolves `None`;
     // treating that as ordinary footer removal makes GPUI draw its fallback
@@ -1541,7 +1507,6 @@ pub(crate) fn sync_main_footer_popup(
     // The in-window AppKit host rides the main NSWindow's frame morph. The
     // separate GPUI overlay NSWindow does not, so glass mode keeps only the
     // native host active and always closes the overlay.
-    set_main_window_footer_last_config(config);
     let requested_surface = config.map(|cfg| cfg.surface);
     update_main_window_footer_host_state(requested_surface, None, false);
     let parent_window_handle = window.window_handle();
@@ -1619,31 +1584,27 @@ fn defer_gpui_footer_overlay_sync(
     });
 }
 
-pub(crate) fn sync_window_footer_popup(window: &mut Window, config: &MainWindowFooterConfig) {
+pub(crate) fn sync_window_footer_popup(
+    window: &mut Window,
+    config: &MainWindowFooterConfig,
+    _cx: &mut App,
+) {
+    sync_footer_owner(window, Some(config));
+    notify_changed_footer_overlay(window.window_handle(), _cx);
+    if window.is_owned_hidden() {
+        return;
+    }
     #[cfg(target_os = "macos")]
-    {
-        let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) else {
-            tracing::warn!(
-                target: "script_kit::footer_popup",
-                event = "native_footer_missing_ns_window",
-                surface = config.surface,
-                "Unable to resolve NSWindow for reusable native footer host"
-            );
-            return;
-        };
-
-        // SAFETY: `ns_window` comes from the live GPUI window currently being
-        // rendered/observed on the AppKit thread.
+    if let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) {
+        // SAFETY: this is the current live GPUI window on the AppKit thread.
         unsafe {
-            let installed = ensure_reusable_window_footer_host(ns_window);
-            if installed {
-                let _ = refresh_window_footer_host(ns_window, config);
+            if ensure_reusable_window_footer_host(ns_window)
+                && refresh_window_footer_host(ns_window, config)
+            {
+                mark_footer_installed(window.window_handle(), true);
             }
         }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, config);
 }
 
 /// Remove the reusable native footer host associated with THIS window (not the
@@ -1658,26 +1619,22 @@ pub(crate) fn sync_window_footer_popup(window: &mut Window, config: &MainWindowF
 /// It is a no-op when no host is installed on this window (`remove_reusable_window_footer_host`
 /// finds no matching subview and returns), so callers may invoke it defensively
 /// on any non-native owner.
-pub(crate) fn clear_window_footer_popup(window: &mut Window) {
+pub(crate) fn clear_window_footer_popup(window: &mut Window, cx: &mut App) {
+    close_footer_overlay_for_parent(window.window_handle(), cx);
+    sync_footer_owner(window, None);
+    if window.is_owned_hidden() {
+        return;
+    }
     #[cfg(target_os = "macos")]
-    {
-        let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) else {
-            return;
-        };
-
-        // SAFETY: `ns_window` comes from the live GPUI window currently being
-        // rendered/observed on the AppKit main thread.
+    if let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) {
+        // SAFETY: this is the current live GPUI window on the AppKit thread.
         unsafe {
             remove_reusable_window_footer_host(ns_window);
         }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = window;
 }
 
 pub(crate) fn close_main_footer_popup(cx: &mut App) {
-    set_main_window_footer_last_config(None);
     clear_main_window_footer_refresh_signature();
     update_main_window_footer_host_state(None, None, false);
     close_gpui_footer_overlay(cx);
@@ -1687,6 +1644,10 @@ pub(crate) fn close_main_footer_popup(cx: &mut App) {
     };
 
     let _ = window_handle.update(cx, move |_, window, _cx| {
+        sync_footer_owner(window, None);
+        if window.is_owned_hidden() {
+            return;
+        }
         #[cfg(target_os = "macos")]
         {
             let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) else {
@@ -1849,61 +1810,6 @@ pub(crate) fn glass_scroll_bands_active() -> bool {
 pub(crate) const FLOAT_FOOTER_CONTAINER_GAP_PX: f32 = 8.0;
 
 include!("footer_popup_glass_geometry.rs");
-
-/// One-shot introspection: log NSGlassEffectView's declared properties so we
-/// can discover any rim/style knobs Apple exposes (macOS 26 API surface is
-/// underdocumented). Debug aid; logs once per process.
-#[cfg(target_os = "macos")]
-unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Class) {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        #[link(name = "objc")]
-        extern "C" {
-            fn class_copyPropertyList(
-                cls: *const objc::runtime::Class,
-                out_count: *mut u32,
-            ) -> *mut *const std::ffi::c_void;
-            fn property_getName(property: *const std::ffi::c_void) -> *const std::os::raw::c_char;
-            fn property_getAttributes(
-                property: *const std::ffi::c_void,
-            ) -> *const std::os::raw::c_char;
-            fn free(ptr: *mut std::ffi::c_void);
-        }
-        let mut count: u32 = 0;
-        let list = class_copyPropertyList(glass_class as *const _, &mut count);
-        if list.is_null() {
-            return;
-        }
-        let mut names = Vec::new();
-        for index in 0..count as usize {
-            let property = *list.add(index);
-            let name = property_getName(property);
-            let attrs = property_getAttributes(property);
-            if !name.is_null() {
-                let attr_text = if attrs.is_null() {
-                    String::new()
-                } else {
-                    std::ffi::CStr::from_ptr(attrs)
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                names.push(format!(
-                    "{}[{}]",
-                    std::ffi::CStr::from_ptr(name).to_string_lossy(),
-                    attr_text,
-                ));
-            }
-        }
-        free(list as *mut std::ffi::c_void);
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "glass_effect_view_properties",
-            properties = %names.join(","),
-            "NSGlassEffectView declared properties"
-        );
-    });
-}
 
 #[cfg(target_os = "macos")]
 unsafe fn install_footer_host_view(root: id, width: f64, glass_mode: bool) -> bool {
@@ -2208,6 +2114,59 @@ unsafe fn refresh_footer_host_impl(
     if footer_view == nil {
         return false;
     }
+    let Some((owner, _, _)) = native_footer_binding(ns_window) else {
+        return false;
+    };
+    // Resolve required peers before changing ownership or publishing a cache hit.
+    // A partially removed host must be retried, never remembered as refreshed.
+    let divider_view = find_subview_by_identifier(footer_view, FOOTER_DIVIDER_ID);
+    let hints_view = find_subview_by_identifier(footer_view, FOOTER_HINTS_ID);
+    let left_info_view = find_subview_by_identifier(footer_view, FOOTER_LEFT_INFO_ID);
+    if divider_view == nil || hints_view == nil || left_info_view == nil {
+        clear_footer_refresh_signature(owner);
+        return false;
+    }
+    let theme_snapshot = crate::theme::get_theme_snapshot();
+    {
+        let mut hosts = FOOTER_HOSTS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(host) = hosts.get_mut(&owner.window_id()) else {
+            return false;
+        };
+        let theme_revision = theme_snapshot.revision;
+        let replaced = host.native_view != footer_view as usize;
+        let theme_changed = host
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.theme_revision != theme_revision);
+        if replaced || theme_changed {
+            host.presentation_revision += 1;
+            host.native_token = next_footer_lifetime();
+            if replaced {
+                let previous_generation = host.host_generation;
+                host.host_generation = next_footer_lifetime();
+                host.refresh_signature = None;
+                for (parent, generation, _) in FLOAT_FOOTER_WINDOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .iter_mut()
+                {
+                    if *parent == ns_window as usize && *generation == previous_generation {
+                        *generation = host.host_generation;
+                    }
+                }
+            }
+            host.native_view = footer_view as usize;
+            if let Some(binding) = host.binding.as_mut() {
+                binding.host_generation = host.host_generation;
+                binding.theme_revision = theme_revision;
+                binding.presentation_revision = host.presentation_revision;
+            }
+        }
+    }
+    let Some((refresh_owner, refresh_binding, refresh_token)) = native_footer_binding(ns_window)
+    else {
+        return false;
+    };
     let backing_scale: f64 = msg_send![ns_window, backingScaleFactor];
     sync_native_view_tree_contents_scale(footer_view, backing_scale);
     let footer_is_glass = objc::runtime::Class::get("NSGlassEffectView")
@@ -2217,8 +2176,8 @@ unsafe fn refresh_footer_host_impl(
         })
         .unwrap_or(false);
 
-    let theme = crate::theme::get_cached_theme();
-    let chrome = crate::theme::AppChromeColors::from_theme(&theme);
+    let theme = theme_snapshot.theme.as_ref();
+    let chrome = crate::theme::AppChromeColors::from_theme(theme);
     let is_dark = theme.should_use_dark_vibrancy();
     let material = match theme.get_vibrancy().material {
         crate::theme::VibrancyMaterial::Hud => {
@@ -2236,70 +2195,36 @@ unsafe fn refresh_footer_host_impl(
         }
     };
     let content_bounds: NSRect = msg_send![content_view, bounds];
-    let left_dot_hex = config.left_info.as_ref().and_then(|info| {
-        if matches!(info.dot_status, FooterDotStatus::Hidden) {
-            None
-        } else {
-            Some(footer_dot_hex(
-                info.dot_status,
-                &theme,
-                info.prefer_accent_for_active_states,
-            ))
-        }
-    });
-    let button_leading_dot_hexes = config
-        .buttons
-        .iter()
-        .map(|button| {
-            button.leading_dot.and_then(|status| {
-                if matches!(status, FooterDotStatus::Hidden) {
-                    None
-                } else {
-                    Some(footer_dot_hex(status, &theme, true))
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let native_visual_theme = resolve_native_footer_visual_theme(&theme);
-    let signature = MainWindowFooterRefreshSignature {
-        config: config.clone(),
-        content_width_bits: content_bounds.size.width.to_bits(),
-        dark: is_dark,
-        material: theme.get_vibrancy().material,
-        divider_rgba: chrome.divider_rgba,
-        text_primary_hex: theme.colors.text.primary,
-        background_hex: theme.colors.background.main,
-        glass_tint_opacity_bits: theme
-            .get_opacity()
-            .glass_tint_opacity
-            .unwrap_or(0.0)
-            .to_bits(),
-        accent_hex: chrome.accent_hex,
-        selection_rgba: chrome.selection_rgba,
-        hover_rgba: chrome.hover_rgba,
-        left_dot_hex,
-        #[cfg(target_os = "macos")]
-        native_glass_signature: crate::platform::resolve_native_glass_style(
-            &theme,
-            crate::platform::NativeGlassSurfaceRole::FloatingCapsule,
-        )
-        .signature,
-        native_visual_theme,
-        main_menu_theme: crate::designs::current_main_menu_theme() as u8,
+    let signature = native_footer_refresh_signature(
+        config,
+        &theme_snapshot,
+        content_bounds.size.width,
         gpui_overlay_owns_glyphs,
-        button_leading_dot_hexes,
-    };
+    );
+    let native_visual_theme = signature.native_visual_theme;
     let (
         footer_geometry_changed,
         footer_content_changed,
         footer_visuals_changed,
         effect_theme_changed,
     ) = {
-        let mut guard = MAIN_WINDOW_FOOTER_REFRESH_SIGNATURE
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if guard.as_ref() == Some(&signature) {
-            update_main_window_footer_host_state(Some(config.surface), Some(config.surface), true);
+        if !footer_binding_is_live(&refresh_binding, refresh_owner)
+            || refresh_binding.theme_revision != signature.theme_revision
+            || signature.theme_revision != crate::theme::get_theme_snapshot().revision
+        {
+            return false;
+        }
+        let hosts = FOOTER_HOSTS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(host) = hosts.get(&refresh_owner.window_id()) else {
+            return false;
+        };
+        if host.binding.as_ref() != Some(&refresh_binding)
+            || host.config.as_ref() != Some(&signature.config)
+        {
+            return false;
+        }
+        let guard = host.refresh_signature.as_ref();
+        if guard == Some(&signature) {
             return true;
         }
         let footer_geometry_changed = guard
@@ -2318,6 +2243,7 @@ unsafe fn refresh_footer_host_impl(
                     // lighter visuals-only recolor path doesn't reach every
                     // AppKit subview reliably).
                     || previous.main_menu_theme != signature.main_menu_theme
+                    || previous.theme_revision != signature.theme_revision
             })
             .unwrap_or(true);
         let footer_visuals_changed = guard
@@ -2344,7 +2270,6 @@ unsafe fn refresh_footer_host_impl(
                     || previous.native_glass_signature != signature.native_glass_signature
             })
             .unwrap_or(true);
-        *guard = Some(signature);
         (
             footer_geometry_changed,
             footer_content_changed,
@@ -2401,7 +2326,6 @@ unsafe fn refresh_footer_host_impl(
         }
     }
 
-    let divider_view = find_subview_by_identifier(footer_view, FOOTER_DIVIDER_ID);
     if divider_view != nil {
         // The GPUI overlay supplies the visible footer controls above this
         // native material host. Hide only the hard divider in that mode so
@@ -2424,8 +2348,7 @@ unsafe fn refresh_footer_host_impl(
         }
         let divider_layer: id = msg_send![divider_view, layer];
         if divider_layer != nil {
-            let divider_color =
-                ns_color_from_rgba(footer_divider_rgba(&theme, chrome.divider_rgba));
+            let divider_color = ns_color_from_rgba(footer_divider_rgba(theme, chrome.divider_rgba));
             if divider_color != nil {
                 let cg_color: id = msg_send![divider_color, CGColor];
                 if cg_color != nil {
@@ -2438,7 +2361,6 @@ unsafe fn refresh_footer_host_impl(
     let text_color =
         ns_color_from_rgba(native_visual_theme.row_palette.rest.primary_foreground_rgba);
 
-    let hints_view = find_subview_by_identifier(footer_view, FOOTER_HINTS_ID);
     let default_hints_frame = footer_hints_frame(content_bounds.size.width);
     let mut native_footer_lanes = resolve_native_footer_lanes(
         default_hints_frame.size.width,
@@ -2452,25 +2374,24 @@ unsafe fn refresh_footer_host_impl(
                 // Sandwich layering: AppKit keeps only the material/divider
                 // while GPUI owns the footer glyphs in a child overlay window
                 // above this footer host.
-                native_footer_lanes = layout_footer_hints(hints_view, text_color, &[], &theme);
+                native_footer_lanes = layout_footer_hints(hints_view, text_color, &[], theme);
             } else {
                 native_footer_lanes =
-                    layout_footer_hints(hints_view, text_color, &config.buttons, &theme);
+                    layout_footer_hints(hints_view, text_color, &config.buttons, theme);
             }
         } else if footer_visuals_changed {
-            recolor_footer_hint_subviews_with_visual_theme(hints_view, &theme, native_visual_theme);
+            recolor_footer_hint_subviews_with_visual_theme(hints_view, theme, native_visual_theme);
             native_footer_lanes = measure_native_footer_lanes(hints_view, &config.buttons);
         } else {
             native_footer_lanes = measure_native_footer_lanes(hints_view, &config.buttons);
         }
         if footer_content_changed || footer_visuals_changed || effect_theme_changed {
-            restyle_footer_glass_capsules(hints_view, &theme);
+            restyle_footer_glass_capsules(hints_view, theme);
             refresh_footer_button_visual_states_with_theme(hints_view, native_visual_theme);
         }
     }
 
     // Left info (streaming dot + model name)
-    let left_info_view = find_subview_by_identifier(footer_view, FOOTER_LEFT_INFO_ID);
     if left_info_view != nil {
         if footer_content_changed {
             let _: () = msg_send![
@@ -2487,7 +2408,7 @@ unsafe fn refresh_footer_host_impl(
             refresh_footer_button_visual_states_with_theme(left_info_view, native_visual_theme);
         }
         if footer_content_changed || footer_visuals_changed || effect_theme_changed {
-            restyle_footer_glass_capsules(left_info_view, &theme);
+            restyle_footer_glass_capsules(left_info_view, theme);
         }
     }
     // Content nodes can be created by the layout paths above. Apply the
@@ -2517,8 +2438,8 @@ unsafe fn refresh_footer_host_impl(
         effect_theme_changed,
         "Refreshed native footer host"
     );
-
-    true
+    bind_native_footer_buttons(footer_view, refresh_token);
+    commit_footer_refresh(refresh_owner, &refresh_binding, signature)
 }
 
 #[cfg(target_os = "macos")]
@@ -3979,29 +3900,26 @@ unsafe fn make_footer_hint_item(
 include!("footer_popup_tests.rs");
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FooterWindowKind {
-    Main,
-    Dictation,
-    AgentChat,
-}
-
-#[cfg(target_os = "macos")]
 fn send_footer_action_from_sender(sender: id, action: FooterAction) {
-    // SAFETY: `sender` is a live NSButton passed by AppKit's target/action dispatch.
-    let title = unsafe { footer_sender_window_title(sender) };
-    let window_kind = if let Some(ref t) = title {
-        if t.contains("Script Kit Dictation") {
-            FooterWindowKind::Dictation
-        } else if t.contains("Script Kit Agent Chat") {
-            FooterWindowKind::AgentChat
-        } else {
-            FooterWindowKind::Main
+    // SAFETY: AppKit supplies a live instance of our button subclass.
+    let token = unsafe {
+        let Some(button) = sender.as_ref() else {
+            return;
+        };
+        if *button.get_ivar::<cocoa::base::BOOL>("_enabled") != YES {
+            return;
         }
-    } else {
-        FooterWindowKind::Main
+        *button.get_ivar::<u64>("_footerBindingToken")
     };
-    send_footer_action_to_channel_v2(action, window_kind);
+    let binding = FOOTER_HOSTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .find(|host| token != 0 && host.native_token == token)
+        .and_then(|host| host.binding.clone());
+    if let Some(binding) = binding {
+        dispatch_bound_footer_action(&binding, action);
+    }
 }
 
 include!("footer_popup_native_dispatch.rs");
@@ -4084,6 +4002,7 @@ fn footer_button_class() -> *const objc::runtime::Class {
             decl.add_ivar::<cocoa::base::BOOL>("_enabled");
             decl.add_ivar::<usize>("_stateView");
             decl.add_ivar::<usize>("_visualRoot");
+            decl.add_ivar::<u64>("_footerBindingToken");
             decl.add_method(
                 sel!(acceptsFirstMouse:),
                 footer_button_accepts_first_mouse

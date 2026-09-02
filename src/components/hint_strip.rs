@@ -861,7 +861,7 @@ impl RenderOnce for HintStrip {
             .items_center()
             .gap(px(HINT_STRIP_CONTENT_GAP));
 
-        for (index, (hint, action)) in self.hints.iter().zip(self.actions.into_iter()).enumerate() {
+        for (index, (hint, action)) in self.hints.iter().zip(self.actions).enumerate() {
             let element = parse_hint(hint.as_ref());
             let hint_content = render_hint_element(element, text_rgba);
 

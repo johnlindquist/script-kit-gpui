@@ -260,6 +260,7 @@ gpui_util = { path = "vendor/gpui_util" }
 
 [features]
 default = ["ocr"]
+owned-ui-evaluation = ["gpui_platform/test-support"]
 # On-device GGUF ghost-text engine via llama.cpp (Metal). OFF by default until
 # the ggml/whisper double-link is proven clean on macOS CI; enable with
 # `--features local-llm`. See src/ai/local_llm/.
@@ -281,6 +282,7 @@ perf = []
 [dev-dependencies]
 tree-sitter-highlight = "0.25.4"
 temp-env = "0.3.6"
+jsonschema = { version = "0.29.1", default-features = false }
 
 [profile.dev]
 debug = 0

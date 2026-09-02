@@ -13,6 +13,7 @@ use gpui::{
 use gpui::{Half, TextAlign};
 use ropey::{Rope, RopeSlice};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::ops::Range;
 use std::rc::Rc;
 use sum_tree::Bias;
@@ -280,6 +281,9 @@ pub struct InputState {
     pub(super) focus_handle: FocusHandle,
     pub(super) mode: InputMode,
     pub(super) text: Rope,
+    revision: u64,
+    /// Compound setters defer transient caret moves until their final selection.
+    defer_selection_revision: bool,
     pub(super) text_wrapper: TextWrapper,
     pub(super) history: History<Change>,
     pub(super) blink_cursor: Entity<BlinkCursor>,
@@ -384,8 +388,8 @@ pub struct InputState {
 
 impl EventEmitter<InputEvent> for InputState {}
 
-/// Flatten line breaks so a single-line input can hold pasted multi-line text
-/// without corrupting it.
+/// Flatten line breaks at the single-line input mutation boundary without
+/// corrupting word boundaries.
 ///
 /// A single-line input structurally cannot store a newline, but *deleting* the
 /// newline welds the surrounding words together: pasting `"Fix the bug\nin
@@ -397,7 +401,11 @@ impl EventEmitter<InputEvent> for InputState {}
 /// Collapsing each run of line breaks to one space keeps every word and every
 /// word boundary. Leading and trailing breaks contribute nothing, so a line
 /// copied from a terminal does not gain stray padding.
-pub(super) fn flatten_line_breaks_for_single_line(text: &str) -> String {
+pub(super) fn flatten_line_breaks_for_single_line(text: &str) -> Cow<'_, str> {
+    if !text.contains(['\n', '\r']) {
+        return Cow::Borrowed(text);
+    }
+
     let mut out = String::with_capacity(text.len());
     let mut pending_break = false;
     for ch in text.chars() {
@@ -413,10 +421,84 @@ pub(super) fn flatten_line_breaks_for_single_line(text: &str) -> String {
         }
         out.push(ch);
     }
-    out
+    Cow::Owned(out)
+}
+
+/// Map an IME selection in the original text to bytes in its flattened form.
+fn single_line_offset_from_utf16(text: &str, offset: usize) -> usize {
+    let mut source_utf16 = 0;
+    let mut source_bytes = 0;
+    let mut flattened_bytes = 0;
+    let mut pending_break = false;
+    for ch in text.chars() {
+        if source_utf16 + ch.len_utf16() > offset {
+            break;
+        }
+        source_utf16 += ch.len_utf16();
+        source_bytes += ch.len_utf8();
+        if ch == '\n' || ch == '\r' {
+            pending_break = flattened_bytes > 0;
+        } else {
+            flattened_bytes += usize::from(pending_break) + ch.len_utf8();
+            pending_break = false;
+        }
+    }
+    if pending_break && text[source_bytes..].contains(|ch| ch != '\n' && ch != '\r') {
+        flattened_bytes += 1;
+    }
+    flattened_bytes
 }
 
 impl InputState {
+    /// Monotonic epoch of effective text, cursor, selection, and IME destination changes.
+    /// Read-only access, rendering, theme changes, and no-op edits do not advance it.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn advance_revision(&mut self) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("input revision exhausted");
+    }
+
+    pub(super) fn selection_revision_state(&self) -> (Selection, bool, Option<Selection>) {
+        (
+            self.selected_range,
+            self.selection_reversed && !self.selected_range.is_empty(),
+            self.ime_marked_range,
+        )
+    }
+
+    pub(super) fn record_selection_change(
+        &mut self,
+        previous: (Selection, bool, Option<Selection>),
+    ) {
+        if !self.defer_selection_revision && self.selection_revision_state() != previous {
+            self.advance_revision();
+        }
+    }
+
+    pub(super) fn begin_selection_update(
+        &mut self,
+    ) -> (bool, (Selection, bool, Option<Selection>)) {
+        let previous = (
+            self.defer_selection_revision,
+            self.selection_revision_state(),
+        );
+        self.defer_selection_revision = true;
+        previous
+    }
+
+    pub(super) fn end_selection_update(
+        &mut self,
+        previous: (bool, (Selection, bool, Option<Selection>)),
+    ) {
+        self.defer_selection_revision = previous.0;
+        self.record_selection_change(previous.1);
+    }
+
     /// Runtime scroll metrics for automation/devtools receipts.
     ///
     /// Offsets are reported in CSS-like positive scrollTop/scrollLeft units
@@ -491,6 +573,8 @@ impl InputState {
         Self {
             focus_handle: focus_handle.clone(),
             text: "".into(),
+            revision: 0,
+            defer_selection_revision: false,
             text_wrapper: TextWrapper::new(text_style.font(), window.rem_size(), None),
             blink_cursor,
             history,
@@ -862,6 +946,7 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selection_update = self.begin_selection_update();
         self.history.ignore = true;
         let was_disabled = self.disabled;
         self.disabled = false;
@@ -875,6 +960,7 @@ impl InputState {
         } else {
             self.selected_range.clear();
         }
+        self.end_selection_update(selection_update);
 
         if self.mode.is_code_editor() {
             self._pending_update = true;
@@ -899,7 +985,9 @@ impl InputState {
         let text: SharedString = text.into();
         let range_utf16 = self.range_to_utf16(&(self.cursor()..self.cursor()));
         self.replace_text_in_range_silent(Some(range_utf16), &text, window, cx);
+        let previous = self.selection_revision_state();
         self.selected_range = (self.selected_range.end..self.selected_range.end).into();
+        self.record_selection_change(previous);
     }
 
     /// Apply the input owner's normal Backspace semantics programmatically.
@@ -959,7 +1047,9 @@ impl InputState {
     ) {
         let text: SharedString = text.into();
         self.replace_text_in_range_silent(None, &text, window, cx);
+        let previous = self.selection_revision_state();
         self.selected_range = (self.selected_range.end..self.selected_range.end).into();
+        self.record_selection_change(previous);
     }
 
     fn replace_text(
@@ -1087,6 +1177,9 @@ impl InputState {
     /// Set the default value of the input field.
     pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
         let text: SharedString = value.into();
+        if self.text.len() != text.len() || !self.text.chars().eq(text.chars()) {
+            self.advance_revision();
+        }
         self.text = Rope::from(text.as_str());
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
             diagnostics.reset(&self.text)
@@ -1164,10 +1257,12 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.selection_revision_state();
         let start = start.min(self.text.len());
         let end = end.min(self.text.len());
         self.selected_range = (start..end).into();
         self.selection_reversed = false;
+        self.record_selection_change(previous);
         self.scroll_to(end, None, cx);
         self.focus(window, cx);
         cx.emit(InputEvent::SelectionChange);
@@ -1199,11 +1294,13 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selection_update = self.begin_selection_update();
         let offset = self.scroll_handle.offset();
         self.set_value(value, window, cx);
         let cursor = cursor.min(self.text.len());
         self.selected_range = (cursor..cursor).into();
         self.selection_reversed = false;
+        self.end_selection_update(selection_update);
         self.update_scroll_offset(Some(offset), cx);
         self.deferred_scroll_offset = None;
         cx.emit(InputEvent::SelectionChange);
@@ -1249,7 +1346,9 @@ impl InputState {
     }
 
     pub(super) fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        let previous = self.selection_revision_state();
         self.selected_range = (0..self.text.len()).into();
+        self.record_selection_change(previous);
         cx.notify();
     }
 
@@ -1566,7 +1665,8 @@ impl InputState {
                 self.pause_blink_cursor(cx);
             }
         } else {
-            // Single line input, just emit the event (e.g.: In a dialog to confirm).
+            // Preserve parent submission hooks. Unhandled Enter may reach the IME
+            // fallback; the text mutation boundary enforces the single-line invariant.
             cx.propagate();
         }
 
@@ -1577,7 +1677,9 @@ impl InputState {
 
     pub(super) fn clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text("", window, cx);
+        let previous = self.selection_revision_state();
         self.selected_range = (0..0).into();
+        self.record_selection_change(previous);
         self.scroll_to(0, None, cx);
     }
 
@@ -1616,7 +1718,9 @@ impl InputState {
         // Clear the marked range.
         if let Some(ime_marked_range) = &self.ime_marked_range {
             if ime_marked_range.len() == 0 {
+                let previous = self.selection_revision_state();
                 self.ime_marked_range = None;
+                self.record_selection_change(previous);
             }
         }
 
@@ -1866,10 +1970,7 @@ impl InputState {
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(clipboard) = cx.read_from_clipboard() {
-            let mut new_text = clipboard.text().unwrap_or_default();
-            if !self.mode.is_multi_line() {
-                new_text = flatten_line_breaks_for_single_line(&new_text);
-            }
+            let new_text = clipboard.text().unwrap_or_default();
 
             self.replace_text_in_range_silent(None, &new_text, window, cx);
             self.scroll_to(self.cursor(), None, cx);
@@ -2029,6 +2130,7 @@ impl InputState {
     ///
     /// Ensure the offset use self.next_boundary or self.previous_boundary to get the correct offset.
     pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let previous = self.selection_revision_state();
         self.clear_inline_completion(cx);
 
         let offset = offset.clamp(0, self.text.len());
@@ -2055,14 +2157,17 @@ impl InputState {
         if self.selected_range.is_empty() {
             self.update_preferred_column();
         }
+        self.record_selection_change(previous);
         cx.emit(InputEvent::SelectionChange);
         cx.notify()
     }
 
     /// Unselects the currently selected text.
     pub fn unselect(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let previous = self.selection_revision_state();
         let offset = self.cursor();
         self.selected_range = (offset..offset).into();
+        self.record_selection_change(previous);
         cx.emit(InputEvent::SelectionChange);
         cx.notify()
     }
@@ -2366,7 +2471,9 @@ impl EntityInputHandler for InputState {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        let previous = self.selection_revision_state();
         self.ime_marked_range = None;
+        self.record_selection_change(previous);
     }
 
     /// Replace text in range.
@@ -2383,6 +2490,13 @@ impl EntityInputHandler for InputState {
         if self.disabled {
             return;
         }
+        let normalized_text = if self.mode.is_single_line() {
+            flatten_line_breaks_for_single_line(new_text)
+        } else {
+            Cow::Borrowed(new_text)
+        };
+        let new_text = normalized_text.as_ref();
+
         if self.tab_navigation_space_as_tab && new_text == " " {
             cx.emit(InputEvent::PressTab { secondary: false });
             cx.notify();
@@ -2400,6 +2514,9 @@ impl EntityInputHandler for InputState {
             }))
             .unwrap_or(self.selected_range.into());
 
+        let previous_selection = self.selection_revision_state();
+        let mut text_changed = range.len() != new_text.len()
+            || !self.text.slice(range.clone()).chars().eq(new_text.chars());
         let old_text = self.text.clone();
         self.text.replace(range.clone(), new_text);
 
@@ -2419,7 +2536,11 @@ impl EntityInputHandler for InputState {
                 let new_text_len =
                     (new_text.len() + mask_text.len()).saturating_sub(pending_text.len());
                 new_offset = (range.start + new_text_len).min(mask_text.len());
+                text_changed = self.text != old_text;
             }
+        }
+        if text_changed {
+            self.advance_revision();
         }
 
         self.push_history(&old_text, &range, &new_text);
@@ -2434,6 +2555,7 @@ impl EntityInputHandler for InputState {
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
+        self.record_selection_change(previous_selection);
         self.update_preferred_column();
         self.update_search(cx);
         self.mode.update_auto_grow(&self.text_wrapper);
@@ -2457,6 +2579,21 @@ impl EntityInputHandler for InputState {
             return;
         }
 
+        let normalized_text = if self.mode.is_single_line() {
+            flatten_line_breaks_for_single_line(new_text)
+        } else {
+            Cow::Borrowed(new_text)
+        };
+        let normalized_selection = if matches!(normalized_text, Cow::Owned(_)) {
+            new_selected_range_utf16.as_ref().map(|range| {
+                single_line_offset_from_utf16(new_text, range.start)
+                    ..single_line_offset_from_utf16(new_text, range.end)
+            })
+        } else {
+            None
+        };
+        let new_text = normalized_text.as_ref();
+
         self.lsp.reset();
 
         let range = range_utf16
@@ -2468,6 +2605,9 @@ impl EntityInputHandler for InputState {
             }))
             .unwrap_or(self.selected_range.into());
 
+        let previous_selection = self.selection_revision_state();
+        let text_changed = range.len() != new_text.len()
+            || !self.text.slice(range.clone()).chars().eq(new_text.chars());
         let old_text = self.text.clone();
         self.text.replace(range.clone(), new_text);
 
@@ -2477,6 +2617,9 @@ impl EntityInputHandler for InputState {
                 self.text = old_text;
                 return;
             }
+        }
+        if text_changed {
+            self.advance_revision();
         }
 
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
@@ -2493,13 +2636,18 @@ impl EntityInputHandler for InputState {
             self.ime_marked_range = None;
         } else {
             self.ime_marked_range = Some((range.start..range.start + new_text.len()).into());
-            self.selected_range = new_selected_range_utf16
-                .as_ref()
-                .map(|range_utf16| self.range_from_utf16(range_utf16))
-                .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            self.selected_range = normalized_selection
+                .map(|new_range| new_range.start + range.start..new_range.end + range.start)
+                .or_else(|| {
+                    new_selected_range_utf16
+                        .as_ref()
+                        .map(|range_utf16| self.range_from_utf16(range_utf16))
+                        .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+                })
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len())
                 .into();
         }
+        self.record_selection_change(previous_selection);
         self.mode.update_auto_grow(&self.text_wrapper);
         self.history.start_grouping();
         self.push_history(&old_text, &range, new_text);
@@ -2657,5 +2805,399 @@ mod single_line_paste_tests {
             "  spaced   out  "
         );
         assert_eq!(flatten_line_breaks_for_single_line("héllo 🌍"), "héllo 🌍");
+        assert!(matches!(
+            flatten_line_breaks_for_single_line("héllo 🌍"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    fn with_input(
+        cx: &mut gpui::TestAppContext,
+        multi_line: bool,
+        test: impl FnOnce(&mut InputState, &mut Window, &mut Context<InputState>),
+    ) {
+        cx.update(crate::init);
+        cx.update(|cx| {
+            let handle = cx
+                .open_window(
+                    gpui::WindowOptions {
+                        show: false,
+                        focus: false,
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| InputState::new(window, cx).multi_line(multi_line)),
+                )
+                .expect("input revision fixture");
+            handle
+                .update(cx, test)
+                .expect("update input revision fixture");
+            handle
+                .update(cx, |_, window, _| window.remove_window())
+                .expect("close input fixture");
+        });
+    }
+
+    #[gpui::test]
+    fn single_line_mutations_flatten_breaks_before_storing_text(cx: &mut gpui::TestAppContext) {
+        with_input(cx, false, |input, window, cx| {
+            input.set_value("\na\r\nb\n", window, cx);
+            assert_eq!(input.value().as_ref(), "a b");
+            assert_eq!(input.cursor(), 3);
+
+            input.set_selection(1, 2, window, cx);
+            input.replace_text_in_range(None, "x\n\ny\r", window, cx);
+            assert_eq!(input.value().as_ref(), "ax yb");
+            assert_eq!(input.cursor(), 4);
+
+            let revision = input.revision();
+            input.replace_text_in_range(None, "\r\n", window, cx);
+            assert_eq!(input.value().as_ref(), "ax yb");
+            assert_eq!(input.revision(), revision);
+            assert_eq!(input.cursor(), 4);
+        });
+        with_input(cx, false, |input, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                "Fix the bug\nin auth.rs\n".into(),
+            ));
+            input.paste(&Paste, window, cx);
+            assert_eq!(input.value().as_ref(), "Fix the bug in auth.rs");
+            input.edit_undo(window, cx);
+            assert_eq!(input.value().as_ref(), "");
+            input.edit_redo(window, cx);
+            assert_eq!(input.value().as_ref(), "Fix the bug in auth.rs");
+        });
+    }
+
+    #[gpui::test]
+    fn single_line_ime_flattens_breaks_and_remaps_utf16_selection(cx: &mut gpui::TestAppContext) {
+        with_input(cx, false, |input, window, cx| {
+            input.set_value("pre ", window, cx);
+            input.replace_and_mark_text_in_range(None, "\né\r\n🌍\n", Some(4..6), window, cx);
+            assert_eq!(input.value().as_ref(), "pre é 🌍");
+            assert_eq!(input.selection(), 7..11);
+            assert_eq!(input.marked_text_range(window, cx), Some(4..8));
+            assert_eq!(
+                input.selected_text_range(false, window, cx).unwrap().range,
+                6..8
+            );
+
+            input.replace_text_in_range(None, "\né\r\n🌍\n", window, cx);
+            assert_eq!(input.value().as_ref(), "pre é 🌍");
+            assert_eq!(input.cursor(), 11);
+            assert_eq!(input.marked_text_range(window, cx), None);
+
+            input.replace_and_mark_text_in_range(None, "\r\n", Some(2..2), window, cx);
+            assert_eq!(input.value().as_ref(), "pre é 🌍");
+            assert_eq!(input.cursor(), 11);
+            assert_eq!(input.marked_text_range(window, cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn multiline_mutations_and_enter_preserve_line_breaks(cx: &mut gpui::TestAppContext) {
+        with_input(cx, true, |input, window, cx| {
+            input.set_value("a\r\nb\n", window, cx);
+            assert_eq!(input.value().as_ref(), "a\r\nb\n");
+            input.replace_text_in_range(Some(0..5), "c\nd", window, cx);
+            assert_eq!(input.value().as_ref(), "c\nd");
+            input.replace_and_mark_text_in_range(None, "\né", None, window, cx);
+            assert_eq!(input.value().as_ref(), "c\nd\né");
+            input.unmark_text(window, cx);
+            input.enter(&Enter { secondary: false }, window, cx);
+            assert_eq!(input.value().as_ref(), "c\nd\né\n");
+
+            input.submit_on_enter = true;
+            input.enter(&Enter { secondary: false }, window, cx);
+            assert_eq!(input.value().as_ref(), "c\nd\né\n");
+            input.enter(&Enter { secondary: true }, window, cx);
+            assert_eq!(input.value().as_ref(), "c\nd\né\n\n");
+
+            cx.write_to_clipboard(ClipboardItem::new_string("x\r\ny\n".into()));
+            input.paste(&Paste, window, cx);
+            assert_eq!(input.value().as_ref(), "c\nd\né\n\nx\r\ny\n");
+        });
+    }
+
+    struct EnterSubmissionHost {
+        input: Entity<InputState>,
+        submitted_values: Vec<SharedString>,
+        enter_events: usize,
+        consume_enter: bool,
+        _subscription: Subscription,
+    }
+
+    impl Render for EnterSubmissionHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(300.))
+                .h(px(40.))
+                .on_action(cx.listener(|this, _: &Enter, _, cx| {
+                    this.submitted_values.push(this.input.read(cx).value());
+                    if !this.consume_enter {
+                        cx.propagate();
+                    }
+                }))
+                .child(crate::input::Input::new(&self.input))
+        }
+    }
+
+    #[gpui::test]
+    fn single_line_enter_submits_to_parent_without_inserting_fallback_newline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::init);
+        for consume_enter in [false, true] {
+            let handle = cx.update(|cx| {
+                cx.open_window(
+                    gpui::WindowOptions {
+                        show: false,
+                        focus: false,
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        cx.new(|cx| {
+                            let input = cx.new(|cx| {
+                                let mut input = InputState::new(window, cx);
+                                input.set_value("submit me", window, cx);
+                                input.focus_handle.focus(window, cx);
+                                input
+                            });
+                            let subscription = cx.subscribe(
+                                &input,
+                                |host: &mut EnterSubmissionHost, _, event, _| {
+                                    if matches!(event, InputEvent::PressEnter { secondary: false })
+                                    {
+                                        host.enter_events += 1;
+                                    }
+                                },
+                            );
+                            EnterSubmissionHost {
+                                input,
+                                submitted_values: Vec::new(),
+                                enter_events: 0,
+                                consume_enter,
+                                _subscription: subscription,
+                            }
+                        })
+                    },
+                )
+                .expect("submission fixture")
+            });
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .expect("draw focused input");
+            cx.dispatch_keystroke(handle.into(), gpui::Keystroke::parse("enter").unwrap());
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .expect("draw after Enter fallback");
+            cx.update(|cx| {
+                handle
+                    .update(cx, |host, window, cx| {
+                        assert_eq!(host.submitted_values.len(), 1);
+                        assert_eq!(host.submitted_values[0].as_ref(), "submit me");
+                        assert_eq!(host.enter_events, 1);
+                        assert_eq!(host.input.read(cx).value().as_ref(), "submit me");
+                        assert_eq!(host.input.read(cx).cursor(), "submit me".len());
+                        window.remove_window();
+                    })
+                    .expect("verify and close submission fixture");
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn closing_input_releases_its_context_menu_owner(cx: &mut gpui::TestAppContext) {
+        let mut owner = None;
+        with_input(cx, false, |_, _, cx| {
+            owner = Some(cx.entity().downgrade());
+        });
+        cx.run_until_parked();
+        owner.expect("input owner").assert_released();
+    }
+
+    #[gpui::test]
+    fn same_length_text_aba_and_history_advance_source_revision(cx: &mut gpui::TestAppContext) {
+        with_input(cx, false, |input, window, cx| {
+            let empty = input.revision();
+            input.edit_undo(window, cx);
+            input.edit_redo(window, cx);
+            assert_eq!(input.revision(), empty);
+            input.set_value("cat", window, cx);
+            let original = input.revision();
+            input.replace_text_in_range(Some(0..3), "dog", window, cx);
+            let edited = input.revision();
+            assert!(edited > original);
+            assert_eq!(input.value().as_ref(), "dog");
+            input.edit_undo(window, cx);
+            let undone = input.revision();
+            assert!(undone > edited);
+            assert_eq!(input.value().as_ref(), "cat");
+            input.edit_redo(window, cx);
+            assert!(input.revision() > undone);
+            assert_eq!(input.value().as_ref(), "dog");
+            let redone = input.revision();
+            input.set_value("cat", window, cx);
+            assert!(input.revision() > redone);
+            assert_eq!(input.cursor(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn selection_navigation_and_word_selection_track_aba(cx: &mut gpui::TestAppContext) {
+        with_input(cx, false, |input, window, cx| {
+            input.set_value("alpha beta", window, cx);
+            let original = input.revision();
+            input.edit_move_left(window, cx);
+            let moved = input.revision();
+            assert!(moved > original);
+            input.edit_move_right(window, cx);
+            assert_eq!(input.cursor(), 10);
+            assert!(input.revision() > moved);
+            let at_end = input.revision();
+            input.edit_move_right(window, cx);
+            input.set_selection(usize::MAX, usize::MAX, window, cx);
+            assert_eq!(input.revision(), at_end);
+
+            input.select_word(2, window, cx);
+            let selected = input.revision();
+            assert!(selected > at_end);
+            assert_eq!(input.selected_range, (0..5).into());
+            input.select_word(2, window, cx);
+            assert_eq!(input.revision(), selected);
+            // A double-click preserves the word during dragging until mouse-up.
+            // Finish that gesture before exercising keyboard selection.
+            input.on_mouse_up(&MouseUpEvent::default(), window, cx);
+            assert_eq!(input.selected_range, (0..5).into());
+            assert_eq!(input.revision(), selected);
+            input.unselect(window, cx);
+            assert!(input.revision() > selected);
+            input.set_selection(0, 0, window, cx);
+            assert_eq!(input.selection(), 0..0);
+            let collapsed = input.revision();
+            input.edit_select_right(window, cx);
+            let extended = input.revision();
+            assert_eq!(input.selection(), 0..1);
+            assert_eq!(input.cursor(), 1);
+            assert!(extended > collapsed);
+            input.edit_select_left(window, cx);
+            assert!(input.revision() > extended);
+            assert_eq!(input.selection(), 0..0);
+            assert_eq!(input.cursor(), 0);
+            let at_start = input.revision();
+            for _ in 0..2 {
+                input.edit_select_left(window, cx);
+                assert_eq!(input.selection(), 0..0);
+                assert_eq!(input.revision(), at_start);
+            }
+            input.edit_select_all(window, cx);
+            let all = input.revision();
+            input.edit_select_all(window, cx);
+            assert_eq!(input.revision(), all);
+        });
+    }
+
+    #[gpui::test]
+    fn no_ops_and_reads_do_not_advance_revision(cx: &mut gpui::TestAppContext) {
+        with_input(cx, false, |input, window, cx| {
+            let empty = input.revision();
+            input.edit_backspace(window, cx);
+            input.replace("", window, cx);
+            input.clean(window, cx);
+            input.set_selection(100, 100, window, cx);
+            assert_eq!(input.revision(), empty);
+            input.set_value("hé", window, cx);
+            let initial = input.revision();
+            input.set_value("hé", window, cx);
+            input.replace_text_in_range(Some(0..2), "hé", window, cx);
+            input.set_loading(true, window, cx);
+            input.set_loading(false, window, cx);
+            assert_eq!(input.value().as_ref(), "hé");
+            assert_eq!(input.cursor(), "hé".len());
+            assert!(input.selected_text_range(false, window, cx).is_some());
+            assert!(input.marked_text_range(window, cx).is_none());
+            input.automation_scroll_metrics();
+            let mut adjusted = None;
+            assert_eq!(
+                input
+                    .text_for_range(0..2, &mut adjusted, window, cx)
+                    .as_deref(),
+                Some("hé")
+            );
+            assert_eq!(input.revision(), initial);
+
+            input.disabled = true;
+            input.replace_text_in_range(None, "x", window, cx);
+            input.replace_and_mark_text_in_range(None, "x", None, window, cx);
+            assert_eq!(input.revision(), initial);
+            input.disabled = false;
+        });
+    }
+
+    #[gpui::test]
+    fn compound_multiline_setters_ignore_transient_caret_moves(cx: &mut gpui::TestAppContext) {
+        with_input(cx, true, |input, window, cx| {
+            input.set_value("ab\ncd", window, cx);
+            assert_eq!(input.cursor(), 0);
+            let initial = input.revision();
+            input.set_value("ab\ncd", window, cx);
+            assert_eq!(input.revision(), initial);
+            input.set_value_preserving_scroll("ab\ncd", 2, window, cx);
+            let moved = input.revision();
+            assert!(moved > initial);
+            input.set_value_preserving_scroll("ab\ncd", 2, window, cx);
+            assert_eq!(input.cursor(), 2);
+            assert_eq!(input.revision(), moved);
+            input.set_value_preserving_scroll("ef\ngh", 2, window, cx);
+            let changed = input.revision();
+            assert!(changed > moved);
+            input.set_value_preserving_scroll("ab\ncd", 2, window, cx);
+            assert!(input.revision() > changed);
+        });
+    }
+
+    #[gpui::test]
+    fn ime_updates_track_effective_composition_and_unmarking(cx: &mut gpui::TestAppContext) {
+        with_input(cx, false, |input, window, cx| {
+            let initial = input.revision();
+            input.replace_and_mark_text_in_range(None, "é", None, window, cx);
+            let marked = input.revision();
+            assert!(marked > initial);
+            assert_eq!(input.value().as_ref(), "é");
+            input.replace_and_mark_text_in_range(None, "é", None, window, cx);
+            assert_eq!(input.revision(), marked);
+            input.replace_and_mark_text_in_range(None, "à", None, window, cx);
+            let edited = input.revision();
+            assert!(edited > marked);
+            input.replace_and_mark_text_in_range(None, "é", None, window, cx);
+            assert!(input.revision() > edited);
+            let before_unmark = input.revision();
+            input.unmark_text(window, cx);
+            assert!(input.revision() > before_unmark);
+            let unmarked = input.revision();
+            input.unmark_text(window, cx);
+            assert_eq!(input.revision(), unmarked);
+        });
+    }
+
+    #[gpui::test]
+    fn indent_and_outdent_use_source_text_revision(cx: &mut gpui::TestAppContext) {
+        with_input(cx, true, |input, window, cx| {
+            input.set_value("alpha\nbeta", window, cx);
+            let initial = input.revision();
+            input.outdent(false, window, cx);
+            assert_eq!(input.revision(), initial);
+            input.indent(true, window, cx);
+            let indented = input.revision();
+            assert!(indented > initial);
+            assert_ne!(input.value().as_ref(), "alpha\nbeta");
+            input.outdent(true, window, cx);
+            assert!(input.revision() > indented);
+            assert_eq!(input.value().as_ref(), "alpha\nbeta");
+        });
     }
 }

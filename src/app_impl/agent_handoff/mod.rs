@@ -338,7 +338,20 @@ impl ScriptListApp {
         window: &mut Window,
         ctx: &mut Context<Self>,
     ) -> bool {
-        if !self.spine_projection_owns_main_list() {
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(ctx);
+            self.set_main_menu_dispatch_observation(None);
+            if !self.root_search.query_is_current() {
+                return false;
+            }
+        }
+        let inputs = self.root_search.computed_query_inputs();
+        if inputs.spine_parse.input != inputs.raw
+            || !self.spine_projection_owns_main_list_for(
+                &inputs.spine_parse,
+                inputs.spine_projection.as_ref(),
+            )
+        {
             return false;
         }
         // Unarmed empty colon mode (`@clipboard:` showing recents with no
@@ -367,7 +380,7 @@ impl ScriptListApp {
         // execution (opening the note / running the script / pasting the
         // clipboard entry) — that destroys the prompt being built. Consume
         // the Enter even when no row attached.
-        if let Some(projection) = self.spine_projection.as_ref() {
+        if let Some(projection) = inputs.spine_projection.as_ref() {
             if let crate::spine::SpineSegmentKind::ContextMention {
                 context_type,
                 sub_query,
@@ -494,6 +507,7 @@ impl ScriptListApp {
                         }
                     });
                 }
+                self.flush_pending_main_menu_query(cx);
                 cx.notify();
                 return true;
             }
@@ -643,6 +657,7 @@ impl ScriptListApp {
                 }
             });
         }
+        self.flush_pending_main_menu_query(cx);
 
         cx.notify();
         true
@@ -657,6 +672,7 @@ impl ScriptListApp {
         self.spine_empty_subsearch_armed_for = None;
         self.spine_live_preview_cache = Default::default();
         self.invalidate_grouped_cache();
+        self.accept_root_search_input_intent("");
     }
 
     fn spine_prompt_plan_for_aliases(
@@ -3032,6 +3048,7 @@ impl ScriptListApp {
         self.current_view = AppView::QuickTerminalView {
             entity: entity.clone(),
         };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None;
         self.clear_actions_popup_state();
         self.pending_focus = Some(FocusTarget::TermPrompt);
@@ -3857,6 +3874,9 @@ impl ScriptListApp {
                     .as_deref()
                     .unwrap_or(crate::ROOT_LAUNCHER_PLACEHOLDER);
                 self.restore_agent_chat_input_return_state(&origin.input, placeholder, window, cx);
+                if matches!(self.current_view, AppView::ScriptList) {
+                    self.flush_pending_main_menu_query(cx);
+                }
             }
             AgentChatReturnRoute::Main(state) => {
                 self.tab_ai_harness_return_view = Some(state.view.clone());
@@ -3870,16 +3890,17 @@ impl ScriptListApp {
                 self.computed_filter_text = state.computed_filter_text.clone();
                 self.pending_placeholder = state.pending_placeholder.clone();
                 self.invalidate_grouped_cache();
-                let _ = self
-                    .restore_main_menu_selection_from_snapshot(state.interaction.selection.clone());
-                self.sync_list_state_for_filter_replacement(
-                    MainListReplacementPolicy::PreserveViewport(state.interaction.viewport.clone()),
-                );
                 let placeholder = state
                     .pending_placeholder
                     .as_deref()
                     .unwrap_or(crate::ROOT_LAUNCHER_PLACEHOLDER);
                 self.restore_agent_chat_input_return_state(&state.input, placeholder, window, cx);
+                self.flush_pending_main_menu_query(cx);
+                let _ = self
+                    .restore_main_menu_selection_from_snapshot(state.interaction.selection.clone());
+                self.sync_list_state_for_filter_replacement(
+                    MainListReplacementPolicy::PreserveViewport(state.interaction.viewport.clone()),
+                );
                 self.opened_from_main_menu = false;
                 cx.notify();
             }
@@ -3896,6 +3917,9 @@ impl ScriptListApp {
             TabAiHarnessCloseDisposition::RestoreOrigin,
             cx,
         );
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
     }
 
     pub(crate) fn close_tab_ai_harness_terminal(&mut self, cx: &mut Context<Self>) {
@@ -3913,6 +3937,9 @@ impl ScriptListApp {
             TabAiHarnessCloseDisposition::RestoreOrigin,
             cx,
         );
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
     }
 
     pub(crate) fn close_quick_terminal_main_window_state_first(&mut self, cx: &mut Context<Self>) {
@@ -3997,7 +4024,8 @@ impl ScriptListApp {
         self.tab_ai_harness_return_focus_target = None;
 
         self.current_view = AppView::ScriptList;
-        self.reset_main_menu_selection_user_moved();
+        self.note_main_route_changed();
+        self.reset_main_menu_selection_intent();
         // Same launcher-root landing rule as the close-to-origin path above:
         // clear the origin flag so the next Escape hides the window instead of
         // burning a press on a no-op go_back_or_close.
@@ -4017,6 +4045,7 @@ impl ScriptListApp {
             FocusedInput::None
         };
         self.clear_transient_script_list_trigger_on_return(None, cx);
+        self.flush_pending_main_menu_query(cx);
 
         // Re-key main's automation surface tag in lockstep with the view flip.
         // Without this, `listAutomationWindows` reports `semanticSurface:"agentChatChat"`
@@ -4474,8 +4503,34 @@ impl ScriptListApp {
 
     /// Convert a `SearchResult` from the Script List into a `TabAiTargetContext`
     /// with script-native metadata (name, path, description, type).
+    fn tab_ai_target_from_main_menu_row(
+        &self,
+        row: &crate::MainMenuRowProjection,
+    ) -> Option<crate::ai::TabAiTargetContext> {
+        match row.subject {
+            crate::MainMenuRowSubject::SearchResult { flat_index } => {
+                Some(Self::tab_ai_target_from_search_result(
+                    row,
+                    self.main_menu_committed_results().get(flat_index)?,
+                ))
+            }
+            crate::MainMenuRowSubject::Calculator => {
+                let result = self.main_menu_committed_calculator()?;
+                Some(crate::ai::TabAiTargetContext {
+                    source: "ScriptList".to_string(),
+                    kind: "calculator".to_string(),
+                    semantic_id: row.semantic_id.clone(),
+                    label: result.formatted.clone(),
+                    metadata: Some(
+                        serde_json::json!({"expression": result.normalized_expr, "result": result.formatted}),
+                    ),
+                })
+            }
+        }
+    }
+
     pub(crate) fn tab_ai_target_from_search_result(
-        index: usize,
+        row: &crate::MainMenuRowProjection,
         result: &scripts::SearchResult,
     ) -> crate::ai::TabAiTargetContext {
         let name = result.name().to_string();
@@ -4659,7 +4714,7 @@ impl ScriptListApp {
         crate::ai::TabAiTargetContext {
             source: "ScriptList".to_string(),
             kind: kind.to_string(),
-            semantic_id: crate::protocol::generate_semantic_id("choice", index, &name),
+            semantic_id: row.semantic_id.clone(),
             label: name,
             metadata: Some(metadata),
         }
@@ -5217,14 +5272,10 @@ impl ScriptListApp {
                 (focused_target, visible_targets)
             }
             AppView::ScriptList => {
-                // Resolve the focused script list item through the result-cache owner,
-                // which maps selected_index -> flat result index -> SearchResult.
-                let focused_target = self
-                    .main_menu_result_caches
-                    .search_result_for_grouped_item(self.selected_index)
-                    .map(|result| {
-                        Self::tab_ai_target_from_search_result(self.selected_index, result)
-                    })
+                let focused_target = self.resolved_main_menu_selected_subject().and_then(|subject| {
+                    let row = match subject { crate::ResolvedMainMenuSelection::SearchResult { row, .. } | crate::ResolvedMainMenuSelection::Calculator { row, .. } => row };
+                    self.tab_ai_target_from_main_menu_row(row)
+                })
                     .or_else(|| {
                         let trimmed = self.filter_text.trim();
                         if trimmed.is_empty() {
@@ -5241,14 +5292,12 @@ impl ScriptListApp {
                         }
                     });
 
-                let visible_targets: Vec<crate::ai::TabAiTargetContext> = self
-                    .main_menu_result_caches
-                    .grouped_search_results()
+                let visible_targets = self
+                    .main_menu_committed_rows()
+                    .iter()
+                    .filter(|row| row.eligibility.selectable)
                     .take(TAB_AI_VISIBLE_TARGET_LIMIT)
-                    .enumerate()
-                    .map(|(display_index, result)| {
-                        Self::tab_ai_target_from_search_result(display_index, result)
-                    })
+                    .filter_map(|row| self.tab_ai_target_from_main_menu_row(row))
                     .collect();
 
                 (focused_target, visible_targets)
@@ -5519,12 +5568,14 @@ impl ScriptListApp {
             Some(self.filter_text.clone())
         };
 
-        let focused_semantic_id = self
-            .main_menu_result_caches
-            .search_result_for_grouped_item(self.selected_index)
-            .map(|result| {
-                Self::tab_ai_target_from_search_result(self.selected_index, result).semantic_id
-            });
+        let focused_semantic_id =
+            self.resolved_main_menu_selected_subject()
+                .map(|subject| match subject {
+                    crate::ResolvedMainMenuSelection::SearchResult { row, .. }
+                    | crate::ResolvedMainMenuSelection::Calculator { row, .. } => {
+                        row.semantic_id.clone()
+                    }
+                });
         let selected_semantic_id = focused_semantic_id.clone();
 
         let snapshot = crate::ai::TabAiUiSnapshot {
@@ -5886,7 +5937,7 @@ impl ScriptListApp {
         }
     }
 
-    fn open_tab_ai_save_offer(
+    pub(crate) fn open_tab_ai_save_offer(
         &mut self,
         record: crate::ai::TabAiExecutionRecord,
         cx: &mut Context<Self>,
@@ -5902,18 +5953,22 @@ impl ScriptListApp {
             filename_stem,
             error: None,
         });
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
         cx.notify();
     }
 
-    fn close_tab_ai_save_offer(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab_ai_save_offer(&mut self, cx: &mut Context<Self>) {
         if self.tab_ai_save_offer_state.take().is_some() {
+            self.mark_main_data_changed();
+            self.mark_main_presentation_changed();
             tracing::info!(event = "tab_ai_save_offer_dismissed");
             self.pending_focus = Some(self.tab_ai_return_focus_target());
             cx.notify();
         }
     }
 
-    fn save_tab_ai_script(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_tab_ai_script(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.tab_ai_save_offer_state.clone() else {
             return;
         };
@@ -5946,6 +6001,7 @@ impl ScriptListApp {
                     if let Some(save_state) = &mut self.tab_ai_save_offer_state {
                         save_state.error = Some(format!("Failed to save script: {error}").into());
                     }
+                    self.mark_main_data_changed();
                     cx.notify();
                     return;
                 }
@@ -5967,10 +6023,25 @@ impl ScriptListApp {
             }
         };
 
-        let editor_error =
-            crate::script_creation::open_in_editor(&created_path, &self.config).err();
+        let editor_error = if self.main_services.is_production() {
+            crate::script_creation::open_in_editor(&created_path, &self.config).err()
+        } else {
+            None
+        };
+        if let MainServices::OwnedFixtures(sources) = &mut self.main_services {
+            let sources = Arc::make_mut(sources);
+            if sources.overlay_fixture_id == Some("main-overlay.tab-ai-save-offer")
+                && sources.overlay_actions.len() < 16
+            {
+                sources
+                    .overlay_actions
+                    .push("saved_not_validated_or_opened".into());
+            }
+        }
 
         self.tab_ai_save_offer_state = None;
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
 
         match editor_error {
             Some(error) => {
@@ -5989,7 +6060,14 @@ impl ScriptListApp {
             None => {
                 self.toast_manager.push(
                     components::toast::Toast::success(
-                        format!("Saved '{}' and opened in editor", state.filename_stem),
+                        if self.main_services.is_production() {
+                            format!("Saved '{}' and opened in editor", state.filename_stem)
+                        } else {
+                            format!(
+                                "Saved '{}' in owned storage; verification not run",
+                                state.filename_stem
+                            )
+                        },
                         &self.theme,
                     )
                     .duration_ms(Some(TOAST_SUCCESS_MS)),
@@ -6032,7 +6110,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let state = self.tab_ai_save_offer_state.as_ref()?;
-        let theme = crate::theme::get_cached_theme();
+        let theme = &self.theme;
 
         // Ensure the main focus handle is focused so key events route here
         if !self.focus_handle.is_focused(window) {
@@ -6061,6 +6139,7 @@ impl ScriptListApp {
         // the primary input surface).
         let overlay = div()
             .id("tab-ai-save-offer")
+            .debug_selector(|| "tab-ai-save-offer".into())
             .absolute()
             .inset_0()
             .track_focus(&self.focus_handle)
@@ -6106,421 +6185,7 @@ impl ScriptListApp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Apply-back: clipboard helpers
-// ---------------------------------------------------------------------------
-
-fn read_tab_ai_apply_back_clipboard_text() -> Result<String, String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|error| format!("tab_ai_apply_back_clipboard_open_failed: {error}"))?;
-    let text = clipboard
-        .get_text()
-        .map_err(|error| format!("tab_ai_apply_back_clipboard_read_failed: {error}"))?;
-    if text.trim().is_empty() {
-        return Err("tab_ai_apply_back_clipboard_empty".to_string());
-    }
-    Ok(text)
-}
-
-fn write_tab_ai_apply_back_clipboard_text(text: &str) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|error| format!("tab_ai_apply_back_clipboard_open_failed: {error}"))?;
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|error| format!("tab_ai_apply_back_clipboard_write_failed: {error}"))
-}
-
-// ---------------------------------------------------------------------------
-// Apply-back: entry point (⌘⏎ in QuickTerminalView)
-// ---------------------------------------------------------------------------
-
-/// Route-aware success message for the apply-back toast.
-fn tab_ai_apply_back_success_message(source_type: &crate::ai::TabAiSourceType) -> &'static str {
-    match source_type {
-        crate::ai::TabAiSourceType::RunningCommand => "Applied result to the active prompt",
-        crate::ai::TabAiSourceType::ClipboardEntry => "Copied result to the clipboard",
-        crate::ai::TabAiSourceType::ScriptListItem => "Saved and ran the generated script",
-        crate::ai::TabAiSourceType::DesktopSelection => "Replaced the frontmost selection",
-        crate::ai::TabAiSourceType::Desktop => "Pasted into the frontmost app",
-    }
-}
-
-impl ScriptListApp {
-    const TAB_AI_APPLY_BACK_FOCUS_SETTLE_MS: u64 = 250;
-    const TAB_AI_APPLY_BACK_CLIPBOARD_PRIME_MS: u64 = 25;
-    const TAB_AI_APPLY_BACK_ROUTE_POLL_MS: u64 = 20;
-    const TAB_AI_APPLY_BACK_ROUTE_TIMEOUT_MS: u64 = 750;
-
-    /// Show a route-aware error toast when ⌘↩ is pressed but there is
-    /// neither a terminal selection nor harness output available yet.
-    fn toast_tab_ai_apply_back_unavailable(&mut self, cx: &mut Context<Self>) {
-        let apply_label = crate::ai::tab_ai_apply_back_footer_label(
-            self.tab_ai_harness_apply_back_route
-                .as_ref()
-                .map(|route| &route.source_type),
-        );
-        self.toast_manager.push(
-            crate::components::toast::Toast::error(
-                format!("{apply_label} failed: select terminal text or wait for output."),
-                &self.theme,
-            )
-            .duration_ms(Some(TOAST_ERROR_MS)),
-        );
-        cx.notify();
-    }
-
-    /// Show a route-aware error toast when the apply-back route is still
-    /// unavailable after the bounded wait expires.
-    fn toast_tab_ai_apply_back_pending(&mut self, cx: &mut Context<Self>) {
-        let message = match self.tab_ai_harness_apply_back_route.as_ref() {
-            Some(route) => format!(
-                "{} is still preparing. Try again in a moment.",
-                crate::ai::tab_ai_apply_back_footer_label(Some(&route.source_type)),
-            ),
-            None => "Paste Back target is still preparing. Try again in a moment.".to_string(),
-        };
-        self.toast_manager.push(
-            crate::components::toast::Toast::error(message, &self.theme)
-                .duration_ms(Some(TOAST_ERROR_MS)),
-        );
-        cx.notify();
-    }
-
-    /// Unified apply handler — routes `text` to the correct destination
-    /// based on `route.source_type`.  Called by both the terminal-selection
-    /// fast path and the clipboard fallback.
-    fn apply_tab_ai_result_text(
-        &mut self,
-        route: crate::ai::TabAiApplyBackRoute,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
-        if text.trim().is_empty() {
-            self.toast_manager.push(
-                crate::components::toast::Toast::error(
-                    "No terminal selection or harness output was available".to_string(),
-                    &self.theme,
-                )
-                .duration_ms(Some(TOAST_ERROR_MS)),
-            );
-            cx.notify();
-            return;
-        }
-
-        match route.source_type.clone() {
-            crate::ai::TabAiSourceType::RunningCommand => {
-                self.close_tab_ai_harness_terminal(cx);
-                if self.try_set_prompt_input(text.clone(), cx) {
-                    self.toast_manager.push(
-                        crate::components::toast::Toast::success(
-                            tab_ai_apply_back_success_message(&route.source_type).to_string(),
-                            &self.theme,
-                        )
-                        .duration_ms(Some(TOAST_SUCCESS_MS)),
-                    );
-                } else {
-                    self.toast_manager.push(
-                        crate::components::toast::Toast::error(
-                            "The original prompt is no longer active".to_string(),
-                            &self.theme,
-                        )
-                        .duration_ms(Some(TOAST_ERROR_MS)),
-                    );
-                }
-                cx.notify();
-            }
-            crate::ai::TabAiSourceType::ClipboardEntry => {
-                self.close_tab_ai_harness_terminal(cx);
-                match write_tab_ai_apply_back_clipboard_text(&text) {
-                    Ok(()) => {
-                        self.toast_manager.push(
-                            crate::components::toast::Toast::success(
-                                tab_ai_apply_back_success_message(&route.source_type).to_string(),
-                                &self.theme,
-                            )
-                            .duration_ms(Some(TOAST_SUCCESS_MS)),
-                        );
-                    }
-                    Err(error) => {
-                        self.toast_manager.push(
-                            crate::components::toast::Toast::error(
-                                format!("Failed to update clipboard: {error}"),
-                                &self.theme,
-                            )
-                            .duration_ms(Some(TOAST_ERROR_MS)),
-                        );
-                    }
-                }
-                cx.notify();
-            }
-            crate::ai::TabAiSourceType::ScriptListItem => {
-                self.close_tab_ai_harness_terminal(cx);
-
-                // Use the focused target label as the prompt for slug derivation.
-                let prompt_label = route
-                    .focused_target
-                    .as_ref()
-                    .map(|t| t.label.clone())
-                    .unwrap_or_else(|| "ai generated script".to_string());
-
-                match crate::ai::script_generation::save_generated_script_from_response(
-                    &prompt_label,
-                    &text,
-                ) {
-                    Ok(script_path) => {
-                        let path_str = script_path.to_string_lossy().to_string();
-                        tracing::info!(
-                            target: "tab_ai",
-                            source_type = "ScriptListItem",
-                            script_path_sha256 = %crate::logging::log_private_user_value(&path_str),
-                            script_path_bytes = path_str.len(),
-                            "tab_ai_apply_back.script_saved"
-                        );
-                        self.toast_manager.push(
-                            crate::components::toast::Toast::success(
-                                format!(
-                                    "Saved and running generated script: {}",
-                                    script_path
-                                        .file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("script"),
-                                ),
-                                &self.theme,
-                            )
-                            .duration_ms(Some(TOAST_SUCCESS_MS)),
-                        );
-                        self.execute_script_by_path(&path_str, cx);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "tab_ai",
-                            error = %error,
-                            "tab_ai_apply_back.script_save_failed"
-                        );
-                        self.toast_manager.push(
-                            crate::components::toast::Toast::error(
-                                format!("Failed to save generated script: {error}"),
-                                &self.theme,
-                            )
-                            .duration_ms(Some(TOAST_ERROR_MS)),
-                        );
-                    }
-                }
-                cx.notify();
-            }
-            /* crate::ai::TabAiSourceType::DesktopSelection
-            | crate::ai::TabAiSourceType::Desktop => */
-            crate::ai::TabAiSourceType::DesktopSelection | crate::ai::TabAiSourceType::Desktop => {
-                // Desktop selection / generic desktop: hide the main window first,
-                // wait for focus to settle back to the previous frontmost app,
-                // then apply via set_selected_text or TextInjector::paste_text.
-                self.close_tab_ai_harness_terminal(cx);
-                crate::platform::defer_hide_main_window(cx);
-
-                let app_weak = cx.entity().downgrade();
-                cx.spawn(async move |_this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(
-                            Self::TAB_AI_APPLY_BACK_FOCUS_SETTLE_MS,
-                        ))
-                        .await;
-
-                    let route_for_apply = route.clone();
-                    let route_for_toast = route.clone();
-                    let text_for_apply = text.clone();
-
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            match route_for_apply.source_type {
-                                crate::ai::TabAiSourceType::DesktopSelection => {
-                                    selected_text::set_selected_text(&text_for_apply)
-                                        .map_err(|error| error.to_string())
-                                }
-                                crate::ai::TabAiSourceType::Desktop => {
-                                    let injector = text_injector::TextInjector::new();
-                                    injector
-                                        .paste_text(&text_for_apply)
-                                        .map_err(|error| error.to_string())
-                                }
-                                _ => Ok(()),
-                            }
-                        })
-                        .await;
-
-                    cx.update(|cx| {
-                        let Some(app) = app_weak.upgrade() else {
-                            return;
-                        };
-                        app.update(cx, |this, cx| {
-                            match result {
-                                Ok(()) => {
-                                    this.toast_manager.push(
-                                        crate::components::toast::Toast::success(
-                                            tab_ai_apply_back_success_message(
-                                                &route_for_toast.source_type,
-                                            )
-                                            .to_string(),
-                                            &this.theme,
-                                        )
-                                        .duration_ms(Some(TOAST_SUCCESS_MS)),
-                                    );
-                                }
-                                Err(error) => {
-                                    this.toast_manager.push(
-                                        crate::components::toast::Toast::error(
-                                            format!("Failed to apply result: {error}"),
-                                            &this.theme,
-                                        )
-                                        .duration_ms(Some(TOAST_ERROR_MS)),
-                                    );
-                                }
-                            }
-                            cx.notify();
-                        });
-                    });
-                })
-                .detach();
-            }
-        }
-    }
-
-    /// Apply `text` immediately when the route is known; otherwise poll
-    /// for up to `TAB_AI_APPLY_BACK_ROUTE_TIMEOUT_MS` ms.  If the route
-    /// is still unavailable after the deadline, show a route-aware error
-    /// toast instead of waiting forever.  Cancels silently if the harness
-    /// closes (view leaves `QuickTerminalView`) or the entity is dropped.
-    fn apply_tab_ai_result_text_or_wait_for_route(&mut self, text: String, cx: &mut Context<Self>) {
-        if let Some(route) = self.tab_ai_harness_apply_back_route.clone() {
-            self.apply_tab_ai_result_text(route, text, cx);
-            return;
-        }
-
-        let app_weak = cx.entity().downgrade();
-        cx.spawn(async move |_this, cx| {
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_millis(
-                    ScriptListApp::TAB_AI_APPLY_BACK_ROUTE_TIMEOUT_MS,
-                );
-
-            loop {
-                enum WaitState {
-                    Ready(Box<crate::ai::TabAiApplyBackRoute>),
-                    Pending,
-                    TimedOut,
-                    Cancelled,
-                }
-
-                let state = cx.update(|cx| {
-                    let Some(app) = app_weak.upgrade() else {
-                        return WaitState::Cancelled;
-                    };
-                    app.update(cx, |this, _cx| {
-                        if !matches!(this.current_view, AppView::QuickTerminalView { .. }) {
-                            return WaitState::Cancelled;
-                        }
-                        if let Some(route) = this.tab_ai_harness_apply_back_route.clone() {
-                            return WaitState::Ready(Box::new(route));
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            return WaitState::TimedOut;
-                        }
-                        WaitState::Pending
-                    })
-                });
-
-                match state {
-                    WaitState::Ready(route) => {
-                        cx.update(|cx| {
-                            let Some(app) = app_weak.upgrade() else {
-                                return;
-                            };
-                            app.update(cx, |this, cx| {
-                                this.apply_tab_ai_result_text(*route, text.clone(), cx);
-                            });
-                        });
-                        break;
-                    }
-                    WaitState::TimedOut => {
-                        cx.update(|cx| {
-                            let Some(app) = app_weak.upgrade() else {
-                                return;
-                            };
-                            app.update(cx, |this, cx| {
-                                this.toast_tab_ai_apply_back_pending(cx);
-                            });
-                        });
-                        break;
-                    }
-                    WaitState::Cancelled => break,
-                    WaitState::Pending => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(
-                                ScriptListApp::TAB_AI_APPLY_BACK_ROUTE_POLL_MS,
-                            ))
-                            .await;
-                    }
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Apply harness output from the terminal.  Prefers the terminal selection
-    /// directly (no clipboard round-trip); falls back to clipboard priming
-    /// only when no selection exists.
-    #[allow(dead_code)] // Called from include!() binary code (render_prompts/term.rs)
-    pub(crate) fn apply_tab_ai_result_from_terminal(
-        &mut self,
-        entity: Entity<term_prompt::TermPrompt>,
-        cx: &mut Context<Self>,
-    ) {
-        // Try to read the terminal selection directly — avoids the
-        // clipboard prime → timer → read race entirely.
-        let selected_text =
-            entity.update(cx, |term_prompt, _cx| term_prompt.selected_text_for_apply());
-
-        if let Some(text) = selected_text {
-            self.apply_tab_ai_result_text_or_wait_for_route(text, cx);
-            return;
-        }
-
-        // No selection — fall back to clipboard priming (copies last output).
-        entity.update(cx, |term_prompt, cx| {
-            term_prompt.prime_apply_clipboard(cx);
-        });
-
-        let app = cx.entity().downgrade();
-        cx.spawn(async move |_this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(
-                    Self::TAB_AI_APPLY_BACK_CLIPBOARD_PRIME_MS,
-                ))
-                .await;
-            cx.update(|cx| {
-                let Some(app) = app.upgrade() else {
-                    return;
-                };
-                app.update(cx, |this, cx| {
-                    this.apply_tab_ai_result_from_clipboard(cx);
-                });
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn apply_tab_ai_result_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        let text = match read_tab_ai_apply_back_clipboard_text() {
-            Ok(text) => text,
-            Err(_error) => {
-                self.toast_tab_ai_apply_back_unavailable(cx);
-                return;
-            }
-        };
-
-        self.apply_tab_ai_result_text_or_wait_for_route(text, cx);
-    }
-}
+include!("apply_back.rs");
 
 #[cfg(test)]
 include!("mod_tests.rs");

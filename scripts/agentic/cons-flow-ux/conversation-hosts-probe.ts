@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { createHash } from "node:crypto";
 import {
@@ -27,10 +28,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 assertNoninteractiveVisualProbe("conversation-hosts.private-pasteboard-archive");
 
 const ROOT = resolve(import.meta.dir, "../../..");
-const BINARY = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-c06/script-kit-gpui",
-);
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_DIR = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ?? ".test-output/cons-flow-c06",
 );
@@ -362,22 +360,20 @@ async function runScenario(
   let scenarioClipboardRestored = false;
   const pasteboard = await PasteboardGuard.create();
   try {
-    driver = await Driver.launch({
-      binary: BINARY,
-      sessionName: `cons-flow-c06-${id}`,
-      sandboxHome: true,
-      sharedModels: false,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1",
-        SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-        SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-        SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-        ...env,
-      },
-      readyTimeoutMs: 30_000,
-      defaultTimeoutMs: 15_000,
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY,
+    sessionName: `cons-flow-c06-${id}`,
+    sandboxHome: true,
+    sharedModels: false,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1",
+      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+      ...env,
+    },
+    readyTimeoutMs: 30_000,
+    defaultTimeoutMs: 15_000, });
     await driver.waitForSettle();
     scenarios.push({ id, surface, status: "PASS", facts: await body(driver, pasteboard) });
     targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });

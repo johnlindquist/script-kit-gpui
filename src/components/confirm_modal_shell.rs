@@ -112,6 +112,7 @@ pub(crate) fn modal_action_row(
                 },
                 theme,
             )
+            .debug_selector(move || button.id.to_string())
             .when(!enabled, |style| {
                 style.opacity(MODAL_ACTION_DISABLED_OPACITY)
             })

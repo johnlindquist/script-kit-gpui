@@ -36,6 +36,10 @@ const BUILTIN_DICTATION_SETUP_REQUEST_MIC: &str = "request-microphone";
 const BUILTIN_DICTATION_SETUP_OPEN_MIC_SETTINGS: &str = "open-microphone-settings";
 
 include!("builtin_execution_support.rs");
+use crate::dictation::{
+    dictation_mutation_error_outcome, dictation_outcome_from_insertion_range,
+    with_frozen_dictation_destination,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(
@@ -523,385 +527,7 @@ impl PermissionCommandBuiltinAction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityOpenBuiltinAction {
-    MainWindow,
-    ScratchPad,
-    QuickTerminal,
-    ClaudeCode,
-    ProcessManager,
-}
-
-impl UtilityOpenBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Option<Self> {
-        match command {
-            builtins::UtilityCommandType::MainWindow => Some(Self::MainWindow),
-            builtins::UtilityCommandType::ScratchPad => Some(Self::ScratchPad),
-            builtins::UtilityCommandType::QuickTerminal => Some(Self::QuickTerminal),
-            builtins::UtilityCommandType::ClaudeCode => Some(Self::ClaudeCode),
-            builtins::UtilityCommandType::ProcessManager => Some(Self::ProcessManager),
-            builtins::UtilityCommandType::StopAllProcesses
-            | builtins::UtilityCommandType::ScriptKitSelfie
-            | builtins::UtilityCommandType::DoInCurrentApp
-            | builtins::UtilityCommandType::TurnThisIntoCommand
-            | builtins::UtilityCommandType::CurrentAppCommands => None,
-        }
-    }
-
-    fn opening_message(self) -> Option<&'static str> {
-        match self {
-            Self::MainWindow => Some("Opening Main Window"),
-            Self::ScratchPad | Self::QuickTerminal | Self::ClaudeCode | Self::ProcessManager => {
-                None
-            }
-        }
-    }
-
-    fn success_detail(self) -> &'static str {
-        match self {
-            Self::MainWindow => "open_main_window",
-            Self::ScratchPad => "open_scratch_pad",
-            Self::QuickTerminal => "open_quick_terminal",
-            Self::ClaudeCode => "open_claude_code_terminal",
-            Self::ProcessManager => "open_process_manager",
-        }
-    }
-
-    fn opens_from_main_menu(self) -> bool {
-        matches!(
-            self,
-            Self::ScratchPad | Self::QuickTerminal | Self::ClaudeCode
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityProcessBuiltinAction {
-    StopAllProcesses,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityProcessBuiltinOutcome {
-    NoRunningProcesses,
-    StopRequested { process_count: usize },
-}
-
-impl UtilityProcessBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Option<Self> {
-        match command {
-            builtins::UtilityCommandType::StopAllProcesses => Some(Self::StopAllProcesses),
-            _ => None,
-        }
-    }
-
-    fn empty_hud(self) -> &'static str {
-        match self {
-            Self::StopAllProcesses => "No running scripts to stop.",
-        }
-    }
-
-    fn success_hud(self, process_count: usize) -> String {
-        match self {
-            Self::StopAllProcesses => {
-                format!("Stopped {process_count} running script process(es).")
-            }
-        }
-    }
-
-    fn success_detail(self) -> &'static str {
-        match self {
-            Self::StopAllProcesses => "stop_all_processes",
-        }
-    }
-
-    fn outcome(self, process_count: usize) -> UtilityProcessBuiltinOutcome {
-        let _ = self;
-        match process_count {
-            0 => UtilityProcessBuiltinOutcome::NoRunningProcesses,
-            process_count => UtilityProcessBuiltinOutcome::StopRequested { process_count },
-        }
-    }
-}
-
-impl UtilityProcessBuiltinOutcome {
-    fn should_stop_processes(self) -> bool {
-        matches!(self, Self::StopRequested { .. })
-    }
-
-    fn process_count(self) -> usize {
-        match self {
-            Self::NoRunningProcesses => 0,
-            Self::StopRequested { process_count } => process_count,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilitySelfieBuiltinAction {
-    Selfie,
-}
-
-impl UtilitySelfieBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Option<Self> {
-        match command {
-            builtins::UtilityCommandType::ScriptKitSelfie => Some(Self::Selfie),
-            _ => None,
-        }
-    }
-
-    fn starting_hud(self, state: &str) -> String {
-        match self {
-            Self::Selfie => format!("Capturing Script Kit selfie: {state}"),
-        }
-    }
-
-    fn saved_hud(self, receipt: &crate::platform::ScriptKitSelfieReceipt) -> String {
-        match self {
-            Self::Selfie => format!("Selfie saved: {}", receipt.png_path),
-        }
-    }
-
-    fn failure_message(self, error: &dyn std::fmt::Display) -> String {
-        match self {
-            Self::Selfie => format!("Script Kit Selfie failed: {error}"),
-        }
-    }
-
-    fn success_detail(self) -> &'static str {
-        match self {
-            Self::Selfie => "script_kit_selfie_saved",
-        }
-    }
-
-    fn failure_detail(self) -> &'static str {
-        match self {
-            Self::Selfie => "script_kit_selfie_failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityRecipeBuiltinAction {
-    TurnThisIntoCommand,
-}
-
-impl UtilityRecipeBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Option<Self> {
-        match command {
-            builtins::UtilityCommandType::TurnThisIntoCommand => Some(Self::TurnThisIntoCommand),
-            _ => None,
-        }
-    }
-
-    fn success_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command",
-        }
-    }
-
-    fn clipboard_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_clipboard_failed",
-        }
-    }
-
-    fn serialize_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_serialize_failed",
-        }
-    }
-
-    fn serialize_failure_message(self, error: &dyn std::fmt::Display) -> String {
-        match self {
-            Self::TurnThisIntoCommand => {
-                format!("Failed to serialize current app command recipe: {error}")
-            }
-        }
-    }
-
-    fn capture_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_capture_failed",
-        }
-    }
-
-    fn missing_query_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_missing_query",
-        }
-    }
-
-    fn drift_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_drift",
-        }
-    }
-
-    fn missing_entry_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_missing_entry_index",
-        }
-    }
-
-    fn open_palette_success_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_open_palette",
-        }
-    }
-
-    fn generate_script_success_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_generate_script",
-        }
-    }
-
-    fn copied_recipe_hud(self, suggested_script_name: &str) -> String {
-        match self {
-            Self::TurnThisIntoCommand => {
-                format!("Automation recipe copied: {suggested_script_name}")
-            }
-        }
-    }
-
-    fn unknown_action_failure_detail(self) -> &'static str {
-        match self {
-            Self::TurnThisIntoCommand => "turn_this_into_command_unknown_action",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityDoInCurrentAppBuiltinAction {
-    Submit,
-}
-
-impl UtilityDoInCurrentAppBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Option<Self> {
-        match command {
-            builtins::UtilityCommandType::DoInCurrentApp => Some(Self::Submit),
-            _ => None,
-        }
-    }
-
-    fn open_palette_success_detail(self) -> &'static str {
-        match self {
-            Self::Submit => "do_in_current_app_open_palette",
-        }
-    }
-
-    fn generate_script_success_detail(self) -> &'static str {
-        match self {
-            Self::Submit => "do_in_current_app_generate_script_scheduled",
-        }
-    }
-
-    fn capture_failure_detail(self) -> &'static str {
-        match self {
-            Self::Submit => "do_in_current_app_capture_failed",
-        }
-    }
-
-    fn capture_failure_message(self, error: &dyn std::fmt::Display) -> String {
-        match self {
-            Self::Submit => format!("Failed to load frontmost app menu bar: {error}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityCurrentAppCommandsBuiltinAction {
-    Open,
-}
-
-impl UtilityCurrentAppCommandsBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Option<Self> {
-        match command {
-            builtins::UtilityCommandType::CurrentAppCommands => Some(Self::Open),
-            _ => None,
-        }
-    }
-
-    fn success_detail(self) -> &'static str {
-        match self {
-            Self::Open => "open_current_app_commands",
-        }
-    }
-
-    fn capture_failure_detail(self) -> &'static str {
-        match self {
-            Self::Open => "current_app_commands_capture_failed",
-        }
-    }
-
-    fn capture_failure_message(self, error: &dyn std::fmt::Display) -> String {
-        match self {
-            Self::Open => format!("Failed to load frontmost app menu bar: {error}"),
-        }
-    }
-
-    fn refresh_failure_message(self, error: &dyn std::fmt::Display) -> String {
-        match self {
-            Self::Open => format!("Failed to refresh current app commands: {error}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UtilityCommandBuiltinAction {
-    Open(UtilityOpenBuiltinAction),
-    Process(UtilityProcessBuiltinAction),
-    Selfie(UtilitySelfieBuiltinAction),
-    Recipe(UtilityRecipeBuiltinAction),
-    DoInCurrentApp(UtilityDoInCurrentAppBuiltinAction),
-    CurrentAppCommands(UtilityCurrentAppCommandsBuiltinAction),
-}
-
-impl UtilityCommandBuiltinAction {
-    fn from_command(command: builtins::UtilityCommandType) -> Self {
-        match command {
-            builtins::UtilityCommandType::MainWindow => Self::Open(
-                UtilityOpenBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityOpenBuiltinAction::MainWindow),
-            ),
-            builtins::UtilityCommandType::ScratchPad => Self::Open(
-                UtilityOpenBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityOpenBuiltinAction::ScratchPad),
-            ),
-            builtins::UtilityCommandType::QuickTerminal => Self::Open(
-                UtilityOpenBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityOpenBuiltinAction::QuickTerminal),
-            ),
-            builtins::UtilityCommandType::ClaudeCode => Self::Open(
-                UtilityOpenBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityOpenBuiltinAction::ClaudeCode),
-            ),
-            builtins::UtilityCommandType::ProcessManager => Self::Open(
-                UtilityOpenBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityOpenBuiltinAction::ProcessManager),
-            ),
-            builtins::UtilityCommandType::StopAllProcesses => Self::Process(
-                UtilityProcessBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityProcessBuiltinAction::StopAllProcesses),
-            ),
-            builtins::UtilityCommandType::ScriptKitSelfie => Self::Selfie(
-                UtilitySelfieBuiltinAction::from_command(command)
-                    .unwrap_or(UtilitySelfieBuiltinAction::Selfie),
-            ),
-            builtins::UtilityCommandType::TurnThisIntoCommand => Self::Recipe(
-                UtilityRecipeBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityRecipeBuiltinAction::TurnThisIntoCommand),
-            ),
-            builtins::UtilityCommandType::DoInCurrentApp => Self::DoInCurrentApp(
-                UtilityDoInCurrentAppBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityDoInCurrentAppBuiltinAction::Submit),
-            ),
-            builtins::UtilityCommandType::CurrentAppCommands => Self::CurrentAppCommands(
-                UtilityCurrentAppCommandsBuiltinAction::from_command(command)
-                    .unwrap_or(UtilityCurrentAppCommandsBuiltinAction::Open),
-            ),
-        }
-    }
-}
+include!("builtin_execution_utility_actions.rs");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuBarBuiltinAction {
@@ -1744,6 +1370,7 @@ fn emoji_picker_label(emoji: &script_kit_gpui::emoji::Emoji) -> String {
 }
 
 include!("builtin_execution_ai_capture.rs");
+include!("builtin_execution_owned_dictation.rs");
 
 impl ScriptListApp {
     fn system_action_feedback_message(
@@ -2134,8 +1761,8 @@ impl ScriptListApp {
         &mut self,
         entry: &builtins::BuiltInEntry,
         cx: &mut Context<Self>,
-    ) {
-        self.execute_builtin_with_query(entry, None, cx);
+    ) -> Option<crate::action_helpers::DispatchOutcome> {
+        self.execute_builtin_with_query(entry, None, cx)
     }
 
     fn execute_builtin_with_query(
@@ -2143,7 +1770,7 @@ impl ScriptListApp {
         entry: &builtins::BuiltInEntry,
         query_override: Option<&str>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<crate::action_helpers::DispatchOutcome> {
         let start = std::time::Instant::now();
         let dctx = crate::action_helpers::DispatchContext::for_builtin(&entry.id);
 
@@ -2248,7 +1875,7 @@ impl ScriptListApp {
                 duration_ms = start.elapsed().as_millis() as u64,
                 "Builtin execution deferred to confirmation modal"
             );
-            return; // Wait for modal callback
+            return None; // Confirmation is pending, not a completed action.
         }
 
         // All builtins now return DispatchOutcome — system actions are handled
@@ -2256,6 +1883,7 @@ impl ScriptListApp {
         let outcome = self.execute_builtin_inner(entry, query_override, &dctx, cx);
 
         Self::log_builtin_outcome(&entry.id, &dctx, "builtin_execution", &outcome, &start);
+        Some(outcome)
     }
 
     /// Open a filterable main-window builtin view with a consistent UX contract.
@@ -2290,6 +1918,7 @@ impl ScriptListApp {
         self.pending_placeholder = Some(placeholder.to_string());
         self.builtin_row_stack_scroll_handle.scroll_to_item(0);
         self.current_view = view;
+        self.note_main_route_changed();
         self.hovered_index = None;
         // opened_from_main_menu intentionally NOT set here — see the doc
         // comment above (origin is propagated from the entry point).
@@ -2314,7 +1943,9 @@ impl ScriptListApp {
     }
 
     fn open_theme_chooser_view(&mut self, cx: &mut Context<Self>) {
-        self.theme_before_chooser = Some(self.theme.clone());
+        let snapshot = crate::theme::get_theme_snapshot();
+        self.theme_before_chooser = Some(snapshot.theme.clone());
+        self.theme_chooser_preview_revision = Some(snapshot.revision);
         self.theme_chooser_management = None;
         self.theme_chooser_panel_mode = ThemeChooserPanelMode::default();
         // Use the unified catalog (user themes + built-in presets) so the
@@ -2354,6 +1985,8 @@ impl ScriptListApp {
         self.selected_index = 0;
         self.opened_from_main_menu = true;
         self.invalidate_grouped_cache();
+        self.reset_main_menu_selection_intent();
+        self.flush_pending_main_menu_query(cx);
         self.sync_list_state();
         let (grouped_items, _) = self.get_grouped_results_cached();
         let item_count = grouped_items.len();
@@ -2402,9 +2035,8 @@ impl ScriptListApp {
         self.opened_from_main_menu = true;
         self.main_menu_fallback_state.clear();
         self.invalidate_grouped_cache();
-        self.filter_coalescer.reset();
-        self.maybe_start_root_file_search(&filter_text, cx);
-        self.reconcile_script_list_after_filter_change("open_ai_vault_source_filter", cx);
+        self.reset_main_menu_selection_intent();
+        self.flush_pending_main_menu_query(cx);
         let (grouped_items, _) = self.get_grouped_results_cached();
         let item_count = grouped_items.len();
         self.set_main_window_mode_state_only(
@@ -2442,6 +2074,7 @@ impl ScriptListApp {
         self.pending_filter_sync = true;
         self.pending_placeholder = Some(placeholder.to_string());
         self.current_view = view;
+        self.note_main_route_changed();
         self.hovered_index = None;
         // opened_from_main_menu intentionally NOT set here — the entry point
         // owns launch origin (see open_builtin_filterable_view's doc comment).
@@ -2686,7 +2319,7 @@ impl ScriptListApp {
             entry_index = original_entry_index,
             "current_app_commands.execute_selected_resolved"
         );
-        self.execute_builtin(&entry, cx);
+        let _outcome = self.execute_builtin(&entry, cx);
     }
 
     /// Inner builtin executor — runs the actual action logic.
@@ -3134,7 +2767,19 @@ impl ScriptListApp {
                     "{}",
                     action.log_message()
                 );
-                self.apps = app_launcher::scan_applications().clone();
+                self.apps = match app_launcher::scan_applications() {
+                    Ok(apps) => apps,
+                    Err(error) => {
+                        let message = format!("Application catalogue unavailable: {error:#}");
+                        self.show_error_toast(message.clone(), cx);
+                        return Self::builtin_error(
+                            dctx,
+                            crate::action_helpers::ERROR_ACTION_FAILED,
+                            message,
+                            action.success_detail(),
+                        );
+                    }
+                };
                 tracing::info!(
                     category = "BUILTIN",
                     trace_id = %dctx.trace_id,
@@ -3418,7 +3063,19 @@ impl ScriptListApp {
             "{}",
             action.opening_message()
         );
-        let apps = app_launcher::scan_applications();
+        let apps = match app_launcher::scan_applications() {
+            Ok(apps) => apps,
+            Err(error) => {
+                let message = format!("Application catalogue unavailable: {error:#}");
+                self.show_error_toast(message.clone(), cx);
+                return Self::builtin_error(
+                    dctx,
+                    crate::action_helpers::ERROR_ACTION_FAILED,
+                    message,
+                    action.success_detail(app_name),
+                );
+            }
+        };
         if let Some(app) = apps.iter().find(|a| a.name == *app_name) {
             if let Err(error) = app_launcher::launch_application(app) {
                 let message = action.launch_failure_message(app_name, &error);
@@ -3872,7 +3529,7 @@ impl ScriptListApp {
 
         self.opened_from_main_menu = true;
         self.arg_input.clear();
-        self.arg_selected_index = start_index;
+        self.set_arg_selected_index(start_index);
         self.focused_input = FocusedInput::ArgPrompt;
         self.filter_text.clear();
         self.pending_filter_sync = true;
@@ -3883,6 +3540,7 @@ impl ScriptListApp {
             placeholder: "Select Snap Mode".to_string(),
             choices,
         };
+        self.note_main_route_changed();
         resize_to_view_sync(ViewType::MiniPrompt, choice_count.min(5));
         cx.notify();
 
@@ -3963,7 +3621,7 @@ impl ScriptListApp {
         );
         self.opened_from_main_menu = true;
         self.arg_input.clear();
-        self.arg_selected_index = start_index;
+        self.set_arg_selected_index(start_index);
         self.focused_input = FocusedInput::ArgPrompt;
         self.filter_text.clear();
         self.pending_filter_sync = true;
@@ -3974,6 +3632,7 @@ impl ScriptListApp {
             placeholder: action.placeholder().to_string(),
             choices,
         };
+        self.note_main_route_changed();
         resize_to_view_sync(ViewType::MiniPrompt, choice_count.min(5));
         cx.notify();
 
@@ -3996,8 +3655,14 @@ impl ScriptListApp {
         dctx: &crate::action_helpers::DispatchContext,
         cx: &mut Context<Self>,
     ) -> crate::action_helpers::DispatchOutcome {
-        self.frecency_store.clear();
-        if let Err(e) = self.frecency_store.save() {
+        let mut save_result = Ok(());
+        self.commit_main_menu_results_refresh("clear-suggested", None, cx, |app, _cx| {
+            let changed = !app.frecency_store.is_empty();
+            app.frecency_store.clear();
+            save_result = app.frecency_store.save();
+            changed
+        });
+        if let Err(e) = save_result {
             let message = action.failure_message(&e);
             self.show_error_toast(message.clone(), cx);
             cx.notify();
@@ -4012,9 +3677,10 @@ impl ScriptListApp {
                 trace_id = %dctx.trace_id,
                 "Cleared all suggested items"
             );
-            self.invalidate_grouped_cache();
-            self.reset_to_script_list(cx);
-            resize_to_view_sync(ViewType::ScriptList, 0);
+            if !matches!(self.current_view, AppView::ScriptList) {
+                self.reset_to_script_list(cx);
+                resize_to_view_sync(ViewType::ScriptList, 0);
+            }
             self.show_hud(action.hud_text().to_string(), Some(HUD_SHORT_MS), cx);
             cx.notify();
             Self::builtin_success(dctx, action.success_detail())
@@ -4734,6 +4400,16 @@ impl ScriptListApp {
         dctx: &crate::action_helpers::DispatchContext,
         cx: &mut Context<Self>,
     ) -> crate::action_helpers::DispatchOutcome {
+        if let Err(refusal) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+        {
+            return Self::builtin_error(
+                dctx,
+                refusal.code,
+                refusal.to_string(),
+                "paste_sequential_policy_refused",
+            );
+        }
         tracing::info!(
             action = "paste_sequential",
             event = "trigger",
@@ -4759,6 +4435,14 @@ impl ScriptListApp {
                         clipboard_history::commit_paste_sequence(&mut self.paste_sequential_state);
                         self.hide_main_and_reset(cx);
                         Self::builtin_success(dctx, paste_action.success_detail())
+                    }
+                    Err(clipboard_history::EnqueuePasteError::PolicyRefused(refusal)) => {
+                        Self::builtin_error(
+                            dctx,
+                            refusal.code,
+                            refusal.to_string(),
+                            "paste_sequential_policy_refused",
+                        )
                     }
                     Err(clipboard_history::EnqueuePasteError::WorkerDisconnected) => {
                         tracing::error!(
@@ -5095,16 +4779,7 @@ impl ScriptListApp {
         target
     }
 
-    fn dictation_identity_generation(value: &str) -> u64 {
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in value.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash
-    }
-
-    fn capture_dictation_target_selection(
+    pub(crate) fn capture_dictation_target_selection(
         &mut self,
         requested_target: crate::dictation::DictationTarget,
         cx: &mut Context<Self>,
@@ -5118,84 +4793,101 @@ impl ScriptListApp {
             DictationTarget::AiChatComposer => DictationTarget::TabAiHarness,
             target => target,
         };
+        self.note_main_route_changed();
+        let revisions = self.owned_revision_facts();
+        let owner = crate::dictation::FrozenMainDictationOwner {
+            root_entity_id: cx.entity_id().as_u64(),
+            window_generation: crate::windows::automation_window_by_id("main")
+                .and_then(|info| info.generation),
+            surface_generation: revisions.surface_generation,
+            visibility_generation: script_kit_gpui::main_window_visibility_generation(),
+        };
+        if crate::runtime_policy::is_owned_evaluation()
+            && owner.window_generation.is_none()
+            && matches!(
+                target,
+                DictationTarget::MainWindowFilter
+                    | DictationTarget::MainWindowPrompt
+                    | DictationTarget::TabAiHarness
+                    | DictationTarget::DayPageToday
+            )
+        {
+            return Err("The owned main window registration is unavailable".into());
+        }
         let destination = match target {
             DictationTarget::MainWindowFilter => FrozenDictationDestination::MainWindowFilter {
-                window_generation: script_kit_gpui::main_window_visibility_generation(),
-                input_generation: Self::dictation_identity_generation(&self.filter_text),
+                owner,
+                input_generation: revisions
+                    .data_generation
+                    .checked_add(self.gpui_input_state.read(cx).revision())
+                    .ok_or_else(|| "The filter input epoch is exhausted".to_string())?,
             },
             DictationTarget::MainWindowPrompt => {
                 if !self.can_accept_dictation_into_prompt() {
                     return Err("The selected prompt is no longer available".to_string());
                 }
-                // Freeze the owning prompt instance separately from its live input.
-                // Entity-backed prompts use GPUI's stable entity identity; inline
-                // prompts use their immutable definition. Never hash AppView::Debug:
-                // entity Debug output does not include the user's current input.
-                let (prompt_id, prompt_identity, input_text) = match &self.current_view {
-                    AppView::ArgPrompt {
-                        id,
-                        placeholder,
-                        choices,
-                        ..
+                // A definition or text hash cannot distinguish reopening the same
+                // prompt. Include the actual root route and prompt owner epochs.
+                let (prompt_id, prompt_entity_id, input_revision) = match &self.current_view {
+                    AppView::ArgPrompt { id, .. }
+                    | AppView::MiniPrompt { id, .. }
+                    | AppView::MicroPrompt { id, .. } => {
+                        (id.clone(), None, self.arg_input.revision())
                     }
-                    | AppView::MiniPrompt {
-                        id,
-                        placeholder,
-                        choices,
-                    }
-                    | AppView::MicroPrompt {
-                        id,
-                        placeholder,
-                        choices,
-                    } => (
-                        id.clone(),
-                        format!("inline:{id}:{placeholder}:{}", choices.len()),
-                        self.arg_input.text().to_string(),
-                    ),
                     AppView::PathPrompt { id, entity, .. } => (
                         id.clone(),
-                        format!("entity:{}", entity.entity_id().as_u64()),
-                        entity.read(cx).filter_text.clone(),
+                        Some(entity.entity_id().as_u64()),
+                        entity.read(cx).dictation_input_revision(cx),
                     ),
                     AppView::SelectPrompt { id, entity } => (
                         id.clone(),
-                        format!("entity:{}", entity.entity_id().as_u64()),
-                        entity.read(cx).filter_text.clone(),
+                        Some(entity.entity_id().as_u64()),
+                        entity.read(cx).dictation_input_revision(cx),
                     ),
                     AppView::EnvPrompt { id, entity } => (
                         id.clone(),
-                        format!("entity:{}", entity.entity_id().as_u64()),
-                        entity.read(cx).input_text().to_string(),
+                        Some(entity.entity_id().as_u64()),
+                        entity.read(cx).dictation_input_revision(cx),
                     ),
                     AppView::TemplatePrompt { id, entity } => {
                         let prompt = entity.read(cx);
                         (
                             id.clone(),
-                            format!("entity:{}", entity.entity_id().as_u64()),
-                            serde_json::to_string(&(prompt.current_input, &prompt.values))
-                                .unwrap_or_default(),
+                            Some(entity.entity_id().as_u64()),
+                            prompt.dictation_input_revision(cx),
                         )
                     }
                     AppView::FormPrompt { id, entity } => (
                         id.clone(),
-                        format!("entity:{}", entity.entity_id().as_u64()),
-                        entity.read(cx).collect_values(cx),
+                        Some(entity.entity_id().as_u64()),
+                        entity.read(cx).dictation_input_revision(cx),
                     ),
-                    AppView::FileSearchView {
-                        query,
-                        presentation,
-                        ..
-                    } => (
+                    AppView::FileSearchView { .. } => (
                         "file-search".to_string(),
-                        format!("file-search:{presentation:?}"),
-                        query.clone(),
+                        None,
+                        self.gpui_input_state.read(cx).revision(),
                     ),
                     _ => return Err("The selected prompt is no longer available".to_string()),
                 };
+                if self.prompt_completion.as_ref().is_some_and(|binding| {
+                    binding.instance().id == prompt_id && binding.observation().retired
+                }) {
+                    return Err("The selected prompt lifetime has ended".into());
+                }
+                let prompt_generation = self
+                    .prompt_completion
+                    .as_ref()
+                    .filter(|binding| binding.instance().id == prompt_id)
+                    .map(|binding| binding.instance().generation);
                 FrozenDictationDestination::MainWindowPrompt {
                     prompt_id,
-                    prompt_generation: Self::dictation_identity_generation(&prompt_identity),
-                    input_generation: Self::dictation_identity_generation(&input_text),
+                    prompt_generation,
+                    prompt_entity_id,
+                    owner,
+                    input_generation: revisions
+                        .data_generation
+                        .checked_add(input_revision)
+                        .ok_or_else(|| "The prompt input epoch is exhausted".to_string())?,
                 }
             }
             DictationTarget::NotesEditor => {
@@ -5215,27 +4907,60 @@ impl ScriptListApp {
                         .map(|thread| FrozenAgentChatPolicy::ExistingThread {
                             thread_id: thread.read(cx).ui_thread_id().to_string(),
                             generation: self.tab_ai_harness_capture_generation,
+                            composer_semantic_token: Some(entity.read(cx).semantic_token(cx)),
+                            chat_entity_id: Some(entity.entity_id().as_u64()),
+                            data_generation: Some(revisions.data_generation),
+                            main_owner: owner,
                         })
                         .unwrap_or(FrozenAgentChatPolicy::FreshStandard {
                             host_generation: self.tab_ai_harness_capture_generation,
+                            main_owner: owner,
                         }),
                     _ => FrozenAgentChatPolicy::FreshStandard {
                         host_generation: self.tab_ai_harness_capture_generation,
+                        main_owner: owner,
                     },
                 };
                 FrozenDictationDestination::AgentChat { policy }
             }
             DictationTarget::ExternalApp => {
+                crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+                    .map_err(|error| error.to_string())?;
                 crate::dictation::capture_frozen_external_destination()?
             }
             DictationTarget::DayPageToday => {
-                let substrate = crate::brain::substrate::BrainSubstrate::default_kit();
-                let (date, substrate_fingerprint) =
-                    substrate.capture_day_destination(chrono::Utc::now());
-                FrozenDictationDestination::DayPage {
-                    date,
-                    substrate_fingerprint,
-                    entity_generation: 1,
+                if crate::runtime_policy::is_owned_evaluation() {
+                    let AppView::DayPage { entity } = &self.current_view else {
+                        return Err("The owned Day Page host is unavailable".into());
+                    };
+                    let view = entity.read(cx);
+                    let snapshot = view.capture_owned_dictation_destination(cx)?;
+                    let date = view
+                        .session
+                        .bound_date()
+                        .ok_or_else(|| "The Day Page date is not bound".to_string())?;
+                    let (_, substrate_fingerprint) = view
+                        .session
+                        .substrate()
+                        .capture_day_destination(view.clock_now.unwrap_or_else(chrono::Utc::now));
+                    FrozenDictationDestination::DayPage {
+                        date,
+                        substrate_fingerprint,
+                        entity_generation: view.host_return_generation,
+                        owned_editor: Some(snapshot),
+                        main_owner: Some(owner),
+                    }
+                } else {
+                    let substrate = crate::brain::substrate::BrainSubstrate::default_kit();
+                    let (date, substrate_fingerprint) =
+                        substrate.capture_day_destination(chrono::Utc::now());
+                    FrozenDictationDestination::DayPage {
+                        date,
+                        substrate_fingerprint,
+                        entity_generation: 1,
+                        owned_editor: None,
+                        main_owner: None,
+                    }
                 }
             }
             DictationTarget::QuickAiQuestion => FrozenDictationDestination::QuickAi {
@@ -5423,10 +5148,10 @@ impl ScriptListApp {
             Ok(crate::dictation::BeginStopCapture::Started {
                 request_id,
                 target,
-                selection,
                 session_generation,
-                job,
+                mut job,
             }) => {
+                let selection = job.take_selection();
                 // This stop request is the new parity baseline. Shortcut
                 // presses that arrive after it will toggle the queued restart
                 // state rather than being silently ignored.
@@ -5995,6 +5720,326 @@ impl ScriptListApp {
         }
     }
 
+    fn dictation_prompt_input_len(&self, cx: &App) -> Option<usize> {
+        match &self.current_view {
+            AppView::ArgPrompt { .. }
+            | AppView::MiniPrompt { .. }
+            | AppView::MicroPrompt { .. } => Some(self.arg_input.text().len()),
+            AppView::PathPrompt { entity, .. } => Some(entity.read(cx).filter_text.len()),
+            AppView::SelectPrompt { entity, .. } => Some(entity.read(cx).filter_text.len()),
+            AppView::EnvPrompt { entity, .. } => Some(entity.read(cx).input_text().len()),
+            AppView::TemplatePrompt { entity, .. } => {
+                let prompt = entity.read(cx);
+                prompt.values.get(prompt.current_input).map(String::len)
+            }
+            AppView::FormPrompt { entity, .. } => entity.read(cx).dictation_input_len(cx),
+            AppView::FileSearchView { query, .. } => Some(query.len()),
+            _ => None,
+        }
+    }
+
+    /// Shared mutation owner. Presentation and capture cleanup stay with the caller.
+    fn mutate_internal_dictation_request(
+        &mut self,
+        request: &crate::dictation::DictationDeliveryRequest,
+        mut owned_window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> (
+        Result<Option<serde_json::Value>, String>,
+        Option<crate::agent_handoff::AgentChatEntryDispatch>,
+    ) {
+        let target = request.selection.target;
+        let mut pending_agent_chat_entry = None;
+        let internal_result: Result<Option<serde_json::Value>, String> =
+            (|| -> Result<Option<serde_json::Value>, String> {
+                match target {
+                    crate::dictation::DictationTarget::MainWindowFilter => {
+                        let current = self.capture_dictation_target_selection(target, cx)?;
+                        with_frozen_dictation_destination(
+                            &request.selection.destination,
+                            &current.destination,
+                            || {
+                                if self.try_set_main_window_filter_from_dictation(
+                                    request.transcript.text().to_string(),
+                                    cx,
+                                ) {
+                                    Ok(Some(serde_json::json!({
+                                        "available": true,
+                                        "unit": "utf8Bytes",
+                                        "start": 0,
+                                        "end": self.filter_text.len(),
+                                        "insertedLength": self.filter_text.len(),
+                                        "operation": "replaceFrozenInput",
+                                        "source": "deliveryCoordinator",
+                                        "redacted": true,
+                                    })))
+                                } else {
+                                    Err("The Script Kit filter is no longer available".to_string())
+                                }
+                            },
+                        )
+                    }
+                    crate::dictation::DictationTarget::MainWindowPrompt => {
+                        if self.dictation_prompt_input_len(cx).is_none() {
+                            return Err("The selected prompt field cannot accept text".into());
+                        }
+                        if matches!(self.current_view, AppView::FileSearchView { .. }) {
+                            crate::runtime_policy::check(
+                                crate::runtime_policy::ExternalEffect::SystemDiscovery,
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                        let current = self.capture_dictation_target_selection(target, cx)?;
+                        with_frozen_dictation_destination(
+                            &request.selection.destination,
+                            &current.destination,
+                            || {
+                                if self
+                                    .try_set_prompt_input(request.transcript.text().to_string(), cx)
+                                {
+                                    let inserted_length = self.dictation_prompt_input_len(cx)
+                                        .ok_or_else(|| "mutation_failed: The prompt insertion was not observable".to_string())?;
+                                    Ok(Some(serde_json::json!({
+                                        "available": true,
+                                        "unit": "utf8Bytes",
+                                        "start": 0,
+                                        "end": inserted_length,
+                                        "insertedLength": inserted_length,
+                                        "operation": "replaceFrozenInput",
+                                        "source": "deliveryCoordinator",
+                                        "redacted": true,
+                                    })))
+                                } else {
+                                    Err("The prompt is no longer available".to_string())
+                                }
+                            },
+                        )
+                    }
+                    crate::dictation::DictationTarget::NotesEditor => {
+                        let crate::dictation::FrozenDictationDestination::NotesEditor {
+                            notes_instance_id,
+                            document_id,
+                            editor_generation,
+                            insertion_anchor,
+                        } = &request.selection.destination
+                        else {
+                            return Err(
+                                "Frozen destination type does not match its target".to_string()
+                            );
+                        };
+                        let expected = notes::NotesDictationDestinationSnapshot {
+                            notes_instance_id: *notes_instance_id,
+                            document_id: document_id.clone(),
+                            editor_generation: editor_generation.clone(),
+                            insertion_anchor: insertion_anchor.clone(),
+                        };
+                        notes::inject_text_into_frozen_notes(
+                            cx,
+                            &expected,
+                            request.transcript.text(),
+                        )
+                        .map(Some)
+                    }
+                    crate::dictation::DictationTarget::AiChatComposer => {
+                        Err("Legacy AI Chat destination was not canonicalized".to_string())
+                    }
+                    crate::dictation::DictationTarget::TabAiHarness => {
+                        use crate::dictation::{FrozenAgentChatPolicy, FrozenDictationDestination};
+                        let current = self.capture_dictation_target_selection(target, cx)?;
+                        with_frozen_dictation_destination(
+                            &request.selection.destination,
+                            &current.destination,
+                            || Ok(()),
+                        )?;
+                        let FrozenDictationDestination::AgentChat { policy } =
+                            &request.selection.destination
+                        else {
+                            return Err(
+                                "Frozen destination type does not match its target".to_string()
+                            );
+                        };
+                        if let FrozenAgentChatPolicy::ExistingThread {
+                            thread_id,
+                            composer_semantic_token,
+                            ..
+                        } = policy
+                        {
+                            if let Some(window) = owned_window.as_deref_mut() {
+                                let AppView::AgentChatView { entity } = &self.current_view else {
+                                    return Err("The frozen Agent Chat host is unavailable".into());
+                                };
+                                let token = composer_semantic_token.ok_or_else(|| {
+                                    "Missing frozen composer revision".to_string()
+                                })?;
+                                let (start, end) = entity.clone().update(cx, |chat, cx| {
+                                    chat.insert_owned_dictation_text(
+                                        thread_id,
+                                        token,
+                                        request.transcript.text(),
+                                        window,
+                                        cx,
+                                    )
+                                })?;
+                                Ok(Some(serde_json::json!({
+                                    "available": true, "unit": "unicodeScalars", "start": start, "end": end,
+                                    "insertedLength": end - start, "operation": "replaceFrozenSelection",
+                                    "source": "deliveryCoordinator", "redacted": true,
+                                })))
+                            } else {
+                                crate::runtime_policy::check(
+                                    crate::runtime_policy::ExternalEffect::Provider,
+                                )
+                                .map_err(|error| error.to_string())?;
+                                match self.dispatch_dictation_to_frozen_agent_chat(
+                                    request.transcript.text().to_string(),
+                                    false,
+                                    crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+                                    cx,
+                                ).map_err(str::to_string)? {
+                                    crate::agent_handoff::AgentChatEntryDispatch::Complete(outcome) => {
+                                        if outcome.source_consumed() {
+                                            Ok(None)
+                                        } else {
+                                            Err("Agent Chat refused the Dictation turn".to_string())
+                                        }
+                                    }
+                                    crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket) => {
+                                        pending_agent_chat_entry = Some(crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket));
+                                        Ok(None)
+                                    }
+                                }
+                            }
+                        } else {
+                            crate::runtime_policy::check(
+                                crate::runtime_policy::ExternalEffect::Provider,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            self.seed_agent_chat_dictation_return_origin(cx);
+                            match self.dispatch_dictation_to_frozen_agent_chat(
+                                request.transcript.text().to_string(),
+                                true,
+                                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+                                cx,
+                            ).map_err(str::to_string)? {
+                                crate::agent_handoff::AgentChatEntryDispatch::Complete(outcome) => {
+                                    if outcome.source_consumed() {
+                                        Ok(None)
+                                    } else {
+                                        Err("Agent Chat refused the Dictation turn".to_string())
+                                    }
+                                }
+                                crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket) => {
+                                    pending_agent_chat_entry = Some(crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket));
+                                    Ok(None)
+                                }
+                            }
+                        }
+                    }
+                    crate::dictation::DictationTarget::DayPageToday => {
+                        let crate::dictation::FrozenDictationDestination::DayPage {
+                            date,
+                            substrate_fingerprint,
+                            owned_editor,
+                            ..
+                        } = &request.selection.destination
+                        else {
+                            return Err(
+                                "Frozen destination type does not match its target".to_string()
+                            );
+                        };
+                        if crate::runtime_policy::is_owned_evaluation() {
+                            let window = owned_window.as_deref_mut().ok_or_else(|| {
+                                "The owned Day Page window is unavailable".to_string()
+                            })?;
+                            let snapshot = owned_editor.as_ref().ok_or_else(|| {
+                                "The frozen Day Page editor identity is missing".to_string()
+                            })?;
+                            let current = self.capture_dictation_target_selection(target, cx)?;
+                            return with_frozen_dictation_destination(
+                                &request.selection.destination,
+                                &current.destination,
+                                || {
+                                    let AppView::DayPage { entity } = &self.current_view else {
+                                        return Err(
+                                            "The frozen Day Page host is unavailable".into()
+                                        );
+                                    };
+                                    entity
+                                        .clone()
+                                        .update(cx, |view, cx| {
+                                            view.inject_dictation_text_into_owned_snapshot(
+                                                snapshot,
+                                                request.transcript.text(),
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .map(Some)
+                                },
+                            );
+                        }
+                        let substrate = crate::brain::substrate::BrainSubstrate::default_kit();
+                        let (_, current_fingerprint) =
+                            substrate.capture_day_destination(chrono::Utc::now());
+                        if current_fingerprint != *substrate_fingerprint {
+                            Err("The Day Page substrate changed".to_string())
+                        } else {
+                            let capture_text = request
+                                .transcript
+                                .text()
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            substrate
+                                .append_to_captured_day(
+                                    *date,
+                                    chrono::Utc::now(),
+                                    crate::brain::substrate::DayEntry::Capture {
+                                        text: capture_text,
+                                    },
+                                )
+                                .map(|_| None)
+                                .map_err(|error| error.to_string())
+                        }
+                    }
+                    crate::dictation::DictationTarget::QuickAiQuestion => {
+                        crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::Provider,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        self.seed_agent_chat_dictation_return_origin(cx);
+                        match self
+                            .dispatch_dictation_to_frozen_agent_chat(
+                                request.transcript.text().to_string(),
+                                true,
+                                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
+                                cx,
+                            )
+                            .map_err(str::to_string)?
+                        {
+                            crate::agent_handoff::AgentChatEntryDispatch::Complete(outcome) => {
+                                if outcome.source_consumed() {
+                                    Ok(None)
+                                } else {
+                                    Err("Quick AI refused the Dictation turn".to_string())
+                                }
+                            }
+                            crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket) => {
+                                pending_agent_chat_entry = Some(
+                                    crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket),
+                                );
+                                Ok(None)
+                            }
+                        }
+                    }
+                    crate::dictation::DictationTarget::ExternalApp => {
+                        Err("external delivery is handled by the frozen external actor".to_string())
+                    }
+                }
+            })();
+        (internal_result, pending_agent_chat_entry)
+    }
+
     fn complete_internal_dictation_delivery(
         &mut self,
         request: crate::dictation::DictationDeliveryRequest,
@@ -6005,27 +6050,6 @@ impl ScriptListApp {
     ) {
         let destination = target.destination();
         crate::dictation::clear_dictation_recovery_work();
-        let mutation_receipt = crate::dictation::DictationMutationReceipt {
-            delivery_id: request.delivery_id,
-            destination_kind: request.selection.destination.kind(),
-            identity_fingerprint: request.selection.destination.identity_fingerprint(),
-            insertion_start: insertion_range
-                .as_ref()
-                .and_then(|range| range.get("start"))
-                .and_then(serde_json::Value::as_u64)
-                .map(|value| value as usize),
-            insertion_end: insertion_range
-                .as_ref()
-                .and_then(|range| range.get("end"))
-                .and_then(serde_json::Value::as_u64)
-                .map(|value| value as usize),
-            inserted_length: request.transcript.len(),
-            duplicate: false,
-        };
-        let _outcome = crate::dictation::DictationDeliveryOutcome::Delivered {
-            destination: request.selection.destination.clone(),
-            mutation_receipt,
-        };
         tracing::info!(
             category = "DICTATION",
             ?target,
@@ -6236,231 +6260,28 @@ impl ScriptListApp {
                     return;
                 }
 
-                let mut pending_agent_chat_entry = None;
-                let internal_result: Result<Option<serde_json::Value>, String> =
-                    (|| -> Result<Option<serde_json::Value>, String> {
-                        match target {
-                            crate::dictation::DictationTarget::MainWindowFilter => {
-                                let current =
-                                    self.capture_dictation_target_selection(target, cx)?;
-                                if current.destination != request.selection.destination {
-                                    Err("The Script Kit filter changed while Dictation was active"
-                                        .to_string())
-                                } else if self.try_set_main_window_filter_from_dictation(
-                                    request.transcript.text().to_string(),
-                                    cx,
-                                ) {
-                                    Ok(Some(serde_json::json!({
-                                        "available": true,
-                                        "unit": "utf8Bytes",
-                                        "start": 0,
-                                        "end": request.transcript.len(),
-                                        "insertedLength": request.transcript.len(),
-                                        "operation": "replaceFrozenInput",
-                                        "source": "deliveryCoordinator",
-                                        "redacted": true,
-                                    })))
-                                } else {
-                                    Err("The Script Kit filter is no longer available".to_string())
-                                }
-                            }
-                            crate::dictation::DictationTarget::MainWindowPrompt => {
-                                let current =
-                                    self.capture_dictation_target_selection(target, cx)?;
-                                if current.destination != request.selection.destination {
-                                    Err("The prompt changed while Dictation was active".to_string())
-                                } else if self
-                                    .try_set_prompt_input(request.transcript.text().to_string(), cx)
-                                {
-                                    Ok(Some(serde_json::json!({
-                                        "available": true,
-                                        "unit": "utf8Bytes",
-                                        "start": 0,
-                                        "end": request.transcript.len(),
-                                        "insertedLength": request.transcript.len(),
-                                        "operation": "replaceFrozenInput",
-                                        "source": "deliveryCoordinator",
-                                        "redacted": true,
-                                    })))
-                                } else {
-                                    Err("The prompt is no longer available".to_string())
-                                }
-                            }
-                            crate::dictation::DictationTarget::NotesEditor => {
-                                let crate::dictation::FrozenDictationDestination::NotesEditor {
-                                    notes_instance_id,
-                                    document_id,
-                                    editor_generation,
-                                    insertion_anchor,
-                                } = &request.selection.destination
-                                else {
-                                    return Err(
-                                        "Frozen destination type does not match its target"
-                                            .to_string(),
-                                    );
-                                };
-                                let expected = notes::NotesDictationDestinationSnapshot {
-                                    notes_instance_id: *notes_instance_id,
-                                    document_id: document_id.clone(),
-                                    editor_generation: editor_generation.clone(),
-                                    insertion_anchor: insertion_anchor.clone(),
-                                };
-                                notes::inject_text_into_frozen_notes(
-                                    cx,
-                                    &expected,
-                                    request.transcript.text(),
-                                )
-                                .map(Some)
-                            }
-                            crate::dictation::DictationTarget::AiChatComposer => {
-                                Err("Legacy AI Chat destination was not canonicalized".to_string())
-                            }
-                            crate::dictation::DictationTarget::TabAiHarness => {
-                                use crate::dictation::{
-                                    FrozenAgentChatPolicy, FrozenDictationDestination,
-                                };
-                                let FrozenDictationDestination::AgentChat { policy } =
-                                    &request.selection.destination
-                                else {
-                                    return Err(
-                                        "Frozen destination type does not match its target"
-                                            .to_string(),
-                                    );
-                                };
-                                if let FrozenAgentChatPolicy::ExistingThread {
-                                    thread_id,
-                                    generation,
-                                } = policy
-                                {
-                                    let current_matches = match &self.current_view {
-                                        AppView::AgentChatView { entity } => {
-                                            entity.read(cx).thread().is_some_and(|thread| {
-                                                thread.read(cx).ui_thread_id() == thread_id
-                                                    && self.tab_ai_harness_capture_generation
-                                                        == *generation
-                                            })
-                                        }
-                                        _ => false,
-                                    };
-                                    if !current_matches {
-                                        Err("The selected Agent Chat thread changed".to_string())
-                                    } else {
-                                        match self.dispatch_dictation_to_frozen_agent_chat(
-                                    request.transcript.text().to_string(),
-                                    false,
-                                    crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                                    cx,
-                                ).map_err(str::to_string)? {
-                                    crate::agent_handoff::AgentChatEntryDispatch::Complete(outcome) => {
-                                        if outcome.source_consumed() {
-                                            Ok(None)
-                                        } else {
-                                            Err("Agent Chat refused the Dictation turn".to_string())
-                                        }
-                                    }
-                                    crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket) => {
-                                        pending_agent_chat_entry = Some(ticket);
-                                        Ok(None)
-                                    }
-                                }
-                                    }
-                                } else {
-                                    self.seed_agent_chat_dictation_return_origin(cx);
-                                    match self.dispatch_dictation_to_frozen_agent_chat(
-                                request.transcript.text().to_string(),
-                                true,
-                                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                                cx,
-                            ).map_err(str::to_string)? {
-                                crate::agent_handoff::AgentChatEntryDispatch::Complete(outcome) => {
-                                    if outcome.source_consumed() {
-                                        Ok(None)
-                                    } else {
-                                        Err("Agent Chat refused the Dictation turn".to_string())
-                                    }
-                                }
-                                crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket) => {
-                                    pending_agent_chat_entry = Some(ticket);
-                                    Ok(None)
-                                }
-                            }
-                                }
-                            }
-                            crate::dictation::DictationTarget::DayPageToday => {
-                                let crate::dictation::FrozenDictationDestination::DayPage {
-                                    date,
-                                    substrate_fingerprint,
-                                    ..
-                                } = &request.selection.destination
-                                else {
-                                    return Err(
-                                        "Frozen destination type does not match its target"
-                                            .to_string(),
-                                    );
-                                };
-                                let substrate =
-                                    crate::brain::substrate::BrainSubstrate::default_kit();
-                                let (_, current_fingerprint) =
-                                    substrate.capture_day_destination(chrono::Utc::now());
-                                if current_fingerprint != *substrate_fingerprint {
-                                    Err("The Day Page substrate changed".to_string())
-                                } else {
-                                    let capture_text = request
-                                        .transcript
-                                        .text()
-                                        .split_whitespace()
-                                        .collect::<Vec<_>>()
-                                        .join(" ");
-                                    substrate
-                                        .append_to_captured_day(
-                                            *date,
-                                            chrono::Utc::now(),
-                                            crate::brain::substrate::DayEntry::Capture {
-                                                text: capture_text,
-                                            },
-                                        )
-                                        .map(|_| None)
-                                        .map_err(|error| error.to_string())
-                                }
-                            }
-                            crate::dictation::DictationTarget::QuickAiQuestion => {
-                                self.seed_agent_chat_dictation_return_origin(cx);
-                                match self.dispatch_dictation_to_frozen_agent_chat(
-                            request.transcript.text().to_string(),
-                            true,
-                            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
-                            cx,
-                        ).map_err(str::to_string)? {
-                            crate::agent_handoff::AgentChatEntryDispatch::Complete(outcome) => {
-                                if outcome.source_consumed() {
-                                    Ok(None)
-                                } else {
-                                    Err("Quick AI refused the Dictation turn".to_string())
-                                }
-                            }
-                            crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket) => {
-                                pending_agent_chat_entry = Some(ticket);
-                                Ok(None)
-                            }
-                        }
-                            }
-                            crate::dictation::DictationTarget::ExternalApp => {
-                                Err("external delivery is handled by the frozen external actor"
-                                    .to_string())
-                            }
-                        }
-                    })();
+                let (internal_result, pending_agent_chat_entry) =
+                    self.mutate_internal_dictation_request(&request, None, cx);
 
                 if !matches!(target, crate::dictation::DictationTarget::ExternalApp) {
                     let delivery_insertion_range = match internal_result {
                         Ok(insertion_range) => insertion_range,
                         Err(error) => {
-                            let failure = crate::ai::reliability::destination_failure(true, &error);
-                            let outcome = crate::dictation::DictationDeliveryOutcome::Refused {
-                                failure: failure.clone(),
-                                reason: crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                            let outcome = dictation_mutation_error_outcome(&error);
+                            let (failure, reason, retry_safety) = match &outcome {
+                                crate::dictation::DictationDeliveryOutcome::Refused { failure, reason } => (
+                                    failure.clone(), *reason, sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
+                                ),
+                                crate::dictation::DictationDeliveryOutcome::Failed { failure, reason, retry_safety } => (
+                                    failure.clone(), *reason, *retry_safety,
+                                ),
+                                crate::dictation::DictationDeliveryOutcome::Delivered { .. } => unreachable!(),
                             };
-                            let _ = crate::dictation::record_wrong_target_refusal(
+                            if matches!(
+                                &outcome,
+                                crate::dictation::DictationDeliveryOutcome::Refused { .. }
+                            ) {
+                                let _ = crate::dictation::record_wrong_target_refusal(
                                 crate::dictation::DictationWrongTargetRefusalDraft {
                                     reason:
                                         crate::dictation::DictationWrongTargetReason::TargetStale,
@@ -6471,6 +6292,7 @@ impl ScriptListApp {
                                 },
                                 Some(request.transcript.len()),
                             );
+                            }
                             tracing::warn!(
                                 category = "DICTATION",
                                 delivery_id,
@@ -6478,14 +6300,14 @@ impl ScriptListApp {
                                 failure_code = ?failure.failure.code,
                                 error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&error),
                                 outcome = ?outcome,
-                                "Frozen Dictation destination refused delivery"
+                                "Frozen Dictation delivery did not complete",
                             );
                             self.present_dictation_delivery_failure(
                                 request,
                                 timing,
                                 failure,
-                                crate::dictation::DictationDeliveryFailureReason::DestinationStale,
-                                sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
+                                reason,
+                                retry_safety,
                                 cx,
                             );
                             return;
@@ -6495,7 +6317,9 @@ impl ScriptListApp {
                     // success, refusal, or uncertain result remains single-shot.
                     // Agent Chat and Quick AI are only complete once their entry
                     // ticket reports that the exact turn was accepted.
-                    if let Some(ticket) = pending_agent_chat_entry {
+                    if let Some(crate::agent_handoff::AgentChatEntryDispatch::Pending(ticket)) =
+                        pending_agent_chat_entry
+                    {
                         cx.spawn(async move |this, cx| {
                             let completion = ticket.completion.recv().await;
                             let _ = this.update(cx, |this, cx| match completion {
@@ -7592,8 +7416,10 @@ impl ScriptListApp {
         *dictation_model_prompt_status().lock() = status.clone();
         let (title, placeholder, choices) = Self::build_dictation_model_prompt(status.clone());
         if !prompt_visible || phase_changed {
-            self.arg_selected_index = Self::preferred_dictation_model_prompt_index(&status)
-                .min(choices.len().saturating_sub(1));
+            self.set_arg_selected_index(
+                Self::preferred_dictation_model_prompt_index(&status)
+                    .min(choices.len().saturating_sub(1)),
+            );
         }
         self.open_builtin_filterable_view(
             AppView::MiniPrompt {
@@ -8025,7 +7851,7 @@ impl ScriptListApp {
             crate::dictation::DictationModelId::from_preference(prefs.dictation.model.as_deref());
         let state = self.current_dictation_setup_state();
         let (title, placeholder, choices) = Self::build_dictation_setup_prompt(&state, model_id);
-        self.arg_selected_index = 0;
+        self.set_arg_selected_index(0);
         self.open_builtin_filterable_view(
             AppView::MiniPrompt {
                 id: BUILTIN_DICTATION_SETUP_PROMPT_ID.to_string(),
@@ -8050,6 +7876,12 @@ impl ScriptListApp {
             }
             BUILTIN_DICTATION_SETUP_DOWNLOAD_MODEL => self.open_dictation_model_prompt(cx),
             BUILTIN_DICTATION_SETUP_REQUEST_MIC => {
+                if let Err(refusal) =
+                    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Device)
+                {
+                    self.show_error_toast(refusal.to_string(), cx);
+                    return;
+                }
                 crate::dictation::request_microphone_permission_nonblocking(|status| {
                     tracing::info!(category = "DICTATION", status = ?status, "Microphone permission prompt resolved from setup prompt");
                 });
@@ -8060,6 +7892,12 @@ impl ScriptListApp {
                 );
             }
             BUILTIN_DICTATION_SETUP_OPEN_MIC_SETTINGS => {
+                if let Err(refusal) = crate::runtime_policy::check(
+                    crate::runtime_policy::ExternalEffect::OpenExternal,
+                ) {
+                    self.show_error_toast(refusal.to_string(), cx);
+                    return;
+                }
                 let url = crate::permissions_wizard::PermissionKind::Microphone.settings_url();
                 if let Err(error) = open::that(url) {
                     self.show_error_toast(

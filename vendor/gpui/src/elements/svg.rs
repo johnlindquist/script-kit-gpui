@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use crate::{
     App, Asset, Bounds, Element, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement,
@@ -131,10 +131,16 @@ impl Element for Svg {
                 } else if let Some((path, color)) =
                     self.external_path.as_ref().zip(style.text.color)
                 {
-                    let Some(bytes) = window
-                        .use_asset::<SvgAsset>(path, cx)
-                        .and_then(|asset| asset.log_err())
-                    else {
+                    let asset = window.use_asset::<SvgAsset>(path, cx);
+                    #[cfg(any(test, feature = "test-support"))]
+                    let resource_failed = matches!(&asset, Some(Err(_)));
+                    let Some(bytes) = asset.and_then(|asset| asset.log_err()) else {
+                        #[cfg(any(test, feature = "test-support"))]
+                        if resource_failed {
+                            window.record_owned_resource_failed();
+                        } else {
+                            window.record_owned_resource_pending();
+                        }
                         return;
                     };
 
@@ -268,7 +274,16 @@ impl Asset for SvgAsset {
         _cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         async move {
-            let bytes = fs::read(Path::new(source.as_ref())).map_err(|e| Arc::new(e))?;
+            let path = Path::new(source.as_ref());
+            let bytes = match crate::OwnedHiddenGuard::installed() {
+                Some(guard) => guard.read_resource_path(path).map_err(|error| {
+                    Arc::new(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        error.to_string(),
+                    ))
+                })?,
+                None => std::fs::read(path).map_err(Arc::new)?,
+            };
             let bytes = Arc::from(bytes);
             Ok(bytes)
         }

@@ -405,6 +405,14 @@ The launcher should not become a cluttered dashboard. It is the command spine:
 type intent, choose the right object, run or stage the workflow, then return the
 user to their work.
 
+Search has one linked state chain: immutable query meaning and retrieval scope →
+provider work and current consumer authority → committed rows → selection intent
+and selected subject → preview/footer/action subject → completed GPUI frame.
+Automatic selection follows the first eligible result; a deliberate choice anchors
+its identity. Input focus and a user-scrolled viewport are separate state. Async
+arrival may improve results without changing query meaning or redirecting a stale
+action to the wrong object.
+
 ### Actions Are Discovery
 
 Command+K / Actions should answer "what can I do here?" New persistent controls
@@ -502,6 +510,23 @@ selected, and what changed, it is not agent-ready.
 Exploratory prototypes can use lighter proof while ideas are still forming. Once
 a claim becomes launch-facing, receipts are non-negotiable.
 
+The search agent loop is discover → inspect → act against the observed revision →
+wait for an attributed change → inspect its completed frame → diagnose. An action
+must retain the caller's expectation, not refresh away its stale-target guard.
+Inspection does not advance a controlled fixture's logical clock. Provider gates
+substitute only external IO; production grouping, input dispatch, selection,
+rendering, and activation policy remain the exercised application path.
+An accepted dispatch is not a completed effect. Report completion only when the
+owning operation confirms success; a refused or unobserved effect must remain
+distinct, even when the UI also shows an explanatory message.
+
+Owned hidden-window evidence is the default for launcher search contracts: no
+desktop activation, global input, or screen capture. Semantic state, naturally
+scheduled drawing, and retained framebuffer samples are distinct proof levels.
+Forced captures cannot prove notification causality. Live provider correctness,
+WindowServer composition, native focus, and external-app effects require separate
+authorized evidence and are not implied by an owned search receipt.
+
 ## AI Terminology
 
 Use one product language layer even when implementation and compatibility names
@@ -568,8 +593,8 @@ Source areas are intentionally subsystem-level; exact type placement can move.
 
 | Loop step | Owning surfaces | Source areas | Representative checks | Runtime receipts |
 | --- | --- | --- | --- | --- |
-| Search | Main Menu Search, catalog sources, command grammar | `src/render_script_list/**`, `src/main_sections/**`, `src/menu_syntax/**`, root source audits | `./scripts/agentic/agent-cargo.sh test --test source_audits/root_unified_search_stability_contract`, `./scripts/agentic/agent-cargo.sh test --test simulate_key_cmd_enter_scriptlist_contract` | target identity, input state, selected row, source label, footer ownership |
-| Choose | ScriptList rows, built-ins, profile rows, Actions rows | `src/components/unified_list_item/**`, `src/render_builtins/**`, `src/actions/**`, profile/plugin discovery | `./scripts/agentic/agent-cargo.sh test --test actions_dialog_shared_list_contract`, `./scripts/agentic/agent-cargo.sh test --test agent_chat_profile_selector_contract` | `getElements`, selected/focused semantic IDs, preview/layout identity |
+| Search | Main Menu Search, catalog sources, command grammar | `src/app_impl/filter_input_*`, `src/app_impl/filtering_cache.rs`, `src/main_sections/root_search_store.rs`, `crates/sk-protocol/src/search_contract.rs` | `./scripts/agentic/agent-cargo.sh test --locked -p sk-protocol --lib search_contract::tests`; owned `design run --scenario launcher-ranking-provider` with an immutable artifact | query/scope revision, exact provider run and publication policy, committed row content, complete finite schedule accounting |
+| Choose | ScriptList rows, built-ins, profile rows, Actions rows | `src/main_sections/app_state.rs`, `src/components/unified_list_item/**`, `src/render_script_list/**`, semantic dispatch | shared `scripts/agentic/launcher-selection-stability-probe.ts` recipe through the owned launcher journey; surface-specific Actions/profile checks remain separate | automatic/anchored intent, selected semantic identity, actual GPUI input focus, preview/footer subject, natural completed frame and matching retained pixels |
 | Prompt | Prompt APIs and prompt shells | `src/main_sections/prompt_messages.rs`, `src/render_prompts/**`, `src/components/prompt_*` | `./scripts/agentic/agent-cargo.sh test --test surface_contract_matrix_artifact_contract`, prompt-specific source checks | prompt state, focus owner, footer hints, `getLayoutInfo` |
 | Act | Enter, Cmd+K Actions, Cmd+Enter Agent Chat, direct action execution | `src/actions/**`, `src/app_actions/**`, `src/app_impl/**` | `./scripts/agentic/agent-cargo.sh test --test actions_dialog_enter_routing_contract`, `./scripts/agentic/agent-cargo.sh test --test main_window_footer_surface_owner_contract` | action receipt, route stack, target identity, focus restoration |
 | Automate | Protocol, MCP, DevTools, semantic transactions | `src/agentic_protocol_bus.rs`, `src/app_layout/**`, `scripts/devtools/**` | `./scripts/agentic/agent-cargo.sh test --test devtools_coverage_contract`, protocol wait/batch contracts | `getState`, `getElements`, `getLayoutInfo`, `waitFor`, `batch` |

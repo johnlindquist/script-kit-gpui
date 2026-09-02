@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -17,10 +18,7 @@ import type { WorkflowTaskProofId } from "../../devtools/lib/workflow-task-contr
 
 assertNoninteractiveVisualProbe("cons-flow-ux.context-lifecycle");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-c02/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const runDir = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ??
     ".artifacts/consistency/cons-flow-ux/c02-context-lifecycle-v1",
@@ -105,7 +103,7 @@ function safeState(state: Json): Json {
 async function getAgentChatState(driver: Driver): Promise<Json> {
   return driver.request(
     { type: "getAgentChatState", target: { type: "id", id: "main" } },
-    { expect: "agentChatStateResult", timeoutMs: 15_000 },
+    { expect: "agent_chatStateResult", timeoutMs: 15_000 },
   );
 }
 
@@ -196,21 +194,19 @@ let closeError: string | null = null;
 let targetObservation: RuntimeTargetObservation | null = null;
 
 try {
-  driver = await Driver.launch({
-    binary,
-    sessionName: "cons-flow-c02-context-lifecycle",
-    sandboxHome: true,
-    sharedModels: false,
-    env: {
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-    readyTimeoutMs: 30_000,
-    defaultTimeoutMs: 15_000,
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+  sessionName: "cons-flow-c02-context-lifecycle",
+  sandboxHome: true,
+  sharedModels: false,
+  env: {
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+    SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  },
+  readyTimeoutMs: 30_000,
+  defaultTimeoutMs: 15_000, });
 
   driver.send({ type: "openAiWithMockData" });
   await waitForTopState(

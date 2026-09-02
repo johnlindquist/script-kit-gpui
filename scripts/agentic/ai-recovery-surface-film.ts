@@ -14,14 +14,14 @@
 // match.
 //
 // Run:
-//   SCRIPT_KIT_AGENT_ARTIFACT_NAME=ai-rock-solid \
-//     ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
-//   SCRIPT_KIT_GPUI_BINARY="$PWD/target-agent/artifacts/ai-rock-solid/script-kit-gpui" \
+//   bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out .test-output/ai-recovery.reference.json
+//   SCRIPT_KIT_ARTIFACT_REFERENCE=.test-output/ai-recovery.reference.json \
 //     bun scripts/agentic/ai-recovery-surface-film.ts
 import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Driver, type Json } from "../devtools/driver.ts";
+import { runtimeArtifactFromEnvironment } from "../devtools/lib/runtime-task-proof.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -30,7 +30,8 @@ const receiptPath = resolve(
 		".test-output/ai-rock-solid-ux/ai-recovery-surface-film.json",
 );
 const shotDir = resolve(".test-screenshots/ai-rock-solid-ux");
-const binary = process.env.SCRIPT_KIT_GPUI_BINARY;
+const artifact = runtimeArtifactFromEnvironment();
+const binary = process.env.SCRIPT_KIT_GPUI_BINARY ?? artifact.executablePath;
 
 const failures: string[] = [];
 const surfaces: Record<string, any> = {};
@@ -86,7 +87,7 @@ async function filmFlowSession() {
 	const d = await Driver.launch({
 		sandboxHome: true,
 		sessionName: "film-flow",
-		...(binary ? { binary } : {}),
+		binary, immutableArtifact: artifact.reference,
 		env: { SCRIPT_KIT_FLOW_UX_CWD: repoRoot, SCRIPT_KIT_CODEX_BIN: codex },
 	});
 	try {
@@ -145,7 +146,7 @@ async function filmAgentChat() {
 	const d = await Driver.launch({
 		sandboxHome: true,
 		sessionName: "film-agent-chat",
-		...(binary ? { binary } : {}),
+		binary, immutableArtifact: artifact.reference,
 		env: { SCRIPT_KIT_PI_BIN: pi, SCRIPT_KIT_CODEX_BIN: codex },
 	});
 	try {
@@ -170,9 +171,9 @@ async function filmAgentChat() {
 		// request, not on `getState()`.
 		const agentState: any = await d.request(
 			{ type: "getAgentChatState", target: { type: "id", id: "main" } },
-			{ expect: "agentChatStateResult", timeoutMs: 15_000 },
+			{ expect: "agent_chatStateResult", timeoutMs: 15_000 },
 		);
-		// `agentChatStateResult` is flat: the snapshot fields sit on the reply
+		// `agent_chatStateResult` is flat: the snapshot fields sit on the reply
 		// itself, not under a `state` key.
 		const reliability = agentState?.reliability ?? null;
 		expect(

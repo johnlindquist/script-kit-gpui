@@ -22,13 +22,10 @@
 //! 1. **theme.json on disk** - `~/.scriptkit/theme.json` (with user-preference
 //!    and appearance fallbacks) is parsed by `types::load_theme()`. This is the
 //!    only step that touches the filesystem.
-//! 2. **THEME_CACHE** - the loaded `Theme` is stored in the global cache in
-//!    `types.rs`. `service.rs` owns `THEME_REVISION`, bumped whenever the cache
-//!    reloads: by the theme.json file watcher, by appearance flips, or by
-//!    `service::reapply_runtime_theme_overrides` after a dev-tool color edit.
-//!    `set_cached_theme_for_preview` (used by the theme chooser built-in) is a
-//!    side door that swaps the cached theme for live preview without touching
-//!    disk or the override channel.
+//! 2. **THEME_CACHE** - one immutable `PublishedTheme` contains the theme,
+//!    resolved values and revision. `service::publish_runtime_theme` prepares
+//!    GPUI colors, commits once, and invalidates all registered windows.
+//!    File reload, appearance changes, previews and persistence share this path.
 //! 4. **get_cached_theme() consumers** - render and service code read the
 //!    cached theme; revision checks let windows notice cross-window changes.
 //! 5. **Per-surface token defs** - surface-level token structs resolve from the
@@ -51,7 +48,9 @@ mod color_resolver;
 pub(crate) mod gpui_integration;
 mod helpers;
 pub mod hex_color;
+pub mod live_edit;
 pub mod opacity;
+mod persistence;
 pub mod prelude;
 pub mod presets;
 pub(crate) mod scrollbar;
@@ -104,7 +103,7 @@ pub use color_resolver::{
 pub use types::load_theme;
 
 // Re-export cached theme access (use in render code instead of load_theme)
-pub use types::{get_cached_theme, init_theme_cache, reload_theme_cache};
+pub use types::{get_cached_theme, get_theme_snapshot};
 
 // Re-export appearance cache invalidation (called when system appearance changes)
 pub use types::invalidate_appearance_cache;

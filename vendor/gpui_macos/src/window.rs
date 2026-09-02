@@ -451,6 +451,10 @@ struct MacWindowState {
     closed: Arc<AtomicBool>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<id>,
+    owned_hidden: Option<Arc<gpui::OwnedHiddenGuard>>,
+    owned_bounds: Bounds<Pixels>,
+    #[cfg(any(test, feature = "test-support"))]
+    owned_readback_fault: Option<gpui::OwnedReadbackFault>,
 }
 
 impl MacWindowState {
@@ -506,6 +510,9 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
+        if self.owned_hidden.is_some() {
+            return;
+        }
         self.stop_display_link();
         unsafe {
             if !self
@@ -530,6 +537,9 @@ impl MacWindowState {
     }
 
     fn is_maximized(&self) -> bool {
+        if self.owned_hidden.is_some() {
+            return false;
+        }
         fn rect_to_size(rect: NSRect) -> Size<Pixels> {
             let NSSize { width, height } = rect.size;
             size(width.into(), height.into())
@@ -550,6 +560,9 @@ impl MacWindowState {
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
+        if self.owned_hidden.is_some() {
+            return self.owned_bounds;
+        }
         let mut window_frame = unsafe { NSWindow::frame(self.native_window) };
         let screen = unsafe { NSWindow::screen(self.native_window) };
         if screen == nil {
@@ -580,6 +593,9 @@ impl MacWindowState {
     }
 
     fn scale_factor(&self) -> f32 {
+        if self.owned_hidden.is_some() {
+            return 2.0;
+        }
         get_scale_factor(self.native_window)
     }
 
@@ -607,7 +623,23 @@ pub(crate) struct MacWindow(Arc<Mutex<MacWindowState>>);
 impl MacWindow {
     pub fn open(
         handle: AnyWindowHandle,
-        WindowParams {
+        params: WindowParams,
+        foreground_executor: ForegroundExecutor,
+        background_executor: BackgroundExecutor,
+        renderer_context: renderer::Context,
+        owned_hidden: Option<Arc<gpui::OwnedHiddenGuard>>,
+    ) -> anyhow::Result<Self> {
+        if let Some(guard) = &owned_hidden {
+            anyhow::ensure!(
+                metal::Device::system_default().is_some(),
+                "owned_hidden_gpu_unavailable"
+            );
+            guard.validate_window(&params)?;
+            gpui::validate_owned_hidden_bounds(params.bounds, 2.0)?;
+            guard.window_opened()?;
+        }
+        let hidden = owned_hidden.is_some();
+        let WindowParams {
             bounds,
             titlebar,
             kind,
@@ -619,19 +651,13 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
-        }: WindowParams,
-        foreground_executor: ForegroundExecutor,
-        background_executor: BackgroundExecutor,
-        renderer_context: renderer::Context,
-    ) -> Self {
+        } = params;
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
 
             let allows_automatic_window_tabbing = tabbing_identifier.is_some();
-            if allows_automatic_window_tabbing {
-                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: YES];
-            } else {
-                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: NO];
+            if !hidden {
+                let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: allows_automatic_window_tabbing as BOOL];
             }
 
             let mut style_mask;
@@ -671,36 +697,38 @@ impl MacWindow {
                 }
             };
 
-            let display = display_id
-                .and_then(MacDisplay::find_by_id)
-                .unwrap_or_else(MacDisplay::primary);
-
-            let mut target_screen = nil;
-            let mut screen_frame = None;
-
-            let screens = NSScreen::screens(nil);
-            let count: u64 = cocoa::foundation::NSArray::count(screens);
-            for i in 0..count {
-                let screen = cocoa::foundation::NSArray::objectAtIndex(screens, i);
-                let frame = NSScreen::frame(screen);
-                let display_id = display_id_for_screen(screen);
-                if display_id == display.0 {
-                    screen_frame = Some(frame);
-                    target_screen = screen;
+            let (target_screen, screen_frame, display_height) = if hidden {
+                (
+                    nil,
+                    NSRect::new(NSPoint::new(0., 0.), NSSize::new(4096., 4096.)),
+                    px(4096.),
+                )
+            } else {
+                let display = display_id
+                    .and_then(MacDisplay::find_by_id)
+                    .unwrap_or_else(MacDisplay::primary);
+                let mut target_screen = nil;
+                let mut screen_frame = None;
+                let screens = NSScreen::screens(nil);
+                let count: u64 = cocoa::foundation::NSArray::count(screens);
+                for i in 0..count {
+                    let screen = cocoa::foundation::NSArray::objectAtIndex(screens, i);
+                    if display_id_for_screen(screen) == display.0 {
+                        screen_frame = Some(NSScreen::frame(screen));
+                        target_screen = screen;
+                    }
                 }
-            }
-
-            let screen_frame = screen_frame.unwrap_or_else(|| {
-                let screen = NSScreen::mainScreen(nil);
-                target_screen = screen;
-                NSScreen::frame(screen)
-            });
+                let screen_frame = screen_frame.unwrap_or_else(|| {
+                    target_screen = NSScreen::mainScreen(nil);
+                    NSScreen::frame(target_screen)
+                });
+                (target_screen, screen_frame, display.bounds().size.height)
+            };
 
             let window_rect = NSRect::new(
                 NSPoint::new(
                     screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
-                    screen_frame.origin.y
-                        + (display.bounds().size.height - bounds.origin.y).as_f32() as f64,
+                    screen_frame.origin.y + (display_height - bounds.origin.y).as_f32() as f64,
                 ),
                 NSSize::new(
                     bounds.size.width.as_f32() as f64,
@@ -716,11 +744,9 @@ impl MacWindow {
                 target_screen,
             );
             assert!(!native_window.is_null());
-            let () = msg_send![
-                native_window,
-                registerForDraggedTypes:
-                    NSArray::arrayWithObject(nil, NSFilenamesPboardType)
-            ];
+            if !hidden {
+                let () = msg_send![native_window, registerForDraggedTypes: NSArray::arrayWithObject(nil, NSFilenamesPboardType)];
+            }
             let () = msg_send![
                 native_window,
                 setReleasedWhenClosed: NO
@@ -780,6 +806,10 @@ impl MacWindow {
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
                 sheet_parent: None,
+                owned_hidden,
+                owned_bounds: bounds,
+                #[cfg(any(test, feature = "test-support"))]
+                owned_readback_fault: None,
             })));
 
             (*native_window).set_ivar(
@@ -855,10 +885,16 @@ impl MacWindow {
             ];
 
             content_view.addSubview_(native_view.autorelease());
-            native_window.makeFirstResponder_(native_view);
+            if !hidden {
+                native_window.makeFirstResponder_(native_view);
+            }
 
-            let app: id = NSApplication::sharedApplication(nil);
-            let main_window: id = msg_send![app, mainWindow];
+            let main_window: id = if hidden {
+                nil
+            } else {
+                let app: id = NSApplication::sharedApplication(nil);
+                msg_send![app, mainWindow]
+            };
             let mut sheet_parent = None;
 
             match kind {
@@ -879,29 +915,31 @@ impl MacWindow {
                     }
                 }
                 WindowKind::PopUp => {
-                    // Use a tracking area to allow receiving MouseMoved events even when
-                    // the window or application aren't active, which is often the case
-                    // e.g. for notification windows.
-                    let tracking_area: id = msg_send![class!(NSTrackingArea), alloc];
-                    let _: () = msg_send![
-                        tracking_area,
-                        initWithRect: NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.))
-                        options: NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
-                        owner: native_view
-                        userInfo: nil
-                    ];
-                    let _: () =
-                        msg_send![native_view, addTrackingArea: tracking_area.autorelease()];
+                    if !hidden {
+                        // Use a tracking area to allow receiving MouseMoved events even when
+                        // the window or application aren't active, which is often the case
+                        // e.g. for notification windows.
+                        let tracking_area: id = msg_send![class!(NSTrackingArea), alloc];
+                        let _: () = msg_send![
+                            tracking_area,
+                            initWithRect: NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.))
+                            options: NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                            owner: native_view
+                            userInfo: nil
+                        ];
+                        let _: () =
+                            msg_send![native_view, addTrackingArea: tracking_area.autorelease()];
 
-                    native_window.setLevel_(NSPopUpWindowLevel);
-                    let _: () = msg_send![
-                        native_window,
-                        setAnimationBehavior: NSWindowAnimationBehaviorUtilityWindow
-                    ];
-                    native_window.setCollectionBehavior_(
+                        native_window.setLevel_(NSPopUpWindowLevel);
+                        let _: () = msg_send![
+                            native_window,
+                            setAnimationBehavior: NSWindowAnimationBehaviorUtilityWindow
+                        ];
+                        native_window.setCollectionBehavior_(
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces |
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
                     );
+                    }
                 }
                 WindowKind::Dialog => {
                     if !main_window.is_null() {
@@ -969,7 +1007,7 @@ impl MacWindow {
 
             pool.drain();
 
-            window
+            Ok(window)
         }
     }
 
@@ -1035,14 +1073,28 @@ impl MacWindow {
             }
         }
     }
+
+    fn refuse(&self, operation: &str) -> bool {
+        if let Some(guard) = &self.0.lock().owned_hidden {
+            let _ = guard.refuse(operation);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        this.closed.store(true, Ordering::Release);
+        // Retire the scene's callbacks with the GPUI owner. Occluded-frame
+        // timers may still retain native state until their calibrated deadline.
+        this.request_frame_callback.take();
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
+        let owned_hidden = this.owned_hidden.clone();
         this.display_link.take();
         unsafe {
             this.native_window.setDelegate_(nil);
@@ -1055,7 +1107,12 @@ impl Drop for MacWindow {
                         let _: () = msg_send![parent, endSheet: window];
                     }
                     window.close();
-                    window.autorelease();
+                    if let Some(guard) = owned_hidden {
+                        let _: () = msg_send![window, release];
+                        guard.window_closed();
+                    } else {
+                        window.autorelease();
+                    }
                 }
             })
             .detach();
@@ -1101,6 +1158,16 @@ fn bottom_resize_frame(
 }
 
 impl PlatformWindow for MacWindow {
+    fn owned_hidden_guard(&self) -> Option<Arc<gpui::OwnedHiddenGuard>> {
+        self.0.lock().owned_hidden.clone()
+    }
+
+    fn map_window(&mut self) -> anyhow::Result<()> {
+        if let Some(guard) = self.owned_hidden_guard() {
+            return Err(guard.refuse("map_window"));
+        }
+        Ok(())
+    }
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
     }
@@ -1118,6 +1185,14 @@ impl PlatformWindow for MacWindow {
     }
 
     fn resize(&mut self, size: Size<Pixels>) {
+        if let Some(guard) = self.owned_hidden_guard() {
+            if gpui::validate_owned_hidden_bounds(Bounds::new(Point::default(), size), 2.0).is_err()
+            {
+                let _ = guard.refuse("resize_bounds");
+                return;
+            }
+            self.0.lock().owned_bounds.size = size;
+        }
         let this = self.0.lock();
         let window = this.native_window;
         let closed = this.closed.clone();
@@ -1134,6 +1209,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn merge_all_windows(&self) {
+        if self.refuse("merge_all_windows") {
+            return;
+        }
         let native_window = self.0.lock().native_window;
         extern "C" fn merge_windows_async(context: *mut std::ffi::c_void) {
             unsafe {
@@ -1149,6 +1227,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn move_tab_to_new_window(&self) {
+        if self.refuse("move_tab_to_new_window") {
+            return;
+        }
         let native_window = self.0.lock().native_window;
         extern "C" fn move_tab_async(context: *mut std::ffi::c_void) {
             unsafe {
@@ -1165,6 +1246,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn toggle_window_tab_overview(&self) {
+        if self.refuse("toggle_window_tab_overview") {
+            return;
+        }
         let native_window = self.0.lock().native_window;
         unsafe {
             let _: () = msg_send![native_window, toggleTabOverview:nil];
@@ -1172,6 +1256,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn set_tabbing_identifier(&self, tabbing_identifier: Option<String>) {
+        if self.refuse("set_tabbing_identifier") {
+            return;
+        }
         let native_window = self.0.lock().native_window;
         unsafe {
             let allows_automatic_window_tabbing = tabbing_identifier.is_some();
@@ -1195,6 +1282,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn appearance(&self) -> WindowAppearance {
+        if self.owned_hidden_guard().is_some() {
+            return WindowAppearance::Dark;
+        }
         unsafe {
             let appearance: id = msg_send![self.0.lock().native_window, effectiveAppearance];
             crate::window_appearance::window_appearance_from_native(appearance)
@@ -1202,6 +1292,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
+        if self.owned_hidden_guard().is_some() {
+            return None;
+        }
         unsafe {
             let screen = self.0.lock().native_window.screen();
             if screen.is_null() {
@@ -1218,6 +1311,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
+        if self.refuse("global_pointer") {
+            return Point::default();
+        }
         let position = unsafe {
             self.0
                 .lock()
@@ -1228,6 +1324,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn modifiers(&self) -> Modifiers {
+        if self.owned_hidden_guard().is_some() {
+            return Modifiers::default();
+        }
         unsafe {
             let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
 
@@ -1248,6 +1347,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn capslock(&self) -> Capslock {
+        if self.owned_hidden_guard().is_some() {
+            return Capslock::default();
+        }
         unsafe {
             let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
 
@@ -1272,6 +1374,11 @@ impl PlatformWindow for MacWindow {
         detail: Option<&str>,
         answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>> {
+        if self.refuse("native_prompt") {
+            let (tx, rx) = oneshot::channel();
+            drop(tx);
+            return Some(rx);
+        }
         // macOs applies overrides to modal window buttons after they are added.
         // Two most important for this logic are:
         // * Buttons with "Cancel" title will be displayed as the last buttons in the modal
@@ -1364,6 +1471,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn activate(&self) {
+        if self.refuse("activate_window") {
+            return;
+        }
         let lock = self.0.lock();
         let window = lock.native_window;
         let closed = lock.closed.clone();
@@ -1380,6 +1490,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn is_active(&self) -> bool {
+        if self.owned_hidden_guard().is_some() {
+            return false;
+        }
         unsafe { self.0.lock().native_window.isKeyWindow() == YES }
     }
 
@@ -1389,6 +1502,12 @@ impl PlatformWindow for MacWindow {
     }
 
     fn set_title(&mut self, title: &str) {
+        if self.owned_hidden_guard().is_some() {
+            unsafe {
+                let _: () = msg_send![self.0.lock().native_window, setTitle: ns_string(title)];
+            }
+            return;
+        }
         unsafe {
             let app = NSApplication::sharedApplication(nil);
             let window = self.0.lock().native_window;
@@ -1418,6 +1537,10 @@ impl PlatformWindow for MacWindow {
 
         let opaque = background_appearance == WindowBackgroundAppearance::Opaque;
         this.renderer.update_transparency(!opaque);
+        // Preserve renderer transparency, but never create AppKit material peers in this host.
+        if this.owned_hidden.is_some() {
+            return;
+        }
 
         unsafe {
             this.native_window.setOpaque_(opaque as BOOL);
@@ -1489,6 +1612,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn show_character_palette(&self) {
+        if self.refuse("character_palette") {
+            return;
+        }
         let this = self.0.lock();
         let window = this.native_window;
         this.foreground_executor
@@ -1502,6 +1628,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn minimize(&self) {
+        if self.refuse("minimize") {
+            return;
+        }
         let window = self.0.lock().native_window;
         unsafe {
             window.miniaturize_(nil);
@@ -1509,6 +1638,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn zoom(&self) {
+        if self.refuse("zoom") {
+            return;
+        }
         let this = self.0.lock();
         let window = this.native_window;
         let closed = this.closed.clone();
@@ -1522,6 +1654,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn toggle_fullscreen(&self) {
+        if self.refuse("fullscreen") {
+            return;
+        }
         let this = self.0.lock();
         let window = this.native_window;
         let closed = this.closed.clone();
@@ -1550,8 +1685,13 @@ impl PlatformWindow for MacWindow {
     }
 
     fn request_frame(&self) {
+        let mut lock = self.0.as_ref().lock();
+        if lock.owned_hidden.is_some() {
+            // Owned layout/paint is driven only by the explicit frame-budgeted
+            // GPUI pump, never an occluded native timer or display callback.
+            return;
+        }
         let window_state = self.0.clone();
-        let mut lock = window_state.as_ref().lock();
         let visible = unsafe {
             lock.native_window
                 .occlusionState()
@@ -1616,6 +1756,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn tabbed_windows(&self) -> Option<Vec<SystemWindowTab>> {
+        if self.owned_hidden_guard().is_some() {
+            return None;
+        }
         unsafe {
             let windows: id = msg_send![self.0.lock().native_window, tabbedWindows];
             if windows.is_null() {
@@ -1640,6 +1783,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn tab_bar_visible(&self) -> bool {
+        if self.owned_hidden_guard().is_some() {
+            return false;
+        }
         unsafe {
             let tab_group: id = msg_send![self.0.lock().native_window, tabGroup];
             if tab_group.is_null() {
@@ -1672,6 +1818,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn draw(&self, scene: &gpui::Scene) {
+        if self.refuse("present") {
+            return;
+        }
         let mut this = self.0.lock();
         this.renderer.draw(scene);
     }
@@ -1685,6 +1834,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
+        if self.refuse("ime_position") {
+            return;
+        }
         let executor = self.0.lock().foreground_executor.clone();
         executor
             .spawn(async move {
@@ -1701,6 +1853,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn titlebar_double_click(&self) {
+        if self.refuse("titlebar_double_click") {
+            return;
+        }
         let this = self.0.lock();
         let window = this.native_window;
         let closed = this.closed.clone();
@@ -1750,6 +1905,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn start_window_move(&self) {
+        if self.refuse("window_move") {
+            return;
+        }
         let this = self.0.lock();
         let window = this.native_window;
 
@@ -1761,6 +1919,9 @@ impl PlatformWindow for MacWindow {
     }
 
     fn start_window_resize(&self, edge: ResizeEdge) {
+        if self.refuse("window_resize_loop") {
+            return;
+        }
         if edge != ResizeEdge::Bottom {
             return;
         }
@@ -1901,9 +2062,48 @@ impl PlatformWindow for MacWindow {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    fn arm_owned_readback_fault(&mut self, fault: gpui::OwnedReadbackFault) -> Result<()> {
+        let mut this = self.0.lock();
+        anyhow::ensure!(
+            this.owned_hidden.is_some(),
+            "owned_readback_fault_requires_owned_window"
+        );
+        anyhow::ensure!(
+            this.owned_readback_fault.is_none(),
+            "owned_readback_fault_already_armed"
+        );
+        this.owned_readback_fault = Some(fault);
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn clear_owned_readback_fault(&mut self) -> Result<()> {
+        let mut this = self.0.lock();
+        anyhow::ensure!(
+            this.owned_hidden.is_some(),
+            "owned_readback_fault_requires_owned_window"
+        );
+        this.owned_readback_fault = None;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
-        this.renderer.render_to_image(scene)
+        let fault = this.owned_readback_fault.take();
+        if fault == Some(gpui::OwnedReadbackFault::Failure) {
+            anyhow::bail!("owned_readback_fault_failure");
+        }
+        let size = this.content_size().to_device_pixels(this.scale_factor());
+        let mut image = this.renderer.render_scene_to_image(scene, size)?;
+        if fault == Some(gpui::OwnedReadbackFault::Blank) {
+            let bytes: &mut [u8] = image.as_mut();
+            bytes.fill(0);
+        }
+        if let Some(guard) = &this.owned_hidden {
+            guard.image_completed();
+        }
+        Ok(image)
     }
 }
 
@@ -2105,6 +2305,9 @@ unsafe fn is_ime_input_source_active() -> bool {
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
+    if lock.owned_hidden.is_some() {
+        return NO;
+    }
 
     let window_height = lock.content_size().height;
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
@@ -2247,6 +2450,9 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
     let mut lock = window_state.as_ref().lock();
+    if lock.owned_hidden.is_some() {
+        return;
+    }
     let window_height = lock.content_size().height;
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 
@@ -2441,6 +2647,11 @@ extern "C" fn window_did_move(this: &Object, _: Sel, _: id) {
 fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     let mut lock = window_state.as_ref().lock();
     let scale_factor = lock.scale_factor();
+    if lock.owned_hidden.is_some()
+        && gpui::validate_owned_hidden_bounds(lock.bounds(), scale_factor).is_err()
+    {
+        return;
+    }
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);
     if let Some(layer) = lock.renderer.layer() {
@@ -2607,6 +2818,14 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
     }
 
     let scale_factor = lock.scale_factor();
+    if let Some(guard) = &lock.owned_hidden {
+        if gpui::validate_owned_hidden_bounds(Bounds::new(Point::default(), new_size), scale_factor)
+            .is_err()
+        {
+            let _ = guard.refuse("native_resize_bounds");
+            return;
+        }
+    }
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
 
@@ -2628,6 +2847,9 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
     // frame within the same CATransaction keeps border and content atomic —
     // for morphs and for user live-resize alike.
     let mut lock = window_state.lock();
+    if lock.owned_hidden.is_some() {
+        return;
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
@@ -2644,6 +2866,9 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
+    if lock.owned_hidden.is_some() {
+        return;
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
@@ -2661,6 +2886,9 @@ extern "C" fn step(view: *mut c_void) {
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
     let mut lock = window_state.lock();
+    if lock.owned_hidden.is_some() {
+        return;
+    }
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
         drop(lock);

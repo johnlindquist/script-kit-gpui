@@ -37,7 +37,7 @@ pub struct AliasInput {
     pub input: TextInputState,
     /// Current alias (if editing an existing one)
     pub current_alias: Option<String>,
-    /// Pending action for the parent to handle (polled after render)
+    /// Pending action consumed by the owning view's mutation observer.
     pub pending_action: Option<AliasInputAction>,
     /// Cursor visibility for blinking (controlled by parent's blink timer)
     pub cursor_visible: bool,
@@ -125,6 +125,64 @@ impl AliasInput {
     /// Get the current input text
     pub fn text(&self) -> &str {
         self.input.text()
+    }
+
+    pub fn semantic_token(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut token = std::collections::hash_map::DefaultHasher::new();
+        self.command_id.hash(&mut token);
+        self.current_alias.hash(&mut token);
+        self.input.text().hash(&mut token);
+        self.input.cursor().hash(&mut token);
+        self.input.selection().range().hash(&mut token);
+        token.finish()
+    }
+
+    pub fn automation_elements(&self) -> Vec<crate::protocol::ElementInfo> {
+        use crate::protocol::{ElementContentKind, ElementInfo};
+        let mut title = ElementInfo::panel("alias-input-modal-content");
+        title.semantic_id = "alias-input-modal-content".into();
+        title.text = Some(format!("Alias for \"{}\"", self.command_name));
+        let mut input = ElementInfo::input("alias", Some(self.text()), false);
+        input.semantic_id = "alias-input-field".into();
+        input.focused = None;
+        let mut elements = vec![title.redact_text(ElementContentKind::UserContent), input];
+        if self.current_alias.is_some() {
+            let mut clear = ElementInfo::button(0, "Clear");
+            clear.semantic_id = "alias-input:clear".into();
+            elements.push(clear);
+        }
+        let mut cancel = ElementInfo::button(1, "Cancel");
+        cancel.semantic_id = "alias-input:cancel".into();
+        elements.push(cancel);
+        let mut save = ElementInfo::button(2, "Save");
+        save.semantic_id = "alias-input:save".into();
+        save.action_disabled = self
+            .validation_feedback()
+            .err()
+            .map(|_| "alias_validation_failed".into());
+        save.selectable = Some(save.action_disabled.is_none());
+        elements.push(save);
+        elements
+    }
+
+    pub fn activate_semantic_action(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
+        match id {
+            "alias-input:save" => {
+                self.validation_feedback()
+                    .map_err(|error| error.to_string())?;
+                self.save();
+            }
+            "alias-input:cancel" => self.cancel(),
+            "alias-input:clear" if self.current_alias.is_some() => self.clear_alias(),
+            _ => return Ok(false),
+        }
+        cx.notify();
+        Ok(true)
     }
 
     /// Clear the input
@@ -255,6 +313,7 @@ impl AliasInput {
 
         div()
             .id("alias-input-field")
+            .debug_selector(|| "alias-input-field".into())
             .w_full()
             .h(px(PROMPT_INPUT_FIELD_HEIGHT))
             .px(px(INPUT_PADDING))

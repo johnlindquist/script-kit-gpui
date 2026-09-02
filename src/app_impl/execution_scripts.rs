@@ -696,7 +696,7 @@ impl ScriptListApp {
                     let config = crate::config::BuiltInConfig::default();
                     if let Some(entry) = builtins::resolve_builtin_entry(&canonical_id, &config) {
                         tracing::info!(command_id = %canonical_id, "builtin_command_resolved");
-                        self.execute_builtin(&entry, cx);
+                        let _outcome = self.execute_builtin(&entry, cx);
                         return builtin_entry_needs_main_window(&entry);
                     }
                     tracing::warn!(command_id = %canonical_id, "builtin_command_not_found");
@@ -708,7 +708,18 @@ impl ScriptListApp {
                         bundle_id = %identifier,
                         "app_command_resolved"
                     );
-                    let apps = crate::app_launcher::get_cached_apps();
+                    let apps = match crate::app_launcher::scan_applications() {
+                        Ok(apps) => apps,
+                        Err(error) => {
+                            tracing::error!(%error, bundle_id = %identifier, "app_command_catalogue_unavailable");
+                            self.show_error_toast_with_code(
+                                format!("Application catalogue unavailable: {error:#}"),
+                                Some(crate::action_helpers::ERROR_ACTION_FAILED),
+                                cx,
+                            );
+                            return false;
+                        }
+                    };
                     if let Some(app) = apps
                         .iter()
                         .find(|a| a.bundle_id.as_deref() == Some(identifier))
@@ -806,7 +817,7 @@ impl ScriptListApp {
                     command_id = %canonical_id,
                     "legacy_builtin_command_resolved"
                 );
-                self.execute_builtin(&entry, cx);
+                let _outcome = self.execute_builtin(&entry, cx);
                 return builtin_entry_needs_main_window(&entry);
             }
         }

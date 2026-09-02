@@ -52,7 +52,7 @@ New to Script Kit GPUI? Start with the user guides:
 ### Prerequisites
 
 - **macOS** (Linux/Windows support planned)
-- **Rust** (1.70+) - Install from https://rustup.rs
+- **Rust 1.98.0** - Pinned by `rust-toolchain.toml`; install with https://rustup.rs
 - **Bun** - Install from https://bun.sh
 - **cargo-watch** (optional, for hot reload):
   ```bash
@@ -60,6 +60,8 @@ New to Script Kit GPUI? Start with the user guides:
   ```
 
 ### Setup
+
+This is interactive **operator setup**. Agents should use [Owned native agent workflow](#owned-native-agent-workflow), not launch the raw binary below.
 
 1. **Clone the repository**
    ```bash
@@ -319,6 +321,165 @@ See `kit-init/theme.example.json` for all available options.
 
 ## Development
 
+### Owned native agent workflow
+
+Use the repository dispatcher, `bun scripts/devtools/devtools.ts`, as the agent entry point. The owned app requires `--features owned-ui-evaluation`; this does not change the normal `./dev.sh` default of `local-llm`. Provider-free fixtures need **no auth seeding, Pi sidecar provisioning, model downloads, or live provider setup**.
+
+The owned launcher keeps `SCRIPT_KIT_NONINTERACTIVE=1` and unsafe opt-ins at `0`: no screen takeover/capture, global input, native focus, clipboard access, live devices, providers, or models. It mounts **real production GPUI roots** in owned hidden windows and reads their completed GPU framebuffer, with production semantics/layout and scoped in-app actions. It is not a fake Storybook or web-rendered authority. Its evidence excludes WindowServer composition, AppKit material/glyph pixels, native focus, OS IME, global input, and live providers/devices. A catalog or token export is inventory, not runtime proof.
+
+#### Discover and build immutable artifacts
+
+Each verification run gets a fresh output parent; leave reference files and evaluation output directories nonexistent until their owning command creates them. **A new evidence directory does not require new binaries.** Reuse independently verified current references and build only the artifact kinds the run needs.
+
+```bash
+export SCRIPT_KIT_NONINTERACTIVE=1
+export SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=0 SCRIPT_KIT_ALLOW_VISIBLE_PROBES=0
+export SCRIPT_KIT_ALLOW_NATIVE_INPUT=0 SCRIPT_KIT_ALLOW_SCREEN_CAPTURE=0
+export SCRIPT_KIT_ALLOW_LIVE_AI=0 SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=0
+RUN=".test-output/owned-$(uuidgen)"
+mkdir -p "$RUN"
+printf 'Owned output parent: %s\n' "$RUN"
+
+bun scripts/devtools/devtools.ts build-ops discover
+bun scripts/devtools/devtools.ts build-ops inspect
+bun scripts/devtools/devtools.ts build-ops query storage
+bun scripts/devtools/devtools.ts build-ops diagnose locks
+
+# Run only the builds needed for this run; keep feature/profile selections stable.
+bun scripts/devtools/devtools.ts build-ops act app-build \
+  --features owned-ui-evaluation --artifact-out "$RUN/app.reference.json"
+bun scripts/devtools/devtools.ts build-ops act libtest-build \
+  --artifact-out "$RUN/libtest.reference.json"
+bun scripts/devtools/devtools.ts build-ops act exporter-build \
+  --artifact-out "$RUN/exporter.reference.json"
+```
+
+Proceed only after successful build receipts with closed cleanup. These are actual application, Rust libtest, and exporter artifacts, respectively, published through `agent-cargo.sh` in the shared `agent-debug` pool. Each `--artifact-out` exclusively creates an **ArtifactReference** (`manifestPath`, `manifestSha256`) pointing to immutable **Manifest V3** publication: exact Cargo target/features/profile, compiler-input content, toolchain/configuration, binary hash, and build/lease identity. The exporter action owns its test profile. Never choose a binary by mtime, launch a raw target path, rewrite a manifest, or overwrite a reference to make it appear current.
+
+The managed lane disables incremental compilation authoritatively (`CARGO_INCREMENTAL=0` and dev/test/build incremental settings `false`), including inherited enabling defaults. Conflicting forced Cargo configuration, incremental rustc flags, and target/build-directory relocation are refused. This does not change the human `dev.sh` watcher or its `target/` profiles. Inspect the effective compiler/wrapper policy; a selected sccache backend is not proof of cache hits.
+
+The **40 GiB budget covers all of `target-agent/`**, including pools, exports, shared caches, pending publications, runtime, and quarantine. The **25 GiB free-space floor** and **two-worker ceiling** remain. Admission, sampled cancellation, and postflight checks stop growth on resource refusal; this is **not a filesystem-enforced hard quota**. Allocated-block accounting deduplicates hardlinks within the budget scope; unique APFS extent usage is unknown. External caches, `target/`, and evidence directories are separately reported, not silently charged to this budget.
+
+No automatic eviction, budget increase, low-disk bypass, or shared-cache clear follows a refusal. Historical 65/66 GiB allowances are not reusable permission. Inspect storage and exact locks, then stop the batch until the resource or ownership issue is resolved.
+
+For reviewed noncompiler changes, inspect the route before running it; paths are explicit inputs, not an automatically discovered Git diff:
+
+```bash
+bun scripts/devtools/devtools.ts build-ops query route README.md
+./scripts/agent-check.sh README.md
+./scripts/agent-check.sh scripts/agentic/session.sh
+```
+
+Reviewed documentation/evidence paths select no compiler or test subprocesses; reviewed TS/Python/shell owners select their bounded Bun behavioral suites. Compiler inputs in `scripts/agentic/compiler-input-paths.txt` take precedence, even over documentation extensions. Unknown paths and an empty path list retain conservative Rust routing and report uncovered noncompiler contracts; `--quick` does not omit selected Bun checks. Inspect `coverageGaps`, `performedVerification`, and selected/attempted steps: a documentation-only success is a routing decision, not verified document content.
+
+TS, receipt-policy, and runner-only changes do not require new Rust binaries when compiler inputs remain current. Explicit stale references fail rather than silently rebuilding. A proven warm Cargo output reuses its existing immutable publication (`artifactReused: true`) instead of creating another executable export. Infrastructure Python supervisors/helpers use explicit `-B`, including isolated `-I -S` launches, to prevent incidental bytecode writes without changing child applications' Python policy.
+
+```bash
+bun scripts/devtools/devtools.ts build-ops act lib-test \
+  --reference "$RUN/libtest.reference.json" \
+  --filter ai::reliability::tests::redactor_allowlists_json_masks_secrets_paths_and_bounds_output
+```
+
+Reference-based libtests invoke no Cargo and create no new immutable binary export. Keep one Cargo job active at a time; checkpoint storage and finalization after each build and verification batch.
+
+#### Discover, inspect, and run real stories
+
+```bash
+bun scripts/devtools/devtools.ts stories discover
+bun scripts/devtools/devtools.ts design discover \
+  --artifact "$RUN/app.reference.json" --out "$RUN/discover"
+bun scripts/devtools/devtools.ts design inspect --fixture main.script-list \
+  --artifact "$RUN/app.reference.json" --out "$RUN/inspect"
+bun scripts/devtools/devtools.ts design query --fixture main.script-list --facet layout \
+  --artifact "$RUN/app.reference.json" --out "$RUN/layout"
+bun scripts/devtools/devtools.ts design query --fixture main.script-list --facet frame --image \
+  --artifact "$RUN/app.reference.json" --out "$RUN/frame"
+bun scripts/devtools/devtools.ts design run --scenario theme-publication-revert \
+  --artifact "$RUN/app.reference.json" --out "$RUN/theme-story"
+bun scripts/devtools/devtools.ts stories run --libtest "$RUN/libtest.reference.json" \
+  --app "$RUN/app.reference.json" --scope core --out "$RUN/core-stories"
+```
+
+`design query` supports `elements`, `layout`, `text`, and `frame`; `--image` retains bounded frame readback evidence. `stories run` combines exact library stories with the nine owned production core journeys; `--lane library` alone is not core-runtime proof. Inspect each final receipt and its assertions/cleanup, not just command completion. These commands describe how to obtain evidence, not a claim that the full fixture campaign or full test suite has completed.
+
+#### Live preview and persistent owned loop
+
+For supported scalar/color token previews without rebuilding Rust:
+
+```bash
+bun scripts/devtools/devtools.ts design watch --fixture main.script-list \
+  --artifact "$RUN/app.reference.json" --out "$RUN/watch" --edits "$RUN/watch/edits.json"
+```
+
+Run watch in a supervised process (or a dedicated terminal). **Do not pre-create `watch/`**. Once watch has claimed that fresh output directory, use a file tool/second terminal to create `$RUN/watch/edits.json` with this JSON, then edit that same file to preview changes:
+
+```json
+{"edits":[{"tokenId":"theme.colors.accent.selected","value":6004223}]}
+```
+
+This color is `0x5b9dff`; JSON colors are integer RGB values, not hex strings. The edit file must be an owned regular file inside that exact output directory, not a symlink or hardlink. Missing/invalid documents produce `designWatchRefusal` and retain the last good revision; successful updates emit `designWatchPublication`. The Rust token validation/publication owner remains authoritative. Watch tracks expected theme revisions, observes causal invalidation/completed frames, and **SIGINT** (Ctrl-C) ends the watch, reverts accepted preview edits, and closes the owned runtime. It is bounded, not a permanent service. Scalar/color previews do not edit source or persist a new user theme; Rust layout/component changes require rebuilding a new artifact and starting a fresh run.
+
+For supervised watch sessions, use an isolated PTY and send Ctrl-C to that terminal, or signal only the watcher controller PID. Do not broadcast SIGINT to its process tree: killing the native child before the controller can revert prevents native cleanup confirmation and correctly produces `INVALID_CLEANUP`. Retain that failed receipt; start a fresh owned session rather than rewriting it as successful.
+
+For multiple protocol steps in the **same** runtime:
+
+```bash
+bun scripts/devtools/devtools.ts design loop \
+  --artifact "$RUN/app.reference.json" --out "$RUN/loop"
+```
+
+It reads existing protocol `Message` JSONL from stdin and returns correlated responses. Start with:
+
+```json
+{"type":"design","command":{"operation":"catalog"}}
+{"type":"design","command":{"operation":"mount","fixtureId":"main.script-list"}}
+```
+
+Use the mount response's `result.target`: construct the exact selector `{type:"instance", id: target.windowId, generation: target.windowGeneration}`. Send `getState` with that selector; use the returned `targetIdentity` (or `surfaceContract.targetIdentity`) as `expected` for scoped mutations/unmount and completed-frame waits. Do not copy an identity from another command's runtime, promote a kind/index selector, or guess a revision. To preview in this loop, send a `design` command with `operation:"applyTheme"`, `expectedRevision` equal to the observed `themeRevision`, and the `edits` array above. Revert with `operation:"revertTheme"` and the returned publication `revision`. Query/inspect again after each transition; stale target/generation/revision refusals are not permission to weaken the selector.
+
+For a latest frame observation, send `{type:"design", command:{operation:"captureFrame", target:{type:"instance", id, generation}, includeImage:true}}`. This atomic read completes a real frame, collects state/semantics/layout, and strictly captures that same frame in one foreground command; its `result.frame`, `snapshot.frameIdentity`, and each observation's `targetIdentity` are correlated. It requires no prior frame or stale mutation `expected`. Use `includeImage:false` for the same qualified observation without retained PNG bytes. `OwnedEvaluationClient.captureFrame(target, includeImage)` and generic frame queries use this operation. Explicit `frame()` followed by `capture()` remains exact prior-frame readback for latency and same-frame comparisons: advancing state between those commands is still refused, never retried. Earlier frame records are separate observations, not identities for a later atomic capture.
+
+Finish the loop with **EOF** or the explicit End message:
+
+```json
+{"type":"design","command":{"operation":"end"}}
+```
+
+One-shot commands automatically tear down; loop EOF/End closes owned windows and the process. End verifies zero remaining windows before lifecycle completion. Always inspect the final cleanup receipt: **`INVALID_CLEANUP` is never green**, even if all assertions passed. Preserve failed evidence and diagnose it rather than deleting it or treating a missing final receipt as success.
+
+#### Recovery and operator-only legacy routes
+
+```bash
+bun scripts/devtools/devtools.ts build-ops query artifact \
+  --reference "$RUN/app.reference.json" --task application
+bun scripts/devtools/devtools.ts build-ops diagnose locks
+bun scripts/devtools/devtools.ts design diagnose --receipt "$RUN/theme-story/receipt.json"
+```
+
+Receipt diagnosis is historical validation, not fresh proof. A stale compiler-input/configuration/toolchain artifact must be **rebuilt** into a new reference under a fresh `RUN`, then rerun with fresh output directories. Never reuse failed output roots or repair hashes by hand. Lock recovery, when needed, belongs to `build-ops act recover-lock --lock <exact-name.lock> --expect <observed-lock.json>` with the exact observed lease document; do not kill unrelated processes or delete caches/artifacts.
+
+Owned Design/Stories receipts use `script-kit-owned-receipt` format version 1: a compact summary references the single sanitized `observation.json` through existing artifact hashes and an owner-marker digest. Retain the complete owned evidence tree at its recorded identity; copying only the final JSON is not sufficient. Readers verify ownership, paths, bytes, and semantic evidence before trusting the summary. Resolution is one level only, with a 1 MiB compact-wire limit and 64 MiB per artifact; retained captures are processed sequentially. Obsolete inline-owned receipts are rejected without rewriting historical files; use their original compatible reader or collect fresh evidence. Small exporter release proofs remain standalone V2 documents written once and may still be copied/uploaded alone.
+
+#### Exact keep sets and task-scoped retirement
+
+```bash
+bun scripts/devtools/devtools.ts build-ops query keep-set
+bun scripts/devtools/devtools.ts build-ops query retention
+```
+
+The discovery response includes the JSON input schemas. Retain current plus previous usable references for each needed artifact kind (at most six for the application, libtest, and exporter), their publisher/derivation records, and explicitly retained audit evidence. Actual active or unknown references remain protected regardless of age; if they exhaust the budget, growth is blocked rather than evicting them.
+
+An exact keep-set update uses `act keep-set --expect-revision <current-keep-revision> --input <selection.json>`; the JSON object has a `references` array of exact `ArtifactReference` objects. A prune uses `act prune --expect-revision <current-plan-revision> --input <selection.json>`; its JSON object has a `candidates` array of exact selected plan candidates. Select only this task's authorized obsolete outputs; selecting a parent never implicitly authorizes unselected descendants. Archive small manifests and ownership records before deleting their bulk outputs.
+
+Auxiliary staging directories qualify only through their exact explicitly selected owning task and complete parent chain. Directory/marker identities and marker hashes are rechecked before and after quarantine; unrelated tasks, changed markers, symlinks, and active/unknown resources remain protected. Selection is never permission to sweep an unmanaged ancestor.
+
+New retirement journals use schema version 2. Exact serialized UTF-8-plus-newline size is bounded at 8 MiB, including prospective recovery phases and terminal history, before mutation. An oversized fresh selection must be reduced; do not raise the reader limit or edit journal bytes to force it through.
+
+Version-2 interrupted recovery uses the current recovery revision, finishes only still-safe started quarantines, and withdraws untouched candidates without deleting them. If it returns `replanRequired`, query and explicitly select a fresh plan. Legacy version-1 journals instead fail with `retention_legacy_journal_requires_compatible_reader_or_reviewed_recovery`; their missing marker identity cannot be inferred. They require the original compatible reader or explicitly reviewed recovery, not an ordinary fresh-plan retry. Journals, quarantine, and historical receipts stay untouched on refusal. Never waive a new reference, clear an unknown lease, or invoke the legacy human-target sweeper from an agent.
+
+The global `script-kit-devtools` skill's legacy mtime selection, `Driver.launch({binary: ...})`, automatic sidecar/auth seeding, and `--show` guidance is **not this workflow**. Follow these repository commands instead. Visible `session.sh`/legacy inspection routes, raw binaries, desktop input/screen capture, and real-provider tests are **explicit operator-only** work requiring separate authorization; never fall back to them when an owned command refuses. The following hot-reload, raw SDK smoke, and release commands preserve the interactive operator development workflow.
+
+
 ### Hot Reload
 
 ```bash
@@ -326,6 +487,8 @@ See `kit-init/theme.example.json` for all available options.
 ```
 
 Changes to Rust code trigger a rebuild (~2-5 seconds). Theme and script changes reload instantly without restart.
+
+Operator development retains `./dev.sh`'s default `local-llm` feature. Owned evaluations above are a separate opt-in build and do not change it.
 
 ### Project Structure
 
@@ -544,6 +707,8 @@ Context parts can also be file attachments. All parts are resolved at submit tim
 AI agents can execute verifiable UI transactions without sleeps or polling loops. The `waitFor` command polls a condition until satisfied, and `batch` chains multiple atomic commands into a single request.
 
 **Agent workflow:** set input → wait for choices to render → select by value → submit. No timing guesses required.
+
+The JSON below illustrates the general protocol, not launch authorization or an owned target selector. In the owned agent loop above, bind requests to the returned exact instance and current `expected` identity; visible-window/focus waits do not authorize desktop takeover.
 
 ```json
 {

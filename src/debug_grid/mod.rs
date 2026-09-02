@@ -235,6 +235,7 @@ pub fn render_grid_overlay(
     let colors = &config.color_scheme;
 
     div()
+        .debug_selector(|| "main-debug-grid".into())
         .absolute()
         .top(px(0.))
         .left(px(0.))

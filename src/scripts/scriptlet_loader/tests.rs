@@ -1,4 +1,14 @@
 use super::*;
+struct SkPathGuard(Option<String>);
+impl Drop for SkPathGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.0 {
+            std::env::set_var(crate::setup::SK_PATH_ENV, previous);
+        } else {
+            std::env::remove_var(crate::setup::SK_PATH_ENV);
+        }
+    }
+}
 
 #[test]
 fn test_extract_code_block_skips_metadata() {
@@ -56,7 +66,7 @@ hello world
 }
 
 #[test]
-fn test_read_scriptlets_keeps_first_scriptlet_when_file_starts_with_heading() {
+fn test_load_scriptlets_keeps_first_scriptlet_when_file_starts_with_heading() {
     let _lock = crate::test_utils::SK_PATH_TEST_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
@@ -114,7 +124,9 @@ two
     .expect("write scriptlet file");
 
     let _guard = EnvVarGuard::set(SK_PATH_ENV, &temp_dir.path().to_string_lossy());
-    let scriptlets = super::loading::read_scriptlets();
+    let scriptlets = super::loading::load_scriptlets()
+        .expect("read source")
+        .into_scriptlets();
 
     let names: Vec<String> = scriptlets.iter().map(|s| s.name.clone()).collect();
     assert_eq!(names, vec!["First Scriptlet", "Second Scriptlet"]);
@@ -236,7 +248,11 @@ fn incremental_markdown_loader_replaces_stale_diagnostics_without_hiding_rows() 
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().expect("create isolated markdown fixture");
-    let source = temp.path().join("sdk-incremental.md");
+    let directory = temp.path().join("plugins/main/scriptlets");
+    std::fs::create_dir_all(&directory).expect("create allowed scriptlet root");
+    let _guard = SkPathGuard(std::env::var(crate::setup::SK_PATH_ENV).ok());
+    std::env::set_var(crate::setup::SK_PATH_ENV, temp.path());
+    let source = directory.join("sdk-incremental.md");
     std::fs::write(
         &source,
         r#"## Retained Command
@@ -250,7 +266,9 @@ echo no-sdk
     )
     .expect("write noninteractive fixture");
 
-    let first = super::loading::read_scriptlets_from_file(&source);
+    let first = super::loading::read_scriptlets_from_file(&source)
+        .expect("read initial snapshot")
+        .publish();
     assert_eq!(first.len(), 1, "invalid commands must stay visible");
     assert_eq!(
         crate::scripts::validate_scriptlet_capabilities(&first[0]).len(),
@@ -269,7 +287,14 @@ await arg("Interactive");
 "#,
     )
     .expect("write repaired interactive fixture");
-    let repaired = super::loading::read_scriptlets_from_file(&source);
+    let repaired =
+        super::loading::read_scriptlets_from_file(&source).expect("read repaired snapshot");
+    assert_eq!(
+        crate::scripts::validate_scriptlet_capabilities(&first[0]).len(),
+        1,
+        "unpublished reads must retain installed capabilities"
+    );
+    let repaired = repaired.publish();
     assert_eq!(repaired.len(), 1);
     assert!(crate::scripts::validate_scriptlet_capabilities(&repaired[0]).is_empty());
 
@@ -278,9 +303,19 @@ await arg("Interactive");
         "## Retained Command\n```ts\nitems.find(item => item.ready);\n```\n",
     )
     .expect("write safe legacy fixture");
-    let legacy = super::loading::read_scriptlets_from_file(&source);
+    let legacy = super::loading::read_scriptlets_from_file(&source)
+        .expect("read legacy snapshot")
+        .publish();
     assert_eq!(legacy.len(), 1);
     assert!(crate::scripts::validate_scriptlet_capabilities(&legacy[0]).is_empty());
+    std::fs::remove_file(&source).expect("remove source");
+    let generation = crate::scripts::scriptlet_capability_registry_generation();
+    assert!(super::loading::read_scriptlets_from_file(&source).is_err());
+    assert_eq!(
+        crate::scripts::scriptlet_capability_registry_generation(),
+        generation,
+        "failed reads cannot publish capability metadata"
+    );
 }
 
 #[test]
@@ -289,17 +324,6 @@ fn full_markdown_loader_preserves_interactive_and_blocked_scriptlet_rows() {
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    struct SkPathGuard(Option<String>);
-    impl Drop for SkPathGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.0 {
-                std::env::set_var(crate::setup::SK_PATH_ENV, previous);
-            } else {
-                std::env::remove_var(crate::setup::SK_PATH_ENV);
-            }
-        }
-    }
 
     let temp = tempfile::TempDir::new().expect("create isolated plugin tree");
     let directory = temp.path().join("plugins/main/scriptlets");
@@ -341,8 +365,20 @@ echo untouched
     let guard = SkPathGuard(std::env::var(crate::setup::SK_PATH_ENV).ok());
     std::env::set_var(crate::setup::SK_PATH_ENV, temp.path());
     let generation_before = crate::scripts::scriptlet_capability_registry_generation();
-    let loaded = super::loading::load_scriptlets();
+    let loaded = super::loading::load_scriptlets().expect("read complete snapshot");
+    assert_eq!(
+        crate::scripts::scriptlet_capability_registry_generation(),
+        generation_before,
+        "worker parsing is read-only"
+    );
+    let loaded = loaded.publish();
     assert_eq!(loaded.len(), 4, "invalid scriptlets remain visible");
+    assert!(
+        loaded
+            .iter()
+            .all(|scriptlet| scriptlet.plugin_id == "main" && scriptlet.plugin_title.is_some()),
+        "parser must retain discovered plugin ownership"
+    );
     assert!(crate::scripts::scriptlet_capability_registry_generation() > generation_before);
 
     let interactive = loaded
@@ -380,5 +416,51 @@ echo untouched
         .find(|entry| entry.name == "Existing Legacy Command")
         .expect("old scriptlet remains indexed");
     assert!(crate::scripts::validate_scriptlet_capabilities(old).is_empty());
+    let generation = crate::scripts::scriptlet_capability_registry_generation();
+    std::fs::write(directory.join("broken.md"), [0xff, 0xfe]).expect("write invalid source");
+    assert!(
+        super::loading::load_scriptlets().is_err(),
+        "partial parsed catalogue must not masquerade as success"
+    );
+    assert_eq!(
+        crate::scripts::scriptlet_capability_registry_generation(),
+        generation
+    );
+    assert!(
+        !crate::scripts::validate_scriptlet_capabilities(legacy).is_empty(),
+        "failed full read retains prior blocked metadata"
+    );
     drop(guard);
+}
+
+#[test]
+fn incremental_and_full_loads_use_the_same_manifest_owned_identity() {
+    let _lock = crate::test_utils::SK_PATH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().expect("create plugin root");
+    let plugin = root.path().join("plugins/folder-name");
+    std::fs::create_dir_all(plugin.join("scriptlets")).expect("create scriptlets directory");
+    std::fs::write(
+        plugin.join("package.json"),
+        r#"{"name":"owned-plugin","title":"Owned Plugin"}"#,
+    )
+    .expect("write manifest");
+    let source = plugin.join("scriptlets/demo.md");
+    std::fs::write(&source, "## Demo\n```paste\nhello\n```\n").expect("write source");
+    let _guard = SkPathGuard(std::env::var(crate::setup::SK_PATH_ENV).ok());
+    std::env::set_var(crate::setup::SK_PATH_ENV, root.path());
+    let full = super::loading::load_scriptlets()
+        .expect("read full source")
+        .into_scriptlets();
+    let incremental = super::loading::read_scriptlets_from_file(&source)
+        .expect("read changed source")
+        .into_scriptlets();
+    assert_eq!(full.len(), 1);
+    assert_eq!(incremental.len(), 1);
+    assert_eq!(full[0].plugin_id, "owned-plugin");
+    assert_eq!(incremental[0].plugin_id, full[0].plugin_id);
+    assert_eq!(incremental[0].plugin_title, full[0].plugin_title);
+    assert_eq!(incremental[0].file_path, full[0].file_path);
 }

@@ -4,163 +4,7 @@ enum FileSearchSelectionMode {
     UserLockedPath,
 }
 
-/// Render and filter-performance diagnostics owned by the main script list surface.
-#[derive(Debug)]
-struct MainMenuRenderDiagnosticsState {
-    /// Last filter value that produced render diagnostics.
-    last_render_log_filter: String,
-    /// Last selection index that produced render diagnostics.
-    last_render_log_selection: usize,
-    /// Last item count that produced render diagnostics.
-    last_render_log_item_count: usize,
-    /// True when the current render changed enough to log preview diagnostics.
-    log_this_render: bool,
-    /// Start time for the current input-to-grouped-results performance sample.
-    filter_perf_start: Option<std::time::Instant>,
-    /// Cache fields for highlighting
-    last_input_highlight_text: String,
-    last_input_highlight_ranges: Vec<(std::ops::Range<usize>, gpui::Hsla, String)>,
-}
-
-#[derive(Clone, Debug)]
-struct SubmitDiagnosticEvent {
-    generation: u64,
-    owner: &'static str,
-    route: &'static str,
-    surface: String,
-    prompt_id: Option<String>,
-    value: Option<String>,
-    selected_index: Option<usize>,
-    consumed_enter: bool,
-}
-
-#[derive(Debug, Default)]
-struct SubmitDiagnosticsState {
-    generation: u64,
-    last: Option<SubmitDiagnosticEvent>,
-    pending_enter_consumed_at: Option<std::time::Instant>,
-}
-
-impl Default for MainMenuRenderDiagnosticsState {
-    fn default() -> Self {
-        Self {
-            last_render_log_filter: String::new(),
-            last_render_log_selection: usize::MAX,
-            last_render_log_item_count: usize::MAX,
-            log_this_render: true,
-            filter_perf_start: None,
-            last_input_highlight_text: String::new(),
-            last_input_highlight_ranges: Vec::new(),
-        }
-    }
-}
-
-/// Environment-gated proxy timing from main-list wheel events to GPUI's next
-/// frame callback. This is callback timing, not compositor presentation time.
-#[derive(Debug)]
-struct MainListScrollFrameTrace {
-    enabled: bool,
-    gesture_generation: u64,
-    event_count: u64,
-    frame_callback_count: u64,
-    callback_scheduled: bool,
-    pending_event_times: Vec<std::time::Instant>,
-    last_frame_callback_at: Option<std::time::Instant>,
-    event_to_frame_ms: std::collections::VecDeque<f64>,
-    frame_interval_ms: std::collections::VecDeque<f64>,
-}
-
-impl MainListScrollFrameTrace {
-    const MAX_SAMPLES: usize = 512;
-
-    fn from_env() -> Self {
-        Self {
-            enabled: std::env::var_os("SCRIPT_KIT_MAIN_LIST_SCROLL_FRAME_TRACE").is_some(),
-            gesture_generation: 0,
-            event_count: 0,
-            frame_callback_count: 0,
-            callback_scheduled: false,
-            pending_event_times: Vec::new(),
-            last_frame_callback_at: None,
-            event_to_frame_ms: std::collections::VecDeque::new(),
-            frame_interval_ms: std::collections::VecDeque::new(),
-        }
-    }
-
-    fn record_event(&mut self, began_gesture: bool, now: std::time::Instant) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        if began_gesture {
-            self.gesture_generation = self.gesture_generation.wrapping_add(1);
-        }
-        self.event_count = self.event_count.wrapping_add(1);
-        self.pending_event_times.push(now);
-        if self.callback_scheduled {
-            false
-        } else {
-            self.callback_scheduled = true;
-            true
-        }
-    }
-
-    fn record_frame_callback(&mut self, now: std::time::Instant) {
-        if !self.enabled {
-            return;
-        }
-        self.callback_scheduled = false;
-        self.frame_callback_count = self.frame_callback_count.wrapping_add(1);
-        let event_samples = self
-            .pending_event_times
-            .drain(..)
-            .map(|event_at| now.duration_since(event_at).as_secs_f64() * 1000.0)
-            .collect::<Vec<_>>();
-        for sample in event_samples {
-            Self::push_sample(&mut self.event_to_frame_ms, sample);
-        }
-        if let Some(previous) = self.last_frame_callback_at.replace(now) {
-            Self::push_sample(
-                &mut self.frame_interval_ms,
-                now.duration_since(previous).as_secs_f64() * 1000.0,
-            );
-        }
-    }
-
-    fn push_sample(samples: &mut std::collections::VecDeque<f64>, sample: f64) {
-        if samples.len() == Self::MAX_SAMPLES {
-            samples.pop_front();
-        }
-        samples.push_back(sample);
-    }
-
-    fn percentile(samples: &std::collections::VecDeque<f64>, percentile: f64) -> Option<f64> {
-        if samples.is_empty() {
-            return None;
-        }
-        let mut sorted = samples.iter().copied().collect::<Vec<_>>();
-        sorted.sort_by(f64::total_cmp);
-        let index = ((sorted.len() - 1) as f64 * percentile).ceil() as usize;
-        sorted.get(index).copied()
-    }
-
-    fn receipt(&self) -> serde_json::Value {
-        serde_json::json!({
-            "enabled": self.enabled,
-            "timingSource": "gpuiNextFrameCallbackProxy",
-            "gestureGeneration": self.gesture_generation,
-            "eventCount": self.event_count,
-            "frameCallbackCount": self.frame_callback_count,
-            "eventToFrameMsP50": Self::percentile(&self.event_to_frame_ms, 0.50),
-            "eventToFrameMsP95": Self::percentile(&self.event_to_frame_ms, 0.95),
-            "eventToFrameMsMax": Self::percentile(&self.event_to_frame_ms, 1.0),
-            "frameIntervalMsP50": Self::percentile(&self.frame_interval_ms, 0.50),
-            "frameIntervalMsP95": Self::percentile(&self.frame_interval_ms, 0.95),
-            "frameIntervalMsMax": Self::percentile(&self.frame_interval_ms, 1.0),
-            "framesOver16_7Ms": self.frame_interval_ms.iter().filter(|sample| **sample > 16.7).count(),
-            "framesOver33_3Ms": self.frame_interval_ms.iter().filter(|sample| **sample > 33.3).count(),
-        })
-    }
-}
+include!("app_state_diagnostics.rs");
 
 /// Fallback commands shown when the main-menu search has no direct matches.
 #[derive(Default)]
@@ -177,10 +21,8 @@ pub(crate) struct RootPassiveFrameKey {
     pub(crate) source_filters: crate::menu_syntax::RootUnifiedSourceFilterSet,
     pub(crate) todo_options: crate::menu_syntax::RootTodoSectionOptions,
     pub(crate) brain_options: crate::brain::RootBrainSectionOptions,
-    /// Bumped whenever async semantic brain results change, so a cached frame
-    /// holding lexical-only brain hits can never be served after semantic
-    /// results land for the same query.
-    pub(crate) brain_semantic_epoch: u64,
+    /// Bumped whenever an accepted lexical or semantic Brain snapshot changes.
+    pub(crate) brain_source_epoch: u64,
     pub(crate) notes_options: crate::notes::RootNotesSectionOptions,
     pub(crate) clipboard_history_options:
         crate::clipboard_history::RootClipboardHistorySectionOptions,
@@ -323,6 +165,105 @@ const QUICK_TERMINAL_INITIAL_COLS: u16 = 80;
 const QUICK_TERMINAL_INITIAL_ROWS: u16 = 24;
 const QUICK_TERMINAL_WARM_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+pub(crate) use crate::scripts::main_menu_rows::{MainMenuRowProjection, MainMenuRowSubject};
+
+pub(crate) enum ResolvedMainMenuSelection<'a> {
+    SearchResult {
+        row: &'a MainMenuRowProjection,
+        result: &'a scripts::SearchResult,
+    },
+    Calculator {
+        row: &'a MainMenuRowProjection,
+        result: &'a crate::calculator::CalculatorInlineResult,
+    },
+}
+
+pub(crate) use crate::scrolling::list_interaction::{
+    MainMenuSelectionIntent, MainMenuViewportIntent,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MainMenuSelectionOrigin {
+    Keyboard,
+    Pointer,
+    Agent,
+    QueryReset,
+    ProviderReconciliation,
+    Restoration,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MainMenuPointerPress {
+    pub(crate) query: RootSearchQueryStamp,
+    pub(crate) stable_key: String,
+    pub(crate) content_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainMenuPreviewBinding {
+    pub(crate) query: RootSearchQueryStamp,
+    pub(crate) stable_key: String,
+    pub(crate) content_fingerprint: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileSearchPreviewRequest {
+    pub(crate) binding: MainMenuPreviewBinding,
+    pub(crate) query_text: String,
+    pub(crate) file: crate::file_search::FileResult,
+    pub(crate) sequence: u64,
+    pub(crate) content_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainMenuPreviewWorkObservation {
+    pub(crate) sequence: u64,
+    pub(crate) binding: MainMenuPreviewBinding,
+    pub(crate) status: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MainMenuDispatchResult {
+    Dispatched,
+    PendingConfirmation,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainMenuDispatchObservation {
+    pub(crate) query: RootSearchQueryStamp,
+    pub(crate) stable_key: String,
+    pub(crate) content_fingerprint: String,
+    pub(crate) status: &'static str,
+    pub(crate) reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainMenuPublicationStamp {
+    pub(crate) sequence: u64,
+    pub(crate) reason: &'static str,
+    pub(crate) source: Option<&'static str>,
+    pub(crate) source_generation: Option<u64>,
+    pub(crate) query: RootSearchQueryStamp,
+    pub(crate) result_revision: u64,
+    pub(crate) selection_revision: u64,
+    pub(crate) viewport_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainMenuRevealTicket {
+    pub(crate) sequence: u64,
+    pub(crate) query: RootSearchQueryStamp,
+    pub(crate) result_revision: u64,
+    pub(crate) selection_revision: u64,
+    pub(crate) viewport_revision: u64,
+    pub(crate) surface_generation: u64,
+}
+
 /// Search and grouped-result caches owned by the main script-list surface.
 struct MainMenuResultCacheState {
     cached_filtered_results: Vec<scripts::SearchResult>,
@@ -333,6 +274,26 @@ struct MainMenuResultCacheState {
     cached_grouped_first_selectable_index: Option<usize>,
     cached_grouped_last_selectable_index: Option<usize>,
     grouped_cache_key: String,
+    committed_rows: Arc<[MainMenuRowProjection]>,
+    committed_calculator: Option<crate::calculator::CalculatorInlineResult>,
+    committed_query: Option<RootSearchQueryStamp>,
+    selection_intent: MainMenuSelectionIntent,
+    viewport_intent: MainMenuViewportIntent,
+    result_revision: u64,
+    selection_revision: u64,
+    viewport_revision: u64,
+    last_publication: Option<MainMenuPublicationStamp>,
+    publication_error: Option<String>,
+    selection_cause: &'static str,
+    preview_binding: Option<MainMenuPreviewBinding>,
+    preview_load_state: &'static str,
+    ranking_evidence: scripts::command_contract::MainMenuRankingEvidenceMap,
+    dispatch_observation: Option<MainMenuDispatchObservation>,
+    reveal_sequence: u64,
+    pending_reveal: Option<MainMenuRevealTicket>,
+    preview_work_sequence: u64,
+    preview_work_observations: std::collections::VecDeque<MainMenuPreviewWorkObservation>,
+    file_search_preview_request: Option<FileSearchPreviewRequest>,
 }
 
 impl Default for MainMenuResultCacheState {
@@ -346,6 +307,26 @@ impl Default for MainMenuResultCacheState {
             cached_grouped_first_selectable_index: None,
             cached_grouped_last_selectable_index: None,
             grouped_cache_key: String::from(MAIN_MENU_RESULT_CACHE_UNINITIALIZED_KEY),
+            committed_rows: Arc::from([]),
+            committed_calculator: None,
+            committed_query: None,
+            selection_intent: MainMenuSelectionIntent::default(),
+            viewport_intent: MainMenuViewportIntent::default(),
+            result_revision: 0,
+            selection_revision: 0,
+            viewport_revision: 0,
+            last_publication: None,
+            publication_error: None,
+            selection_cause: "uninitialized",
+            preview_binding: None,
+            preview_load_state: "metadata",
+            ranking_evidence: Default::default(),
+            dispatch_observation: None,
+            reveal_sequence: 0,
+            pending_reveal: None,
+            preview_work_sequence: 0,
+            preview_work_observations: Default::default(),
+            file_search_preview_request: None,
         }
     }
 }
@@ -418,16 +399,6 @@ impl MainMenuResultCacheState {
         }
     }
 
-    fn flat_result_index_for_coerced_grouped_selection(
-        &self,
-        selected_index: usize,
-    ) -> Option<(usize, usize)> {
-        let grouped_index =
-            crate::list_item::coerce_selection(self.grouped_items(), selected_index)?;
-        let result_idx = self.flat_result_index_for_grouped_item(grouped_index)?;
-        Some((grouped_index, result_idx))
-    }
-
     fn search_result_for_flat_index(
         &self,
         flat_result_index: usize,
@@ -458,22 +429,6 @@ impl MainMenuResultCacheState {
         self.search_result_for_grouped_item(grouped_index).cloned()
     }
 
-    fn first_search_result_at_or_after_grouped_item(
-        &self,
-        grouped_index: usize,
-    ) -> Option<&scripts::SearchResult> {
-        (grouped_index..self.cached_grouped_items.len())
-            .find_map(|index| self.search_result_for_grouped_item(index))
-    }
-
-    fn cloned_first_search_result_at_or_after_grouped_item(
-        &self,
-        grouped_index: usize,
-    ) -> Option<scripts::SearchResult> {
-        self.first_search_result_at_or_after_grouped_item(grouped_index)
-            .cloned()
-    }
-
     fn grouped_search_results(&self) -> impl Iterator<Item = &scripts::SearchResult> {
         self.cached_grouped_items
             .iter()
@@ -485,43 +440,11 @@ impl MainMenuResultCacheState {
             })
     }
 
-    fn is_selectable_result(result: &scripts::SearchResult) -> bool {
-        !matches!(
-            result,
-            scripts::SearchResult::SpineProjection(row) if !row.is_selectable
-        )
-    }
-
-    fn grouped_selectable_search_results(&self) -> impl Iterator<Item = &scripts::SearchResult> {
-        self.grouped_search_results()
-            .filter(|result| Self::is_selectable_result(result))
-    }
-
-    fn grouped_selectable_result_count(&self) -> usize {
-        self.grouped_selectable_search_results().count()
-    }
-
     fn grouped_index_for_stable_selection_key(&self, key: &str) -> Option<usize> {
-        self.cached_grouped_items
+        self.committed_rows
             .iter()
-            .enumerate()
-            .find_map(|(grouped_index, item)| {
-                let GroupedListItem::Item(result_idx) = item else {
-                    return None;
-                };
-                self.cached_grouped_flat_results
-                    .get(*result_idx)
-                    .and_then(|result| result.stable_selection_key())
-                    .filter(|candidate| candidate == key)
-                    .map(|_| grouped_index)
-            })
-    }
-
-    fn selectable_bounds(&self) -> (Option<usize>, Option<usize>) {
-        (
-            self.cached_grouped_first_selectable_index,
-            self.cached_grouped_last_selectable_index,
-        )
+            .find(|row| row.stable_key == key && row.eligibility.selectable)
+            .map(|row| row.grouped_index)
     }
 
     fn first_selectable_index(&self) -> Option<usize> {
@@ -540,49 +463,65 @@ impl MainMenuResultCacheState {
         &mut self,
         computed_filter_text: String,
         grouped_items: Vec<GroupedListItem>,
-        flat_results: Vec<scripts::SearchResult>,
-        _first_selectable_index: Option<usize>,
-        _last_selectable_index: Option<usize>,
-    ) {
+        mut flat_results: Vec<scripts::SearchResult>,
+        calculator: Option<crate::calculator::CalculatorInlineResult>,
+        query: RootSearchQueryStamp,
+        query_text: &str,
+        mut ranking_evidence: scripts::command_contract::MainMenuRankingEvidenceMap,
+    ) -> Result<(), String> {
         let mut display_items = Vec::with_capacity(grouped_items.len());
         let mut source_statuses = Vec::new();
         for item in grouped_items {
             match item {
                 GroupedListItem::Status(status) => source_statuses.push(status),
-                GroupedListItem::SectionHeader(..)
-                | GroupedListItem::ReservedSectionSlot
-                | GroupedListItem::Item(_) => display_items.push(item),
+                item => display_items.push(item),
             }
         }
-
-        // Stabilize the first result's vertical origin across grouping/filter changes.
-        // A reserved slot is visual-only and is never projected as an empty heading.
         crate::list_item::ensure_launcher_section_slot(&mut display_items);
-
-        let mut first_selectable_index = None;
-        let mut last_selectable_index = None;
-        for (index, grouped_item) in display_items.iter().enumerate() {
-            let GroupedListItem::Item(result_idx) = grouped_item else {
-                continue;
-            };
-            let Some(result) = flat_results.get(*result_idx) else {
-                continue;
-            };
-            if !Self::is_selectable_result(result) {
-                continue;
-            }
-            if first_selectable_index.is_none() {
-                first_selectable_index = Some(index);
-            }
-            last_selectable_index = Some(index);
+        let mut rows = scripts::main_menu_rows::project_main_menu_rows(
+            &mut display_items,
+            &mut flat_results,
+            calculator.as_ref(),
+            query_text,
+        )?;
+        if self.committed_query == Some(query) {
+            scripts::main_menu_rows::preserve_displayed_main_menu_rows(
+                &self.cached_grouped_items,
+                &self.committed_rows,
+                &mut display_items,
+                &mut rows,
+            );
+        }
+        let mut selectable = rows.iter().filter(|row| row.eligibility.selectable);
+        let first = selectable.next().map(|row| row.grouped_index);
+        let last = selectable.last().map(|row| row.grouped_index).or(first);
+        let calculator = calculator.filter(|_| {
+            rows.iter()
+                .any(|row| row.subject == MainMenuRowSubject::Calculator)
+        });
+        if !ranking_evidence.is_empty() {
+            let keys: std::collections::HashSet<&str> =
+                rows.iter().map(|row| row.stable_key.as_str()).collect();
+            ranking_evidence.retain(|key, _| keys.contains(key.as_str()));
         }
 
-        self.cached_grouped_first_selectable_index = first_selectable_index;
-        self.cached_grouped_last_selectable_index = last_selectable_index;
+        // Every fallible projection step completes before any committed field changes.
+        self.cached_grouped_first_selectable_index = first;
+        self.cached_grouped_last_selectable_index = last;
         self.cached_grouped_items = display_items.into();
         self.cached_grouped_flat_results = flat_results.into();
         self.cached_grouped_source_statuses = source_statuses.into();
+        self.committed_rows = rows.into();
+        self.committed_calculator = calculator;
+        self.committed_query = Some(query);
+        self.ranking_evidence = ranking_evidence;
         self.grouped_cache_key = computed_filter_text;
+        self.result_revision = self
+            .result_revision
+            .checked_add(1)
+            .expect("main menu result revision exhausted");
+        self.publication_error = None;
+        Ok(())
     }
 
     fn mark_apps_loaded(&mut self) {
@@ -595,8 +534,6 @@ impl MainMenuResultCacheState {
     }
 
     fn invalidate_grouped_results(&mut self) {
-        self.cached_grouped_first_selectable_index = None;
-        self.cached_grouped_last_selectable_index = None;
         self.grouped_cache_key = String::from(MAIN_MENU_RESULT_CACHE_INVALIDATED_KEY);
     }
 }
@@ -604,12 +541,16 @@ impl MainMenuResultCacheState {
 #[derive(Debug, Clone)]
 pub(crate) struct MainMenuSelectionSnapshot {
     pub(crate) query: String,
+    pub(crate) query_stamp: Option<RootSearchQueryStamp>,
+    pub(crate) intent: MainMenuSelectionIntent,
     pub(crate) selected_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct MainMenuViewportSnapshot {
     pub(crate) query: String,
+    pub(crate) query_stamp: Option<RootSearchQueryStamp>,
+    pub(crate) intent: MainMenuViewportIntent,
     pub(crate) first_visible_keys: Vec<String>,
     pub(crate) fallback_item_ix: usize,
     pub(crate) offset_in_item: gpui::Pixels,
@@ -656,34 +597,7 @@ pub(crate) enum AgentChatReturnRoute {
     Direct,
 }
 
-// Supersedes the 2026-07-20 hard rule: every same-query async results refresh first restores the
-// pre-refresh stable selected identity, regardless of movement tracking. Only a missing identity
-// may snap to the first selectable row; genuinely new queries reset in the filter-change path.
-
 impl ScriptListApp {
-    pub(crate) fn mark_main_menu_selection_user_moved(&mut self) {
-        if matches!(self.current_view, AppView::ScriptList) {
-            self.main_menu_selection_user_moved = true;
-        }
-    }
-
-    pub(crate) fn reset_main_menu_selection_user_moved(&mut self) {
-        self.main_menu_selection_user_moved = false;
-    }
-
-    pub(crate) fn snap_main_menu_selection_to_first(&mut self) -> bool {
-        self.get_grouped_results_cached();
-        let first = self
-            .main_menu_result_caches
-            .first_selectable_index()
-            .unwrap_or(0);
-        let changed = self.selected_index != first;
-        self.selected_index = first;
-        self.hovered_index = None;
-        self.last_scrolled_index = None;
-        changed
-    }
-
     pub(crate) fn root_file_source_chip_page_key_for(
         raw_filter_text: &str,
         stripped_query: &str,
@@ -720,39 +634,295 @@ impl ScriptListApp {
             .max(crate::file_search::ROOT_FILE_SOURCE_CHIP_INITIAL_VISIBLE_ROWS)
     }
 
-    pub(crate) fn main_menu_selection_snapshot(&mut self) -> MainMenuSelectionSnapshot {
-        // The grouped cache is also the last row set presented to the user.
-        // Read it before considering a rebuild: async providers publish their
-        // new generation before some owners request this snapshot, and a
-        // generation-triggered rebuild here would preserve whichever new row
-        // landed at the old index instead of the row the user actually saw.
-        let mut selected_key = self
-            .main_menu_result_caches
-            .flat_result_index_for_coerced_grouped_selection(self.selected_index)
-            .and_then(|(_, result_idx)| {
-                self.main_menu_result_caches
-                    .search_result_for_flat_index(result_idx)
-            })
-            .and_then(|result| result.stable_selection_key());
+    pub(crate) fn main_menu_committed_rows(&self) -> &[MainMenuRowProjection] {
+        &self.main_menu_result_caches.committed_rows
+    }
 
-        // Startup and non-rendered callers may not have populated the painted
-        // cache yet. Only that empty-cache path builds current grouped rows.
-        if selected_key.is_none() {
-            self.get_grouped_results_cached();
-            selected_key = self
-                .main_menu_result_caches
-                .flat_result_index_for_coerced_grouped_selection(self.selected_index)
-                .and_then(|(_, result_idx)| {
-                    self.main_menu_result_caches
-                        .search_result_for_flat_index(result_idx)
-                })
-                .and_then(|result| result.stable_selection_key());
+    pub(crate) fn main_menu_committed_rows_snapshot(&self) -> Arc<[MainMenuRowProjection]> {
+        self.main_menu_result_caches.committed_rows.clone()
+    }
+
+    pub(crate) fn main_menu_committed_results(&self) -> &[scripts::SearchResult] {
+        self.main_menu_result_caches.grouped_flat_results()
+    }
+
+    pub(crate) fn main_menu_committed_calculator(
+        &self,
+    ) -> Option<&crate::calculator::CalculatorInlineResult> {
+        self.main_menu_result_caches.committed_calculator.as_ref()
+    }
+
+    pub(crate) fn main_menu_committed_query_stamp(&self) -> Option<RootSearchQueryStamp> {
+        self.main_menu_result_caches.committed_query
+    }
+
+    pub(crate) fn main_menu_preview_binding(&self) -> Option<&MainMenuPreviewBinding> {
+        self.main_menu_result_caches.preview_binding.as_ref()
+    }
+
+    pub(crate) fn set_main_menu_preview_binding(
+        &mut self,
+        binding: Option<MainMenuPreviewBinding>,
+    ) {
+        if self.main_menu_result_caches.preview_binding != binding {
+            self.main_menu_result_caches.preview_load_state = "metadata";
         }
+        self.main_menu_result_caches.preview_binding = binding;
+    }
 
+    pub(crate) fn main_menu_ranking_evidence(
+        &self,
+        stable_key: &str,
+    ) -> Option<&scripts::command_contract::MainMenuRankingEvidence> {
+        self.main_menu_result_caches
+            .ranking_evidence
+            .get(stable_key)
+    }
+
+    pub(crate) fn main_menu_committed_ranking(
+        &self,
+    ) -> &scripts::command_contract::MainMenuRankingEvidenceMap {
+        &self.main_menu_result_caches.ranking_evidence
+    }
+
+    pub(crate) fn main_menu_preview_load_state(&self) -> &'static str {
+        self.main_menu_result_caches.preview_load_state
+    }
+
+    pub(crate) fn set_main_menu_preview_load_state(&mut self, state: &'static str) {
+        self.main_menu_result_caches.preview_load_state = state;
+    }
+
+    pub(crate) fn begin_main_menu_preview_work(&mut self, binding: MainMenuPreviewBinding) -> u64 {
+        self.main_menu_result_caches.preview_work_sequence = self
+            .main_menu_result_caches
+            .preview_work_sequence
+            .checked_add(1)
+            .expect("main menu preview work sequence exhausted");
+        let sequence = self.main_menu_result_caches.preview_work_sequence;
+        self.push_main_menu_preview_work_observation(MainMenuPreviewWorkObservation {
+            sequence,
+            binding,
+            status: "pending",
+        });
+        sequence
+    }
+
+    pub(crate) fn record_main_menu_preview_work_completion(
+        &mut self,
+        sequence: u64,
+        binding: MainMenuPreviewBinding,
+        status: &'static str,
+    ) {
+        self.push_main_menu_preview_work_observation(MainMenuPreviewWorkObservation {
+            sequence,
+            binding,
+            status,
+        });
+    }
+
+    pub(crate) fn main_menu_preview_work_observations(
+        &self,
+    ) -> &std::collections::VecDeque<MainMenuPreviewWorkObservation> {
+        &self.main_menu_result_caches.preview_work_observations
+    }
+
+    pub(crate) fn file_search_preview_request(&self) -> Option<&FileSearchPreviewRequest> {
+        self.main_menu_result_caches
+            .file_search_preview_request
+            .as_ref()
+    }
+
+    pub(crate) fn set_file_search_preview_request(
+        &mut self,
+        request: Option<FileSearchPreviewRequest>,
+    ) {
+        self.main_menu_result_caches.file_search_preview_request = request;
+    }
+
+    fn push_main_menu_preview_work_observation(
+        &mut self,
+        observation: MainMenuPreviewWorkObservation,
+    ) {
+        const LIMIT: usize = 64;
+        let observations = &mut self.main_menu_result_caches.preview_work_observations;
+        if observations.len() == LIMIT {
+            observations.pop_front();
+        }
+        observations.push_back(observation);
+    }
+
+    pub(crate) fn main_menu_dispatch_observation(&self) -> Option<&MainMenuDispatchObservation> {
+        self.main_menu_result_caches.dispatch_observation.as_ref()
+    }
+
+    pub(crate) fn set_main_menu_dispatch_observation(
+        &mut self,
+        observation: Option<MainMenuDispatchObservation>,
+    ) {
+        self.main_menu_result_caches.dispatch_observation = observation;
+    }
+
+    pub(crate) fn main_menu_result_revision(&self) -> u64 {
+        self.main_menu_result_caches.result_revision
+    }
+
+    pub(crate) fn main_menu_selection_revision(&self) -> u64 {
+        self.main_menu_result_caches.selection_revision
+    }
+
+    pub(crate) fn main_menu_viewport_revision(&self) -> u64 {
+        self.main_menu_result_caches.viewport_revision
+    }
+
+    pub(crate) fn main_menu_pending_reveal(&self) -> Option<MainMenuRevealTicket> {
+        self.main_menu_result_caches.pending_reveal
+    }
+
+    pub(crate) fn main_menu_last_publication(&self) -> Option<&MainMenuPublicationStamp> {
+        self.main_menu_result_caches.last_publication.as_ref()
+    }
+    pub(crate) fn main_menu_last_publication_error(&self) -> Option<&str> {
+        self.main_menu_result_caches.publication_error.as_deref()
+    }
+
+    pub(crate) fn main_menu_viewport_intent(&self) -> MainMenuViewportIntent {
+        self.main_menu_result_caches.viewport_intent
+    }
+
+    pub(crate) fn reset_main_menu_viewport_intent(&mut self) {
+        self.main_menu_result_caches.viewport_intent = MainMenuViewportIntent::FollowSelection;
+        self.main_menu_result_caches.viewport_revision = self
+            .main_menu_viewport_revision()
+            .checked_add(1)
+            .expect("main menu viewport revision exhausted");
+        self.main_menu_result_caches.pending_reveal = None;
+    }
+
+    pub(crate) fn main_menu_selection_cause(&self) -> &'static str {
+        self.main_menu_result_caches.selection_cause
+    }
+
+    pub(crate) fn main_menu_selection_intent(&self) -> &MainMenuSelectionIntent {
+        &self.main_menu_result_caches.selection_intent
+    }
+
+    pub(crate) fn main_menu_selection_snapshot(&self) -> MainMenuSelectionSnapshot {
         MainMenuSelectionSnapshot {
             query: self.computed_filter_text.clone(),
-            selected_key,
+            query_stamp: self.main_menu_committed_query_stamp(),
+            intent: self.main_menu_selection_intent().clone(),
+            selected_key: self
+                .main_menu_committed_rows()
+                .iter()
+                .find(|row| row.grouped_index == self.selected_index && row.eligibility.selectable)
+                .filter(|_| !self.spine_empty_subsearch_selection_suppressed())
+                .map(|row| row.stable_key.clone()),
         }
+    }
+
+    pub(crate) fn select_main_menu_row(
+        &mut self,
+        grouped_index: usize,
+        origin: MainMenuSelectionOrigin,
+        _cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || self.main_menu_committed_query_stamp() != self.root_search.computed_query_stamp()
+        {
+            return false;
+        }
+        let Some(row) = self
+            .main_menu_committed_rows()
+            .iter()
+            .find(|row| row.grouped_index == grouped_index && row.eligibility.selectable)
+        else {
+            return false;
+        };
+        let deliberate = matches!(
+            origin,
+            MainMenuSelectionOrigin::Keyboard
+                | MainMenuSelectionOrigin::Pointer
+                | MainMenuSelectionOrigin::Agent
+        );
+        let intent = if deliberate || origin == MainMenuSelectionOrigin::Restoration {
+            MainMenuSelectionIntent::ExplicitAnchor {
+                stable_key: row.stable_key.clone(),
+            }
+        } else if origin == MainMenuSelectionOrigin::QueryReset {
+            MainMenuSelectionIntent::AutomaticAnchor {
+                stable_key: row.stable_key.clone(),
+            }
+        } else {
+            self.main_menu_selection_intent().clone()
+        };
+        let changed = self.selected_index != grouped_index
+            || self.main_menu_selection_intent() != &intent
+            || (deliberate && self.spine_empty_subsearch_selection_suppressed());
+        if deliberate {
+            self.arm_spine_empty_subsearch_selection();
+        }
+        self.main_menu_result_caches.selection_intent = intent;
+        self.selected_index = grouped_index;
+        if changed || deliberate {
+            self.main_menu_result_caches.selection_cause = match origin {
+                MainMenuSelectionOrigin::Keyboard => "keyboard",
+                MainMenuSelectionOrigin::Pointer => "pointer",
+                MainMenuSelectionOrigin::Agent => "agent",
+                MainMenuSelectionOrigin::QueryReset => "query_reset",
+                MainMenuSelectionOrigin::ProviderReconciliation => "provider_reconciliation",
+                MainMenuSelectionOrigin::Restoration => "restoration",
+            };
+            self.main_menu_result_caches.selection_revision = self
+                .main_menu_selection_revision()
+                .checked_add(1)
+                .expect("main menu selection revision exhausted");
+            self.hovered_index = None;
+            self.last_scrolled_index = None;
+            self.clear_menu_syntax_filter_accept_hint();
+            self.invalidate_preview_cache();
+            self.invalidate_main_window_preflight();
+            self.mark_main_data_changed();
+        }
+        true
+    }
+
+    pub(crate) fn reconcile_main_menu_selection_intent(&mut self) -> bool {
+        let previous = self.selected_index;
+        let cache = &mut self.main_menu_result_caches;
+        let (selected, anchor_removed) =
+            cache
+                .selection_intent
+                .reconcile(cache.committed_rows.iter().map(|row| {
+                    (
+                        row.grouped_index,
+                        row.stable_key.as_str(),
+                        row.eligibility.selectable,
+                    )
+                }));
+        cache.selection_cause = if anchor_removed {
+            "anchor_removed"
+        } else {
+            "provider_reconciliation"
+        };
+        self.selected_index = selected.unwrap_or(0);
+        let changed = previous != self.selected_index || anchor_removed;
+        cache.selection_revision = cache
+            .selection_revision
+            .checked_add(1)
+            .expect("main menu selection revision exhausted");
+        self.hovered_index = None;
+        self.last_scrolled_index = None;
+        changed
+    }
+
+    pub(crate) fn reset_main_menu_selection_intent(&mut self) {
+        self.main_menu_result_caches.selection_intent = MainMenuSelectionIntent::AutomaticTop;
+        self.main_menu_result_caches.selection_revision = self
+            .main_menu_selection_revision()
+            .checked_add(1)
+            .expect("main menu selection revision exhausted");
     }
 
     pub(crate) fn restore_main_menu_selection_from_snapshot(
@@ -762,29 +932,16 @@ impl ScriptListApp {
         if snapshot.query != self.computed_filter_text {
             return false;
         }
-        let Some(selected_key) = snapshot.selected_key else {
-            return false;
-        };
-
-        self.get_grouped_results_cached();
-        let Some(grouped_index) = self
-            .main_menu_result_caches
-            .grouped_index_for_stable_selection_key(&selected_key)
-        else {
-            return false;
-        };
-
-        if self.selected_index != grouped_index {
-            self.selected_index = grouped_index;
-            self.hovered_index = None;
-            self.last_scrolled_index = None;
-        }
-        true
+        self.main_menu_result_caches.selection_intent = snapshot.intent;
+        self.reconcile_main_menu_selection_intent();
+        self.main_menu_result_caches.has_selectable_grouped_item()
     }
 }
 
 #[cfg(test)]
-struct MainMenuSelectionTestHost;
+struct MainMenuSelectionTestHost {
+    _response_receiver: mpsc::Receiver<Message>,
+}
 
 #[cfg(test)]
 impl gpui::Render for MainMenuSelectionTestHost {
@@ -801,18 +958,9 @@ impl gpui::Render for MainMenuSelectionTestHost {
 fn main_menu_selection_test_app(cx: &mut gpui::TestAppContext) -> gpui::Entity<ScriptListApp> {
     use gpui::AppContext as _;
 
-    let flow_cwd = crate::flows::resolve_flow_cwd(
-        crate::config::load_user_preferences()
-            .ai
-            .cwd
-            .filter(|cwd| std::path::Path::new(cwd).is_dir()),
-    );
-    let catalog = crate::flows::catalog::flow_catalog();
-    catalog.set_notify_hook(|| {});
-    catalog.prime_ready_for_test(&flow_cwd);
-
     let app = std::sync::Arc::new(std::sync::Mutex::new(None));
     let app_for_window = app.clone();
+    let (response_sender, response_receiver) = mpsc::sync_channel(100);
     cx.update(|cx| {
         gpui_component::init(cx);
         cx.open_window(Default::default(), |window, cx| {
@@ -820,9 +968,27 @@ fn main_menu_selection_test_app(cx: &mut gpui::TestAppContext) -> gpui::Entity<S
             let mut built_ins = config.get_builtins();
             built_ins.app_launcher = false;
             config.built_ins = Some(built_ins);
-            let entity = cx.new(|cx| ScriptListApp::new(config, false, window, cx));
+            let data = MainInitialData::owned_fixture(
+                &config,
+                std::path::Path::new("/owned-main-test"),
+                Arc::new(theme::Theme::default()),
+                0,
+            );
+            let entity = cx.new(|cx| {
+                ScriptListApp::from_initial_data(
+                    config,
+                    false,
+                    data,
+                    MainServices::OwnedFixtures(Arc::new(OwnedMainSources::default())),
+                    response_sender,
+                    window,
+                    cx,
+                )
+            });
             *app_for_window.lock().expect("lock selection test app") = Some(entity);
-            cx.new(|_| MainMenuSelectionTestHost)
+            cx.new(|_| MainMenuSelectionTestHost {
+                _response_receiver: response_receiver,
+            })
         })
         .expect("open main-menu selection test window");
     });
@@ -832,6 +998,34 @@ fn main_menu_selection_test_app(cx: &mut gpui::TestAppContext) -> gpui::Entity<S
         .take()
         .expect("selection test app initialized");
     entity
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn owned_main_equal_length_input_edits_advance_data_not_inspection(cx: &mut gpui::TestAppContext) {
+    let app = main_menu_selection_test_app(cx);
+    cx.update(|cx| {
+        let handle = cx.windows().into_iter().next().expect("test main window");
+        handle
+            .update(cx, |_, window, cx| {
+                app.update(cx, |app, cx| {
+                    assert!(!app.main_services.is_production());
+                    app.gpui_input_state
+                        .update(cx, |input, cx| input.set_value("alpha", window, cx));
+                    app.note_main_input_changed(cx);
+                    let before = app.owned_revision_facts();
+                    app.gpui_input_state
+                        .update(cx, |input, cx| input.set_value("bravo", window, cx));
+                    app.note_main_input_changed(cx);
+                    let after = app.owned_revision_facts();
+                    assert!(after.data_generation > before.data_generation);
+                    app.note_main_input_changed(cx);
+                    assert_eq!(app.owned_revision_facts(), after);
+                    assert_eq!(app.gpui_input_state.read(cx).value().as_ref(), "bravo");
+                });
+            })
+            .expect("update owned input");
+    });
 }
 
 #[cfg(test)]
@@ -846,24 +1040,20 @@ fn main_menu_selection_test_script(name: &str) -> std::sync::Arc<crate::scripts:
 }
 
 #[cfg(test)]
-fn selected_main_menu_stable_key(app: &mut ScriptListApp) -> Option<String> {
-    app.get_grouped_results_cached();
-    app.main_menu_result_caches
-        .flat_result_index_for_coerced_grouped_selection(app.selected_index)
-        .and_then(|(_, result_index)| {
-            app.main_menu_result_caches
-                .search_result_for_flat_index(result_index)
+fn selected_main_menu_stable_key(app: &ScriptListApp) -> Option<String> {
+    app.resolved_main_menu_selected_subject()
+        .map(|subject| match subject {
+            ResolvedMainMenuSelection::SearchResult { row, .. }
+            | ResolvedMainMenuSelection::Calculator { row, .. } => row.stable_key.clone(),
         })
-        .and_then(crate::scripts::SearchResult::stable_selection_key)
 }
 
 #[cfg(test)]
-fn first_selectable_main_menu_stable_key(app: &mut ScriptListApp) -> Option<String> {
-    app.get_grouped_results_cached();
-    let first = app.main_menu_result_caches.first_selectable_index()?;
-    app.main_menu_result_caches
-        .search_result_for_grouped_item(first)
-        .and_then(crate::scripts::SearchResult::stable_selection_key)
+fn first_selectable_main_menu_stable_key(app: &ScriptListApp) -> Option<String> {
+    app.main_menu_committed_rows()
+        .iter()
+        .find(|row| row.eligibility.selectable)
+        .map(|row| row.stable_key.clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -880,7 +1070,184 @@ pub(crate) struct ReturnToScriptListKeyGuard {
     pub(crate) consumed_count: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainRevisionFacts {
+    pub surface_generation: u64,
+    pub data_generation: u64,
+    pub presentation_revision: u64,
+}
+
+impl Default for MainRevisionFacts {
+    fn default() -> Self {
+        Self {
+            surface_generation: 1,
+            data_generation: 1,
+            presentation_revision: 1,
+        }
+    }
+}
+
+/// The prompt shell allocation observed by production prepaint. This is shared
+/// by row sizing and layout receipts, never inferred from debug selectors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ArgPromptGeometry {
+    revision: MainRevisionFacts,
+    warning_visible: bool,
+    window_size: gpui::Size<gpui::Pixels>,
+    shell_bounds: gpui::Bounds<gpui::Pixels>,
+    inputs: crate::window_resize::arg_layout::ArgLayoutInputs,
+    resolved: crate::window_resize::arg_layout::ResolvedArgLayout,
+}
+
+impl ArgPromptGeometry {
+    fn is_current(
+        &self,
+        revision: MainRevisionFacts,
+        warning_visible: bool,
+        window_size: gpui::Size<gpui::Pixels>,
+        inputs: crate::window_resize::arg_layout::ArgLayoutInputs,
+    ) -> bool {
+        self.revision == revision
+            && self.warning_visible == warning_visible
+            && self.window_size == window_size
+            && self.inputs == inputs
+    }
+}
+
+#[cfg(test)]
+mod arg_prompt_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_geometry_rejects_changed_route_window_warning_and_theme_inputs() {
+        use crate::window_resize::arg_layout::{
+            arg_layout_inputs_from_rendered_content, current_arg_layout_inputs,
+            resolved_arg_layout, ArgPresentationMode,
+        };
+
+        let inputs = current_arg_layout_inputs(ArgPresentationMode::Mini, 6, 380.5);
+        let geometry = ArgPromptGeometry {
+            revision: MainRevisionFacts::default(),
+            warning_visible: true,
+            window_size: gpui::size(gpui::px(750.0), gpui::px(380.5)),
+            shell_bounds: gpui::Bounds::new(
+                gpui::point(gpui::px(1.0), gpui::px(61.5)),
+                gpui::size(gpui::px(748.0), gpui::px(278.0)),
+            ),
+            inputs,
+            resolved: resolved_arg_layout(arg_layout_inputs_from_rendered_content(
+                inputs, 278.0, true,
+            )),
+        };
+        assert!(geometry.is_current(geometry.revision, true, geometry.window_size, inputs,));
+        for revision in [
+            MainRevisionFacts {
+                surface_generation: 2,
+                ..geometry.revision
+            },
+            MainRevisionFacts {
+                data_generation: 2,
+                ..geometry.revision
+            },
+            MainRevisionFacts {
+                presentation_revision: 2,
+                ..geometry.revision
+            },
+        ] {
+            assert!(!geometry.is_current(revision, true, geometry.window_size, inputs));
+        }
+        assert!(!geometry.is_current(geometry.revision, false, geometry.window_size, inputs,));
+        for window_size in [
+            gpui::size(gpui::px(751.0), geometry.window_size.height),
+            gpui::size(geometry.window_size.width, gpui::px(381.0)),
+        ] {
+            assert!(!geometry.is_current(geometry.revision, true, window_size, inputs));
+        }
+        for changed_inputs in [
+            crate::window_resize::arg_layout::ArgLayoutInputs {
+                row_slot_height: inputs.row_slot_height + 1.0,
+                ..inputs
+            },
+            crate::window_resize::arg_layout::ArgLayoutInputs {
+                header_chrome_height: inputs.header_chrome_height + 1.0,
+                ..inputs
+            },
+            crate::window_resize::arg_layout::ArgLayoutInputs {
+                choice_count: 7,
+                ..inputs
+            },
+            crate::window_resize::arg_layout::ArgLayoutInputs {
+                mode: ArgPresentationMode::Full,
+                ..inputs
+            },
+        ] {
+            assert!(!geometry.is_current(
+                geometry.revision,
+                true,
+                geometry.window_size,
+                changed_inputs,
+            ));
+        }
+    }
+}
+
+impl ScriptListApp {
+    pub(crate) fn owned_revision_facts(&self) -> MainRevisionFacts {
+        MainRevisionFacts {
+            data_generation: self
+                .main_revisions
+                .data_generation
+                .saturating_add(self.root_search.root_brain_source_epoch())
+                .saturating_add(self.root_search.root_brain_inbox_epoch())
+                .saturating_add(self.root_search.root_windows_refresh_generation())
+                .strict_add(
+                    self.prompt_completion
+                        .as_ref()
+                        .map_or(0, |binding| binding.semantic_revision()),
+                ),
+            ..self.main_revisions
+        }
+    }
+    pub(crate) fn mark_main_data_changed(&mut self) {
+        self.main_revisions.data_generation = self.main_revisions.data_generation.strict_add(1);
+    }
+    pub(crate) fn mark_main_presentation_changed(&mut self) {
+        self.main_revisions.presentation_revision =
+            self.main_revisions.presentation_revision.saturating_add(1);
+    }
+    pub(crate) fn mark_main_surface_changed(&mut self) {
+        self.main_revisions.surface_generation =
+            self.main_revisions.surface_generation.saturating_add(1);
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
+    }
+    pub(crate) fn note_main_input_changed(&mut self, cx: &gpui::App) {
+        let input = self.gpui_input_state.read(cx);
+        let selection = input.selection();
+        if self.main_revision_input_text != input.value().as_ref()
+            || self.main_revision_input_selection != selection
+        {
+            self.main_revision_input_text = input.value().to_string();
+            self.main_revision_input_selection = selection;
+            self.mark_main_data_changed();
+        }
+    }
+}
+
 pub(crate) struct ScriptListApp {
+    pub(crate) main_services: MainServices,
+    pub(crate) main_preferences: config::ScriptKitUserPreferences,
+    pub(crate) prompt_completion: Option<crate::prompt_completion::PromptCompletionBinding>,
+    main_revisions: MainRevisionFacts,
+    main_revision_input_text: String,
+    main_revision_input_selection: std::ops::Range<usize>,
+    main_revision_route: (&'static str, String, Option<gpui::EntityId>, u64),
+    pub(crate) kit_store_browse_state: KitStoreBrowseState,
+    pub(crate) main_footer_action_task: Option<gpui::Task<()>>,
+    owned_surface_subscriptions: Vec<Subscription>,
+    owned_observed_surface_generation: Option<u64>,
+    owned_child_semantic_value: Option<(u64, u64, u64)>,
+    main_inline_semantic_token: Option<u64>,
     /// H1 Optimization: Arc-wrapped scripts for cheap cloning during filter operations
     scripts: Vec<std::sync::Arc<scripts::Script>>,
     /// H1 Optimization: Arc-wrapped scriptlets for cheap cloning during filter operations
@@ -944,10 +1311,8 @@ pub(crate) struct ScriptListApp {
     current_app_commands_session:
         Option<crate::menu_bar::current_app_commands::CurrentAppCommandsSession>,
     selected_index: usize,
-    /// True after the user deliberately moves the launcher selection for the
-    /// current filter. Retained as refresh diagnostics; same-query provider
-    /// updates preserve every painted row identity regardless of this flag.
-    main_menu_selection_user_moved: bool,
+    // Main-menu selection and viewport intent live with their committed row revisions.
+    pub(crate) main_menu_pointer_press: Option<MainMenuPointerPress>,
     /// Main menu filter text (mirrors gpui-component input state)
     filter_text: String,
     /// Inline calculator result derived from filter_text when expression is math-like
@@ -978,6 +1343,8 @@ pub(crate) struct ScriptListApp {
     /// Subscription for window appearance changes (light/dark mode)
     #[allow(dead_code)]
     appearance_subscription: Option<Subscription>,
+    /// Entity-owned task; cancellation drops its exact tracker registration.
+    frontmost_menu_subscription_task: Option<gpui::Task<()>>,
     /// Suppress handling of programmatic InputEvent::Change updates.
     suppress_filter_events: bool,
     /// Programmatic filter value whose delayed InputEvent::Change echo should be ignored.
@@ -1026,6 +1393,7 @@ pub(crate) struct ScriptListApp {
     // Uses TextInputState for selection and clipboard support
     arg_input: TextInputState,
     arg_selected_index: usize,
+    arg_selection_revision: u64,
     // Channel for receiving prompt messages from script thread (async_channel for event-driven)
     prompt_receiver: Option<async_channel::Receiver<PromptMessage>>,
     // Channel for sending responses back to script
@@ -1049,6 +1417,8 @@ pub(crate) struct ScriptListApp {
     list_scroll_handle: UniformListScrollHandle,
     // P0: Scroll handle for virtualized arg prompt choices
     arg_list_scroll_handle: UniformListScrollHandle,
+    /// Latest real Arg/Mini shell allocation, qualified by route and geometry inputs.
+    arg_prompt_geometry: std::rc::Rc<std::cell::Cell<Option<ArgPromptGeometry>>>,
     // Scroll handle for clipboard history list
     clipboard_list_scroll_handle: UniformListScrollHandle,
     // Scroll handle for emoji picker grid (uniform_list virtualized rows)
@@ -1142,6 +1512,9 @@ pub(crate) struct ScriptListApp {
     // Generation counter for ignoring stale search results
     // Incremented on each new search, results with old gen are discarded
     file_search_gen: u64,
+    #[cfg(any(test, feature = "owned-ui-evaluation"))]
+    file_search_stream_state:
+        Option<crate::design_evaluation::search_fixtures::FileSearchStreamState>,
     // Cancel token for in-flight search (set to true to stop mdfind)
     file_search_cancel: Option<file_search::CancelToken>,
     // Pre-computed display indices after Nucleo filtering/sorting
@@ -1324,6 +1697,7 @@ pub(crate) struct ScriptListApp {
     main_menu_fallback_state: MainMenuFallbackState,
     // Theme before chooser was opened (for cancel/restore)
     theme_before_chooser: Option<std::sync::Arc<theme::Theme>>,
+    pub(crate) theme_chooser_preview_revision: Option<u64>,
     /// Active procedural background effect, if any.
     pub(crate) background_effect: Option<crate::effects::BackgroundEffect>,
     /// Effect strength (0.0..=1.0), loaded from preferences.
@@ -1441,6 +1815,7 @@ pub(crate) struct ScriptListApp {
     alias_input_state: Option<AliasInputState>,
     /// The alias input entity (persisted to maintain focus)
     alias_input_entity: Option<Entity<crate::components::alias_input::AliasInput>>,
+    alias_input_subscription: Option<Subscription>,
     /// Most recent Tab AI execution waiting for success/failure accounting.
     pending_tab_ai_execution: Option<crate::ai::TabAiExecutionRecord>,
     /// Tab AI save-offer overlay state — when Some, prompts to persist the last successful ephemeral script.
@@ -1624,171 +1999,6 @@ pub(crate) const ROOT_LAUNCHER_PLACEHOLDER: &str =
     "Search • @ context • / commands • ; capture • : filters";
 
 #[cfg(test)]
-mod app_state_selection_tests {
-    use super::*;
-
-    fn install_async_refresh_script_fixture(
-        app: &mut ScriptListApp,
-        query: &str,
-        script_names: &[&str],
-    ) {
-        app.scripts = script_names
-            .iter()
-            .map(|name| main_menu_selection_test_script(name))
-            .collect();
-        app.scriptlets.clear();
-        app.skills.clear();
-        app.apps.clear();
-        app.computed_filter_text = query.to_string();
-        app.filter_text = query.to_string();
-        app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(query);
-        app.reset_main_menu_selection_user_moved();
-        app.invalidate_filter_cache();
-        app.invalidate_grouped_cache();
-        app.get_grouped_results_cached();
-        app.sync_list_state();
-    }
-
-    fn script_selection(app: &mut ScriptListApp, script_name: &str) -> Option<(usize, String)> {
-        let (grouped_items, flat_results) = app.get_grouped_results_cached();
-        grouped_items
-            .iter()
-            .enumerate()
-            .find_map(|(grouped_index, item)| {
-                let GroupedListItem::Item(result_index) = item else {
-                    return None;
-                };
-                let Some(crate::scripts::SearchResult::Script(script_match)) =
-                    flat_results.get(*result_index)
-                else {
-                    return None;
-                };
-                if script_match.script.name != script_name {
-                    return None;
-                }
-                flat_results
-                    .get(*result_index)
-                    .and_then(crate::scripts::SearchResult::stable_selection_key)
-                    .map(|stable_key| (grouped_index, stable_key))
-            })
-    }
-
-    #[gpui::test]
-    fn async_refresh_preserves_untouched_non_first_identity_when_rows_insert_above(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let app = main_menu_selection_test_app(cx);
-        app.update(cx, |app, cx| {
-            let query = "zzlauncheridentityrefresh";
-            let target_name = "zzlauncheridentityrefresh target trailing";
-            install_async_refresh_script_fixture(
-                app,
-                query,
-                &["zzlauncheridentityrefresh first", target_name],
-            );
-
-            let first_index_before = app
-                .main_menu_result_caches
-                .first_selectable_index()
-                .expect("fixture must expose a first selectable row");
-            let (target_index_before, target_key_before) = script_selection(app, target_name)
-                .expect("fixture must expose the target script row");
-            assert!(
-                target_index_before > first_index_before,
-                "the retained identity must start as a non-first row"
-            );
-            app.selected_index = target_index_before;
-            assert!(!app.main_menu_selection_user_moved);
-            assert_eq!(
-                selected_main_menu_stable_key(app).as_deref(),
-                Some(target_key_before.as_str())
-            );
-
-            let interaction_before = app.main_menu_interaction_snapshot();
-            app.scripts
-                .insert(0, main_menu_selection_test_script(query));
-            app.invalidate_filter_cache();
-            app.invalidate_grouped_cache();
-            app.reconcile_script_list_after_results_refresh(
-                "test_async_identity_retained_with_inserted_row",
-                interaction_before,
-                cx,
-            );
-
-            let (inserted_index, _) =
-                script_selection(app, query).expect("refresh must add the exact-match row");
-            let (target_index_after, target_key_after) = script_selection(app, target_name)
-                .expect("refresh must retain the selected target row");
-            assert!(inserted_index < target_index_after);
-            assert!(target_index_after > target_index_before);
-            assert_eq!(app.selected_index, target_index_after);
-            assert_eq!(target_key_after, target_key_before);
-            assert_eq!(
-                selected_main_menu_stable_key(app).as_deref(),
-                Some(target_key_before.as_str())
-            );
-            assert!(!app.main_menu_selection_user_moved);
-        });
-    }
-
-    #[gpui::test]
-    fn async_refresh_falls_back_to_first_when_untouched_identity_disappears(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let app = main_menu_selection_test_app(cx);
-        app.update(cx, |app, cx| {
-            let query = "zzlaunchermissingidentity";
-            let target_name = "zzlaunchermissingidentity target trailing";
-            install_async_refresh_script_fixture(
-                app,
-                query,
-                &["zzlaunchermissingidentity first", target_name],
-            );
-
-            let first_index_before = app
-                .main_menu_result_caches
-                .first_selectable_index()
-                .expect("fixture must expose a first selectable row");
-            let (target_index_before, target_key_before) = script_selection(app, target_name)
-                .expect("fixture must expose the target script row");
-            assert!(target_index_before > first_index_before);
-            app.selected_index = target_index_before;
-            assert!(!app.main_menu_selection_user_moved);
-            assert_eq!(
-                selected_main_menu_stable_key(app).as_deref(),
-                Some(target_key_before.as_str())
-            );
-
-            let interaction_before = app.main_menu_interaction_snapshot();
-            app.scripts
-                .retain(|script| script.name.as_str() != target_name);
-            app.invalidate_filter_cache();
-            app.invalidate_grouped_cache();
-            app.reconcile_script_list_after_results_refresh(
-                "test_async_identity_missing_falls_back",
-                interaction_before,
-                cx,
-            );
-
-            assert!(script_selection(app, target_name).is_none());
-            let first_index_after = app
-                .main_menu_result_caches
-                .first_selectable_index()
-                .expect("remaining fixture must expose a first selectable row");
-            let first_key_after = first_selectable_main_menu_stable_key(app)
-                .expect("remaining first row must have a stable key");
-            assert_eq!(app.selected_index, first_index_after);
-            assert_eq!(
-                selected_main_menu_stable_key(app).as_deref(),
-                Some(first_key_after.as_str())
-            );
-            assert_ne!(first_key_after, target_key_before);
-            assert!(!app.main_menu_selection_user_moved);
-        });
-    }
-}
-
-#[cfg(test)]
 mod backgrounded_session_store_tests {
     use super::*;
 
@@ -1846,7 +2056,7 @@ mod backgrounded_session_store_tests {
                 None,
                 None,
                 focus_handle,
-                Some(std::sync::Arc::new(|_| {}) as crate::prompts::ChatSubmitCallback),
+                Some(std::sync::Arc::new(|_| Ok(())) as crate::prompts::ChatSubmitCallback),
                 std::sync::Arc::new(crate::theme::Theme::default()),
             )
         })

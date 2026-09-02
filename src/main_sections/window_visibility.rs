@@ -23,6 +23,59 @@ fn automation_window_bounds_from_gpui(
     }
 }
 
+fn main_window_options(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    window_background: WindowBackgroundAppearance,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+) -> anyhow::Result<WindowOptions> {
+    host_policy.validate()?;
+    Ok(WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: None,
+        is_movable: !host_policy.is_hidden(),
+        is_resizable: !host_policy.is_hidden(),
+        is_minimizable: !host_policy.is_hidden(),
+        window_min_size: Some(size(px(crate::window_resize::MAIN_WINDOW_MIN_WIDTH), px(crate::window_resize::MAIN_WINDOW_MIN_HEIGHT))),
+        window_background,
+        show: false,
+        focus: false,
+        kind: WindowKind::PopUp,
+        ..Default::default()
+    })
+}
+
+struct MainWindowCloseObserver {
+    _subscription: gpui::Subscription,
+}
+
+impl gpui::Global for MainWindowCloseObserver {}
+
+fn register_main_runtime_window(
+    handle: gpui::AnyWindowHandle,
+    bounds: gpui::Bounds<gpui::Pixels>,
+    cx: &mut gpui::App,
+) -> anyhow::Result<crate::protocol::AutomationWindowInfo> {
+    let info = crate::protocol::AutomationWindowInfo {
+        id: "main".into(), kind: crate::protocol::AutomationWindowKind::Main,
+        title: Some("Script Kit".into()), focused: false, visible: false,
+        semantic_surface: Some("scriptList".into()), bounds: Some(automation_window_bounds_from_gpui(bounds)),
+        parent_window_id: None, parent_window_generation: None, parent_kind: None,
+        generation: None, pid: Some(std::process::id()),
+    };
+    let info = crate::windows::register_runtime_window_instance(info, handle, cx)?;
+    crate::set_main_window_handle(handle);
+    if !cx.has_global::<MainWindowCloseObserver>() {
+        let subscription = cx.on_window_closed(|cx, closed| {
+            crate::footer_popup::retire_closed_footer_owner(closed, cx);
+            if let Some(handle) = crate::get_main_window_handle().filter(|handle| handle.window_id() == closed) {
+                crate::clear_main_window_handle_if_matches(handle);
+            }
+        });
+        cx.set_global(MainWindowCloseObserver { _subscription: subscription });
+    }
+    Ok(info)
+}
+
 fn current_main_automation_bounds() -> Option<crate::protocol::AutomationWindowBounds> {
     crate::platform::get_main_window_bounds().map(|(x, y, width, height)| {
         crate::protocol::AutomationWindowBounds {
@@ -39,55 +92,21 @@ fn sync_main_automation_window(
     visible: bool,
     focused: bool,
 ) {
-    let Some(handle) = crate::get_main_window_handle() else {
-        tracing::debug!(
-            target: "script_kit::automation",
-            visible,
-            focused,
-            "automation.main_window_sync_skipped_missing_handle"
-        );
+    let Some(handle) = crate::get_main_window_handle() else { return; };
+    let Some(mut info) = crate::windows::automation_window_by_id("main") else { return; };
+    let Some(generation) = info.generation else { return; };
+    if crate::windows::get_runtime_window_handle_for_generation("main", generation) != Some(handle) { return; }
+    if crate::runtime_policy::is_owned_evaluation() && (visible || focused) {
+        let _ = crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility);
         return;
-    };
-
-    // Preserve whatever `semantic_surface` the subview-routing path already
-    // stamped onto the `main` registry entry (via
-    // `update_automation_semantic_surface` after a `triggerBuiltin` arm).
-    // If this upsert silently hardcoded `"scriptList"`, any window-resize /
-    // focus-change that follows a subview transition would clobber the
-    // re-key — the subview would appear on screen yet the automation
-    // surface would report `scriptList` the next time
-    // `listAutomationWindows` ran. Falling back to `"scriptList"` on fresh
-    // entries keeps the default for the initial open path.
-    let preserved_surface = crate::windows::resolve_automation_window(Some(
-        &crate::protocol::AutomationWindowTarget::Id {
-            id: "main".to_string(),
-        },
-    ))
-    .ok()
-    .and_then(|info| info.semantic_surface)
-    .or_else(|| Some("scriptList".to_string()));
-
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: "main".to_string(),
-        kind: crate::protocol::AutomationWindowKind::Main,
-        title: Some("Script Kit".to_string()),
-        focused,
-        visible,
-        semantic_surface: preserved_surface,
-        bounds: bounds.or_else(current_main_automation_bounds),
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
+    }
+    info.visible = visible;
+    info.focused = focused;
+    info.bounds = bounds.or_else(|| {
+        if crate::runtime_policy::is_owned_evaluation() { info.bounds.clone() }
+        else { current_main_automation_bounds() }
     });
-    let generation = crate::windows::resolve_automation_window(Some(
-        &crate::protocol::AutomationWindowTarget::Id {
-            id: "main".to_string(),
-        },
-    ))
-    .ok()
-    .and_then(|info| info.generation);
-    crate::windows::upsert_runtime_window_handle_instance("main", handle, generation);
+    crate::windows::upsert_automation_window(info);
 }
 
 fn clamp_restored_main_window_bounds_to_visible_area(

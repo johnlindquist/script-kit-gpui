@@ -546,6 +546,7 @@ pub struct CommandBar {
     is_open: bool,
     /// Callback when an action is selected
     on_action: Option<CommandBarActionCallback>,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
 }
 
 #[cfg(test)]
@@ -741,7 +742,13 @@ impl CommandBar {
             theme,
             is_open: false,
             on_action: None,
+            host_policy: crate::runtime_policy::WindowHostPolicy::Interactive,
         }
+    }
+
+    /// Select the actual host explicitly before opening; the factory validates process policy.
+    pub fn set_host_policy(&mut self, policy: crate::runtime_policy::WindowHostPolicy) {
+        self.host_policy = policy;
     }
 
     /// Set the action callback
@@ -828,6 +835,10 @@ impl CommandBar {
         cx: &mut Context<V>,
         position: super::window::WindowPosition,
     ) {
+        if let Err(error) = self.host_policy.validate() {
+            tracing::warn!(%error, "CommandBar host policy refused");
+            return;
+        }
         self.reset_open_state_if_window_gone();
         if self.is_open {
             return;
@@ -871,20 +882,27 @@ impl CommandBar {
         self.is_open = true;
 
         // Open the vibrancy window at the specified position
-        let parent_automation_id = if crate::notes::is_notes_window(window) {
-            Some("notes".to_string())
-        } else {
-            crate::windows::focused_automation_window_id()
-        };
+        let parent_automation_id = crate::windows::list_automation_windows()
+            .into_iter()
+            .find(|info| {
+                info.generation.is_some_and(|generation| {
+                    crate::windows::get_runtime_window_handle_for_generation(&info.id, generation)
+                        == Some(window.window_handle())
+                })
+            })
+            .map(|info| info.id);
         let open_feedback = CommandBarOpenFeedbackAction::OpenWindow;
         match open_actions_window(
             cx,
-            window.window_handle(),
-            bounds,
-            display_id,
+            super::ActionsWindowPlacement {
+                parent_window_handle: window.window_handle(),
+                main_bounds: bounds,
+                display_id,
+            },
             dialog,
             position,
             parent_automation_id.as_deref(),
+            self.host_policy,
         ) {
             Ok(_) => {
                 logging::log("COMMAND_BAR", &open_feedback.success_log(position));

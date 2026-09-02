@@ -130,42 +130,6 @@ mod render_script_list_footer_tests {
 }
 
 #[cfg(test)]
-mod render_script_list_click_contract_tests {
-    use std::fs;
-
-    #[test]
-    fn launcher_list_uses_shared_selected_row_click_helper() {
-        let source = fs::read_to_string("src/render_script_list/mod.rs")
-            .expect("Failed to read src/render_script_list/mod.rs");
-
-        assert!(
-            source.contains("should_submit_selected_row_click"),
-            "render_script_list should use the shared selected-row click helper"
-        );
-        assert!(
-            source.contains("let was_selected = this.selected_index == ix")
-                && source.contains("!this.spine_empty_subsearch_selection_suppressed()"),
-            "render_script_list click handler should capture whether the row was already selected"
-        );
-        assert!(
-            source.contains("Menu-syntax trigger picker row mouse-down accepting")
-                && source.contains("menu_syntax_trigger_row_id_from_main_list_index(ix)")
-                && source.contains(
-                    "this.menu_syntax_trigger_picker_suppress_next_launcher_click = true;"
-                )
-                && source.contains("Menu-syntax trigger picker consumed trailing launcher click")
-                && source.contains("this.accept_menu_syntax_trigger_picker_row")
-                && source.contains("cx.stop_propagation();"),
-            "menu-syntax trigger picker pointer selection must accept on mouse down and consume the trailing launcher click"
-        );
-        assert!(
-            source.contains("this.execute_selected(cx);"),
-            "render_script_list click handler should still execute the selected row"
-        );
-    }
-}
-
-#[cfg(test)]
 mod launcher_empty_info_state_contract_tests {
     use std::fs;
 

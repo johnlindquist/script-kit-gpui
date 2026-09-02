@@ -42,9 +42,9 @@ mod registry;
 mod snap;
 mod snap_mode;
 mod snap_monitor;
-mod snap_overlay;
+pub(crate) mod snap_overlay;
 mod snap_runtime;
-mod snap_session;
+pub(crate) mod snap_session;
 mod test_support;
 mod tiling;
 mod transaction;
@@ -76,6 +76,7 @@ pub use snap_mode::{
     current_snap_mode, load_snap_mode_from_preferences, persist_snap_mode, set_snap_mode, SnapMode,
 };
 pub use snap_monitor::install_snap_drag_monitor;
+pub(crate) use snap_overlay::SnapOverlayView;
 #[allow(unused_imports)]
 pub use snap_runtime::{
     cancel_snap_runtime, finish_snap_runtime, is_snap_runtime_active,

@@ -85,21 +85,20 @@ impl Render for ShortcutRecorder {
             .unwrap_or("Shortcut")
             .to_string();
         let header =
-            confirm_modal_header(title, rgb(chrome.accent_hex), rgb(chrome.text_primary_hex));
+            confirm_modal_header(title, rgb(chrome.accent_hex), rgb(chrome.text_primary_hex))
+                .debug_selector(|| "shortcut-recorder-header".into());
 
         // Build button row
         let clear_handler = cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-            this.clear(cx);
+            this.activate_action(ShortcutRecorderFocusedAction::Clear, cx);
         });
 
         let cancel_handler = cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-            this.cancel();
-            cx.notify();
+            this.activate_action(ShortcutRecorderFocusedAction::Cancel, cx);
         });
 
         let save_handler = cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-            this.save();
-            cx.notify();
+            this.activate_action(ShortcutRecorderFocusedAction::Save, cx);
         });
 
         let action_button_height = recorder_action_button_height();
@@ -112,8 +111,8 @@ impl Render for ShortcutRecorder {
         let mut button_specs = Vec::new();
 
         button_specs.push(ModalActionRowButton {
-            id: "shortcut-save-button",
-            label: "Save".into(),
+            id: ShortcutRecorderFocusedAction::Save.semantic_id(),
+            label: ShortcutRecorderFocusedAction::Save.label().into(),
             key: "↵".into(),
             slot_width_px: run_slot_width,
             height_px: action_button_height,
@@ -128,8 +127,8 @@ impl Render for ShortcutRecorder {
         });
 
         button_specs.push(ModalActionRowButton {
-            id: "shortcut-clear-button",
-            label: "Clear".into(),
+            id: ShortcutRecorderFocusedAction::Clear.semantic_id(),
+            label: ShortcutRecorderFocusedAction::Clear.label().into(),
             key: "".into(),
             slot_width_px: close_slot_width,
             height_px: action_button_height,
@@ -144,8 +143,8 @@ impl Render for ShortcutRecorder {
         });
 
         button_specs.push(ModalActionRowButton {
-            id: "shortcut-cancel-button",
-            label: "Cancel".into(),
+            id: ShortcutRecorderFocusedAction::Cancel.semantic_id(),
+            label: ShortcutRecorderFocusedAction::Cancel.label().into(),
             key: "Esc".into(),
             slot_width_px: close_slot_width,
             height_px: action_button_height,
@@ -157,14 +156,15 @@ impl Render for ShortcutRecorder {
             }),
         });
 
-        let buttons = div()
-            .mt(px(MODAL_ACTION_ROW_TOP_MARGIN_PX))
-            .child(modal_action_row(
+        let buttons = div().mt(px(MODAL_ACTION_ROW_TOP_MARGIN_PX)).child(
+            modal_action_row(
                 "shortcut-modal-action-row",
                 recorder_action_button_gap(),
                 button_specs,
                 &self.theme,
-            ));
+            )
+            .debug_selector(|| "shortcut-modal-action-row".into()),
+        );
 
         // Key down event handler - captures modifiers and keys
         let handle_key_down = cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
@@ -259,6 +259,7 @@ impl Render for ShortcutRecorder {
             },
             modal_children,
         )
+        .debug_selector(|| "shortcut-modal-content".into())
         // Stop propagation - clicks inside modal shouldn't dismiss it
         .on_mouse_down(gpui::MouseButton::Left, |_, _, _| {
             // Empty handler stops propagation to backdrop

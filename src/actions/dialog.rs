@@ -892,6 +892,10 @@ pub struct ActionsDialog {
     /// True only after explicit keyboard, pointer, or scroll navigation.
     /// Automatic/default selection must not gain identity across refreshes.
     actions_selection_user_moved: bool,
+    semantic_revision: u64,
+    data_generation: u64,
+    presentation_revision: u64,
+    applied_theme_revision: u64,
 }
 
 #[inline]
@@ -931,6 +935,24 @@ pub(super) fn append_disabled_action_test_fixture(actions: &mut Vec<Action>) {
 // --- merged from part_02.rs ---
 // --- merged from part_01.rs ---
 impl ActionsDialog {
+    pub(crate) fn revision_facts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.semantic_revision,
+            self.data_generation,
+            self.presentation_revision,
+            self.applied_theme_revision,
+        )
+    }
+
+    fn semantic_changed(&mut self) {
+        self.semantic_revision = self.semantic_revision.saturating_add(1);
+    }
+
+    fn data_changed(&mut self) {
+        self.data_generation = self.data_generation.saturating_add(1);
+        self.semantic_changed();
+    }
+
     fn shows_context_header(&self) -> bool {
         self.config.show_context_header && self.context_title.is_some()
     }
@@ -1316,6 +1338,10 @@ impl ActionsDialog {
             last_scroll_time: None,
             pending_scrollbar_scroll_top_y: None,
             actions_selection_user_moved: false,
+            semantic_revision: 1,
+            data_generation: 1,
+            presentation_revision: 1,
+            applied_theme_revision: 0,
         }
     }
 
@@ -1654,11 +1680,17 @@ impl ActionsDialog {
 
     /// Hide the search input (for inline mode where header has search)
     pub fn set_hide_search(&mut self, hide: bool) {
+        if self.hide_search != hide {
+            self.semantic_changed();
+        }
         self.hide_search = hide;
     }
 
     /// Set the context title shown in the header
     pub fn set_context_title(&mut self, title: Option<String>) {
+        if self.context_title != title {
+            self.data_changed();
+        }
         self.context_title = title;
     }
 
@@ -1695,6 +1727,7 @@ impl ActionsDialog {
                 self.scroll_to_selected();
             }
         }
+        self.semantic_changed();
 
         tracing::info!(
             target: "script_kit::actions",
@@ -1978,6 +2011,7 @@ impl ActionsDialog {
             return false;
         };
         self.selected_index = Some(grouped_index);
+        self.semantic_changed();
         self.clear_mouse_submit_arm();
         true
     }
@@ -2681,6 +2715,7 @@ impl ActionsDialog {
         let mut content_y = popup_y - list_top;
         if content_y < 0.0 {
             if self.hovered_row.take().is_some() {
+                self.semantic_changed();
                 cx.notify();
             }
             return;
@@ -2707,6 +2742,7 @@ impl ActionsDialog {
 
         if self.hovered_row != next_hovered_row {
             self.hovered_row = next_hovered_row;
+            self.semantic_changed();
             cx.notify();
         }
     }
@@ -3444,6 +3480,9 @@ impl ActionsDialog {
     /// Update the theme when hot-reloading
     /// Call this from the parent when theme changes to ensure dialog reflects new colors
     pub fn update_theme(&mut self, theme: Arc<theme::Theme>) {
+        if Arc::ptr_eq(&self.theme, &theme) {
+            return;
+        }
         let is_dark = theme.should_use_dark_vibrancy();
         logging::log(
             "ACTIONS_THEME",
@@ -3458,6 +3497,7 @@ impl ActionsDialog {
             ),
         );
         self.theme = theme;
+        self.presentation_revision = self.presentation_revision.saturating_add(1);
     }
 
     /// Install the entity-backed Actions search input once a host window exists.
@@ -3725,7 +3765,7 @@ impl ActionsDialog {
                 .collect();
 
             // Sort by score descending (stable: ties keep action order)
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            scored.sort_by_key(|a| std::cmp::Reverse(a.1));
 
             self.filtered_actions = Vec::with_capacity(scored.len());
             self.filtered_title_match_indices = Vec::with_capacity(scored.len());
@@ -3761,6 +3801,7 @@ impl ActionsDialog {
 
     /// Rebuild grouped_items from current filtered_actions
     fn rebuild_grouped_items(&mut self) {
+        self.data_changed();
         self.grouped_items = build_grouped_items_static(
             &self.actions,
             &self.filtered_actions,
@@ -3957,6 +3998,9 @@ impl ActionsDialog {
             .iter()
             .position(|item| matches!(item, GroupedActionItem::Item(fi) if *fi == filter_pos))?;
 
+        if self.selected_index != Some(grouped_idx) {
+            self.semantic_changed();
+        }
         self.selected_index = Some(grouped_idx);
         self.actions_selection_user_moved = true;
         self.clear_mouse_submit_arm();
@@ -3966,7 +4010,7 @@ impl ActionsDialog {
         Some(action_id.to_string())
     }
 
-    /// Select an action by its semantic ID (`choice:<filter_pos>:<action_id>`).
+    /// Select an exact action row by semantic ID (`choice:<visual_index>:<action_id>`).
     ///
     /// Returns `Some(semantic_id)` if found, `None` otherwise.
     pub fn select_action_by_semantic_id(
@@ -3974,95 +4018,32 @@ impl ActionsDialog {
         semantic_id: &str,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        // Parse "choice:<pos>:<id>"
-        let parts: Vec<&str> = semantic_id.splitn(3, ':').collect();
-        if parts.len() < 3 || parts[0] != "choice" {
+        let mut parts = semantic_id.splitn(3, ':');
+        if parts.next()? != "choice" {
             return None;
         }
-        let action_id = parts[2];
+        let visual_index = parts.next()?.parse::<usize>().ok()?;
+        let action_id = parts.next()?;
+        let GroupedActionItem::Item(filter_position) = self.grouped_items.get(visual_index)? else {
+            return None;
+        };
+        let action = self
+            .actions
+            .get(*self.filtered_actions.get(*filter_position)?)?;
+        if action.id != action_id {
+            return None;
+        }
         self.select_action_by_id(action_id, cx)
             .map(|_| semantic_id.to_string())
     }
 }
 
 // --- merged from part_03.rs ---
-const ACTIONS_DIALOG_COLOR_ALPHA_MAX: f32 = 255.0;
-const ACTIONS_DIALOG_SEARCH_BORDER_ALPHA_SCALE: f32 = 2.0;
-const ACTIONS_DIALOG_CONTAINER_BORDER_MIN_ALPHA: u8 = 0x80;
-const ACTIONS_DIALOG_OPAQUE_DIALOG_MIN_OPACITY: f32 = 0.95;
-// The actions dialog renders in its own native NSPanel with a real
-// NSVisualEffectView blur layer.  A low opacity floor lets the system
-// blur show through prominently while still tinting the background
-// enough for text contrast.
-const ACTIONS_DIALOG_VIBRANT_INLINE_MIN_OPACITY: f32 = 0.25;
-
-fn actions_dialog_alpha_u8(opacity: f32) -> u8 {
-    (opacity.clamp(0.0, 1.0) * ACTIONS_DIALOG_COLOR_ALPHA_MAX) as u8
-}
+include!("dialog_opacity.rs");
 
 #[inline]
 fn should_submit_actions_dialog_row_click(was_mouse_armed: bool, click_count: usize) -> bool {
     was_mouse_armed || click_count >= 2
-}
-
-fn actions_dialog_search_border_alpha(border_inactive_opacity: f32) -> u8 {
-    let scaled_border_opacity =
-        (border_inactive_opacity * ACTIONS_DIALOG_SEARCH_BORDER_ALPHA_SCALE).min(1.0);
-    actions_dialog_alpha_u8(scaled_border_opacity)
-}
-
-fn actions_dialog_container_border_alpha(border_inactive_opacity: f32) -> u8 {
-    actions_dialog_search_border_alpha(border_inactive_opacity)
-        .max(ACTIONS_DIALOG_CONTAINER_BORDER_MIN_ALPHA)
-}
-
-fn actions_dialog_container_background_alpha(dialog_opacity: f32, use_vibrancy: bool) -> u8 {
-    // The actions dialog has its own native NSPanel with NSVisualEffectView,
-    // so a low opacity floor lets the system blur show through prominently.
-    // Opaque (non-vibrancy) mode keeps a near-full readability floor.
-    let resolved_opacity = if use_vibrancy {
-        dialog_opacity.max(ACTIONS_DIALOG_VIBRANT_INLINE_MIN_OPACITY)
-    } else {
-        dialog_opacity.max(ACTIONS_DIALOG_OPAQUE_DIALOG_MIN_OPACITY)
-    };
-    actions_dialog_alpha_u8(resolved_opacity)
-}
-
-fn actions_dialog_rgba_with_alpha(hex: u32, alpha: u8) -> gpui::Rgba {
-    rgba(hex_with_alpha(hex, alpha))
-}
-
-#[inline]
-fn semantic_text_rgba(text_primary: u32, opacity: f32) -> gpui::Rgba {
-    rgba(hex_with_alpha(
-        text_primary,
-        actions_dialog_alpha_u8(opacity.clamp(0.0, 1.0)),
-    ))
-}
-
-#[inline]
-fn actions_dialog_search_text_colors(
-    text_primary: u32,
-    opacity: &BackgroundOpacity,
-) -> (gpui::Rgba, gpui::Rgba, gpui::Rgba) {
-    (
-        semantic_text_rgba(text_primary, opacity.text_muted_alpha),
-        semantic_text_rgba(text_primary, opacity.text_placeholder),
-        semantic_text_rgba(text_primary, opacity.text_strong),
-    )
-}
-
-#[inline]
-fn actions_dialog_container_text_color(
-    text_primary: u32,
-    opacity: &BackgroundOpacity,
-) -> gpui::Rgba {
-    semantic_text_rgba(text_primary, opacity.text_muted_alpha)
-}
-
-fn actions_dialog_main_window_background_alpha(theme: &theme::Theme) -> u8 {
-    let popup_surface = AppChromeColors::from_theme(theme).popup_surface_rgba;
-    (popup_surface & 0xff) as u8
 }
 
 // ── Design-contract resolvers ───────────────────────────────────────────────
@@ -4199,7 +4180,7 @@ impl ActionsDialog {
     }
 
     fn trigger_scrollbar_activity(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         self.last_scroll_time = Some(now);
         self.scrollbar_visibility = crate::transitions::Opacity::VISIBLE;
         self.scrollbar_fade_gen = self.scrollbar_fade_gen.wrapping_add(1);
@@ -4212,7 +4193,7 @@ impl ActionsDialog {
 
             let should_start_fade = cx
                 .update(|cx| {
-                    this.update(cx, |dialog, _cx| {
+                    this.update(cx, |dialog, cx| {
                         if dialog.scrollbar_fade_gen != fade_gen {
                             return false;
                         }
@@ -4220,7 +4201,10 @@ impl ActionsDialog {
                         dialog
                             .last_scroll_time
                             .map(|last_time| {
-                                last_time.elapsed() >= ACTIONS_DIALOG_SCROLLBAR_IDLE_DELAY
+                                cx.background_executor()
+                                    .now()
+                                    .saturating_duration_since(last_time)
+                                    >= ACTIONS_DIALOG_SCROLLBAR_IDLE_DELAY
                             })
                             .unwrap_or(false)
                     })
@@ -4232,10 +4216,13 @@ impl ActionsDialog {
             }
 
             let fade_duration = actions_dialog_scrollbar_fade_duration();
-            let fade_start = Instant::now();
+            let fade_start = cx.background_executor().now();
 
             loop {
-                let elapsed = fade_start.elapsed();
+                let elapsed = cx
+                    .background_executor()
+                    .now()
+                    .saturating_duration_since(fade_start);
                 let progress =
                     (elapsed.as_secs_f32() / fade_duration.as_secs_f32()).clamp(0.0, 1.0);
                 let opacity = actions_dialog_scrollbar_fade_opacity(progress);
@@ -4269,6 +4256,7 @@ impl ActionsDialog {
     }
 
     pub(crate) fn reveal_selection_after_navigation(&mut self, cx: &mut Context<Self>) {
+        self.semantic_changed();
         self.actions_selection_user_moved = true;
         self.clear_mouse_submit_arm();
         self.update_pending_scrollbar_reveal_offset(self.effective_row_height());
@@ -4401,6 +4389,7 @@ impl ActionsDialog {
             return;
         }
         self.selected_index = Some(ix);
+        self.semantic_changed();
         self.actions_selection_user_moved = true;
         self.clear_mouse_submit_arm();
         self.update_pending_scrollbar_reveal_offset(self.effective_row_height());
@@ -4553,120 +4542,6 @@ impl ActionsDialog {
     }
 }
 
-#[cfg(test)]
-mod actions_dialog_opacity_consistency_tests {
-    use super::{
-        actions_dialog_container_background_alpha, actions_dialog_container_border_alpha,
-        actions_dialog_container_text_color, actions_dialog_main_window_background_alpha,
-        actions_dialog_rgba_with_alpha, actions_dialog_search_border_alpha,
-        actions_dialog_search_text_colors, semantic_text_rgba,
-        ACTIONS_DIALOG_CONTAINER_BORDER_MIN_ALPHA,
-    };
-    use crate::theme::{AppChromeColors, Theme};
-    use gpui::rgba;
-
-    #[test]
-    fn test_actions_dialog_search_border_alpha_scales_border_inactive_opacity() {
-        assert_eq!(actions_dialog_search_border_alpha(0.20), 102);
-    }
-
-    #[test]
-    fn test_actions_dialog_container_border_alpha_enforces_minimum_contrast() {
-        assert_eq!(
-            actions_dialog_container_border_alpha(0.10),
-            ACTIONS_DIALOG_CONTAINER_BORDER_MIN_ALPHA
-        );
-    }
-
-    #[test]
-    fn test_actions_dialog_container_background_alpha_uses_vibrant_floor() {
-        // 0.15 dialog opacity is clamped up to 0.25 vibrant floor → 63
-        assert_eq!(actions_dialog_container_background_alpha(0.15, true), 63);
-    }
-
-    #[test]
-    fn test_actions_dialog_container_background_alpha_keeps_non_vibrancy_floor() {
-        assert_eq!(actions_dialog_container_background_alpha(0.15, false), 242);
-    }
-
-    #[test]
-    fn test_actions_dialog_container_background_alpha_passes_through_above_floor() {
-        // 0.80 is above the 0.25 vibrant floor → passes through → 204
-        assert_eq!(actions_dialog_container_background_alpha(0.80, true), 204);
-    }
-
-    #[test]
-    fn test_actions_dialog_container_background_alpha_uses_higher_theme_value_above_floor() {
-        // 0.90 is above the 0.25 floor → passes through → 229
-        assert_eq!(actions_dialog_container_background_alpha(0.90, true), 229);
-    }
-
-    #[test]
-    fn test_actions_dialog_main_window_background_alpha_matches_dark_window_default() {
-        let theme = Theme::dark_default();
-        let expected = (crate::theme::opacity::OPACITY_VIBRANCY_BACKGROUND * 255.0) as u8;
-        assert_eq!(
-            actions_dialog_main_window_background_alpha(&theme),
-            expected
-        );
-    }
-
-    #[test]
-    fn test_actions_dialog_main_window_background_alpha_uses_shared_popup_surface_token() {
-        let mut theme = Theme::light_default();
-        let mut opacity = theme.get_opacity();
-        opacity.vibrancy_background = Some(0.40);
-        theme.opacity = Some(opacity);
-
-        assert_eq!(
-            actions_dialog_main_window_background_alpha(&theme),
-            (AppChromeColors::from_theme(&theme).popup_surface_rgba & 0xff) as u8
-        );
-    }
-
-    #[test]
-    fn test_actions_dialog_rgba_with_alpha_combines_hex_and_alpha_channels() {
-        let theme = Theme::default();
-        let background = theme.colors.background.main;
-
-        assert_eq!(
-            actions_dialog_rgba_with_alpha(background, 0x44),
-            rgba((background << 8) | 0x44)
-        );
-    }
-
-    #[test]
-    fn test_actions_dialog_search_and_container_text_follow_shared_theme_opacity_ladder() {
-        let theme = Theme::dark_default();
-        let opacity = theme.get_opacity();
-        let (muted_text, hint_text, strong_text) =
-            actions_dialog_search_text_colors(theme.colors.text.primary, &opacity);
-        let container_text =
-            actions_dialog_container_text_color(theme.colors.text.primary, &opacity);
-
-        assert_eq!(
-            muted_text,
-            semantic_text_rgba(theme.colors.text.primary, opacity.text_muted_alpha),
-            "search muted text must use primary text plus shared muted alpha"
-        );
-        assert_eq!(
-            hint_text,
-            semantic_text_rgba(theme.colors.text.primary, opacity.text_placeholder),
-            "search hint text must use primary text plus shared placeholder alpha"
-        );
-        assert_eq!(
-            strong_text,
-            semantic_text_rgba(theme.colors.text.primary, opacity.text_strong),
-            "search strong text must use primary text plus shared strong alpha"
-        );
-        assert_eq!(
-            container_text,
-            semantic_text_rgba(theme.colors.text.primary, opacity.text_muted_alpha),
-            "container text must use primary text plus shared muted alpha"
-        );
-    }
-}
-
 // --- merged from part_03.rs ---
 
 impl Focusable for ActionsDialog {
@@ -4678,6 +4553,7 @@ impl Focusable for ActionsDialog {
 // --- merged from dialog_part_04_rewire.rs ---
 impl Render for ActionsDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.applied_theme_revision = crate::theme::service::theme_revision();
         let mut style = actions_dialog_default_style();
         style.row_height = self.effective_row_height();
         let popup_theme = crate::designs::current_actions_popup_theme();
@@ -4813,6 +4689,7 @@ impl Render for ActionsDialog {
                                     };
                                 let section_header = div()
                                     .id(ElementId::NamedInteger("section-header".into(), ix as u64))
+                                    .debug_selector(move || format!("actions-section:{ix}"))
                                     .h(px(popup_theme.list.section_header_height))
                                     .w_full()
                                     .px(px(popup_theme.section.padding_x))
@@ -4964,6 +4841,7 @@ impl Render for ActionsDialog {
                                                 "action-item".into(),
                                                 ix as u64,
                                             ))
+                                            .debug_selector(move || format!("actions-row:{ix}"))
                                             .h(px(style.row_height))
                                             .w_full()
                                             .px(px(popup_theme.row.inset_x))
@@ -5043,6 +4921,7 @@ impl Render for ActionsDialog {
             // Do NOT use h_full() here as it can conflict with flex layout
             // and cause the search bar to be pushed off-screen.
             div()
+                .debug_selector(|| "actions-list-viewport".to_string())
                 .relative()
                 .flex()
                 .flex_col()
@@ -5133,6 +5012,7 @@ impl Render for ActionsDialog {
                 };
 
                 let header = div()
+                    .debug_selector(|| "actions-context-header".to_string())
                     .w_full()
                     .h(px(popup_theme.context_header.height))
                     .px(px(popup_theme.context_header.padding_x))
@@ -5169,6 +5049,7 @@ impl Render for ActionsDialog {
         let input_container_top = if show_search {
             Some({
                 let mut top_input = div()
+                    .debug_selector(|| "actions-search".to_string())
                     .w_full() // Fill the container, which owns the shell width
                     .h(px(popup_theme.search.height)) // Fixed height for the input row
                     .min_h(px(popup_theme.search.height))
@@ -5203,7 +5084,10 @@ impl Render for ActionsDialog {
             None
         };
 
-        let mut container = div().flex().flex_col();
+        let mut container = div()
+            .debug_selector(|| "actions-dialog-root".to_string())
+            .flex()
+            .flex_col();
         if self.fill_window_bounds {
             // Detached Actions fills the hosting bounds. The native window's
             // outer size is frozen at open; all later content mutations reflow

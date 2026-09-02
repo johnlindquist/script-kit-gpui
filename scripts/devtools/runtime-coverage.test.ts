@@ -90,6 +90,8 @@ function runtimeReceipt(
       },
     },
   };
+  // Synthetic unit inputs exercise acceptance rules only; no application or
+  // owned runtime resources are acquired, and these are not runtime evidence.
   const candidate = {
     schemaVersion: 2,
     classification: "ok",
@@ -100,6 +102,7 @@ function runtimeReceipt(
     durationMs: 12,
     missingPrimitives: [],
     errors: [],
+    cleanup: { resourcesAcquired: false, closed: true, survivors: [] },
     ...variants[primitiveId],
     ...overrides,
   };
@@ -140,6 +143,7 @@ describe("target-scoped runtime coverage scorecard", () => {
       { sourceCommit: SOURCE, binarySha256: BINARY },
     );
     expect(scorecard.disposition).toBe("EVALUABLE_PASS");
+    expect(scorecard.rejectedReceipts).toEqual([]);
     expect(scorecard.evidenceClass).toBe("DIRECT_RUNTIME_PROOF");
     expect(scorecard.directRuntimeMappingCount).toBe(1);
     expect(scorecard.totalRuntimeDurationMs).toBe(36);
@@ -196,6 +200,10 @@ describe("target-scoped runtime coverage scorecard", () => {
     const scorecard = buildRuntimeCoverageScorecard([binding], receipts);
     expect(scorecard.privacyViolationCount).toBe(1);
     expect(scorecard.acceptedReceiptCount).toBe(1);
+    expect(scorecard.rejectedReceipts.map((receipt) => receipt.reason)).toEqual([
+      "runtime receipt has an incomplete or failing recursive privacy scan",
+      "runtime receipt has unclosed cleanup or surviving owned processes",
+    ]);
     expect(scorecard.directRuntimeMappingCount).toBe(0);
   });
 

@@ -261,13 +261,11 @@ app.run(move |cx: &mut App| {
         // Must be called before opening windows that use Root wrapper
         gpui_component::init(cx);
 
-        // Initialize the theme cache FIRST (before any render calls)
-        // This ensures get_cached_theme() returns correct data from first render
-        theme::init_theme_cache();
-
-        // Sync Script Kit theme with gpui-component's ThemeColor system
-        // This ensures all gpui-component widgets use our colors
-        theme::sync_gpui_component_theme(cx);
+        // Publish theme, component colors, and revision together before roots exist.
+        if let Err(error) = theme::service::initialize_theme(cx) {
+            tracing::error!(%error, "startup_theme_initialization_failed");
+            return;
+        }
 
         // Start the centralized theme service for hot-reload
         // This replaces per-window theme watchers and ensures all windows
@@ -318,22 +316,9 @@ app.run(move |cx: &mut App| {
 
         // Root is required for gpui_component's InputState focus tracking
         let window: WindowHandle<Root> = match cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
-                is_movable: true,
-                window_min_size: Some(size(
-                    px(crate::window_resize::MAIN_WINDOW_MIN_WIDTH),
-                    px(crate::window_resize::MAIN_WINDOW_MIN_HEIGHT),
-                )),
-                window_background,
-                show: false, // Start hidden - only show on hotkey press
-                focus: false, // Don't focus on creation
-                // CRITICAL: Use PopUp for Raycast-like behavior
-                // Creates NSPanel with NonactivatingPanel style, allowing keyboard
-                // input without activating the application (preserves previous app focus)
-                kind: WindowKind::PopUp,
-                ..Default::default()
+            match main_window_options(bounds, window_background, crate::runtime_policy::WindowHostPolicy::Interactive) {
+                Ok(options) => options,
+                Err(error) => { tracing::error!(%error, "main_window_policy_refused"); return; }
             },
             |window, cx| {
                 logging::log("APP", "Window opened, creating ScriptListApp wrapped in Root");
@@ -366,9 +351,11 @@ app.run(move |cx: &mut App| {
             Ok(window) => {
                 // Store the main window handle globally so async contexts can
                 // open parent dialogs without needing a Window reference.
-                let any_handle: gpui::AnyWindowHandle = window.into();
-                crate::set_main_window_handle(any_handle);
-                sync_main_automation_window(Some(automation_window_bounds_from_gpui(bounds)), false, false);
+                if let Err(error) = register_main_runtime_window(window.into(), bounds, cx) {
+                    tracing::error!(%error, "main_window_registration_failed");
+                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                    return;
+                }
                 window
             }
             Err(error) => {
@@ -492,9 +479,10 @@ app.run(move |cx: &mut App| {
                         response_tx,
                         ..
                     } => {
-                        let result = cx.update(|_| {
+                        let result = cx.update(|cx| {
                             crate::computer_use::gpui_runtime_bridge::capture_render_window_on_gpui_thread(
                                 &request,
+                                cx,
                             )
                         });
                         let _ = response_tx.send(result);
@@ -554,30 +542,15 @@ app.run(move |cx: &mut App| {
                         // detect_system_appearance() gets the fresh value
                         theme::invalidate_appearance_cache();
 
-                        // Reload the theme cache so get_cached_theme() returns
-                        // fresh colors (used by vibrancy backgrounds, etc.)
-                        let theme = theme::reload_theme_cache();
-                        let is_dark = theme.should_use_dark_vibrancy();
-                        let material = theme.get_vibrancy().material;
-
-                        // Reconfigure vibrancy materials on NSVisualEffectViews
-                        platform::configure_window_vibrancy_material_for_appearance(
-                            is_dark,
-                            material,
-                        );
-
-                        // Update all secondary windows (Notes, AI, Actions)
-                        platform::update_all_secondary_windows_appearance(is_dark);
-
-                        // Sync gpui-component theme with new system appearance
-                        theme::sync_gpui_component_theme(ctx);
+                        if let Err(error) = theme::service::reload_theme(ctx, theme::service::ThemePublicationSource::Appearance) {
+                            tracing::warn!(%error, "appearance_theme_reload_failed");
+                            return;
+                        }
 
                         // Update the app entity theme
                         view.update_theme(ctx);
                         view.sync_main_footer_popup(win, ctx);
 
-                        // Notify all registered windows to re-render with new colors
-                        windows::notify_all_windows(ctx);
                     }));
                 });
             });
@@ -1526,17 +1499,8 @@ app.run(move |cx: &mut App| {
                         }
                     }
 
-                    // Rescan disk off the UI thread and replace the in-memory
-                    // cache — scan_applications() alone only clones the cache,
-                    // so new/removed apps would never appear until restart.
-                    cx.background_executor()
-                        .spawn(async move {
-                            let _ = app_launcher::scan_applications_fresh();
-                        })
-                        .await;
-
-                    // Notify UI to re-fetch cached apps and invalidate search caches
-                    // This ensures new apps appear in search results immediately
+                    // The app catalogue owner starts one fallible native scan
+                    // off the UI thread and retains last-good rows on failure.
                     cx.update(|cx| {
                         app_entity_for_apps.update(cx, |view, ctx| {
                             view.refresh_apps(ctx);
@@ -2276,7 +2240,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                             .clone()
                                             .map(|sender| (rid.to_string(), sender))
                                     });
-                                view.dispatch_simulate_key(
+                                let outcome = view.dispatch_simulate_key(
                                     window,
                                     ctx,
                                     crate::simulate_key_dispatch::SimulatedKeyInput {
@@ -2290,9 +2254,9 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                         crate::protocol::Message::external_command_result(
                                             rid,
                                             "simulateKey".to_string(),
-                                            true,
-                                            None,
-                                            None,
+                                            outcome.status == crate::action_helpers::ActionOutcomeStatus::Success,
+                                            outcome.error_code.map(str::to_string),
+                                            outcome.user_message.or(outcome.detail),
                                         ),
                                     );
                                 }

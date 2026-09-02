@@ -29,13 +29,15 @@ The single most repeated word in three years of sessions. The window is a reflex
 
 **Proof:** add a devtools latency probe that measures hotkey→visible, keystroke→paint (including a key-repeat storm), and transition times, with red/green numbers per run. Until input-to-paint instrumentation exists, `stateResult.inputValue` state-echo timings and internal-log durations are **surrogate diagnostics**, not proof that the 16ms paint bar passed. Off-thread rule locked by clippy `disallowed-methods` where expressible, else behavior test.
 
+Search proof must distinguish semantic state, a naturally scheduled completed GPUI draw, and retained framebuffer readback. Join each measurement to its query, committed-result, selection, and window-lifetime revisions. A forced capture can prove that a scene renders, not that the responsible publication scheduled it; offscreen GPUI evidence does not measure WindowServer composition or native activation.
+
 ## 2. Layout stability — nothing moves that the user didn't move
 
 Layout shift reads to John as literally *broken*: "it causes the footer layout to shift around so the buttons don't feel 'stable'" (2026-05-21).
 
 **The bar:**
 
-- **The visible frame never changes under the cursor for the same input.** Late/async provider results may warm caches but must not republish rows, move selection, or shift a click target mid-typing — the query-frame latch (`910c40a07`).
+- **Async publication preserves interaction intent, not an obsolete row position.** Implicit global Files completions warm caches without republishing the current query; explicit Files, directory search, and other admitted publishers may update rows. Automatic selection follows the first eligible result; deliberate selection follows its stable identity. Source installation, row reconciliation, preview/footer subject, and revision publication form one transition. A pointer or agent action captured before that transition executes its exact subject or is refused, never a different row at the old position. The earlier blanket query-frame latch (`910c40a07`) is not the policy for every source.
 - **Search results grow monotonically as you type.** "'Why is' has more/completely results than 'Why i'. It makes it feel broken" (2026-06-22). No instant-result-then-replaced-after-a-beat (2026-05-09).
 - **Every list leads with a persistent section separator — even if it's just "Results".** A list whose first row is a bare item shifts every row down the moment a header-led state (empty query, grouped mode) swaps in, and vice versa. The main menu's stable "Results" header in search mode is the reference fix (`4d76327b8`); the Flows desk got the same treatment 2026-07-10. The separator row never appears/disappears with filtering — only its label may swap. Applies to every launcher-family list, builtin browser, and new surface.
 - **No stale-content flash on mode entry.** Typing `/` or `@` must never flash the previous command/mention before clearing (2026-04-16, 2026-04-20 — a repeat regression; deserves a permanent probe).
@@ -45,6 +47,7 @@ Layout shift reads to John as literally *broken*: "it causes the footer layout t
 - **Overflow clips the disposable end, never the data** ('100 words' must not render as '00 words', `c2b69cad0`). Widths come from real flex layout, never per-character estimates (`8af8eb31f`, `ca4c93d19`; standing flexbox mandate).
 - **Footer buttons never shrink or truncate** — "or else they're useless" (2026-07-06). Shortcut buttons keep intrinsic width (`flex_none` / hug-to-content in `footer_chrome`); informational lanes absorb width pressure and may truncate instead.
 - Scroll containment: inner regions scroll themselves, never the page around them (2026-06-15).
+- **User scrolling is independent of selection.** Refresh preserves a deliberate viewport anchor and fractional offset; an old deferred reveal cannot undo a newer scroll or query. Provider refresh never steals input focus.
 
 **Proof:** devtools rect-diff probe (element rects across frames during type/open/stream); golden screenshots per surface; the remaining 2026-07-04 audit backlog is the burn-down list.
 
@@ -75,6 +78,8 @@ Layout shift reads to John as literally *broken*: "it causes the footer layout t
 - Global keys are scoped: surface-level bindings (Tab, Cmd+P) must not shadow editor semantics ("I *hate* 'Tab' to open ACP Chat… inside of a markdown editor", 2026-04-09).
 
 **Proof:** simulateGpuiEvent focus probes per surface (open → click dead space → type; open popup → dismiss → type); autofocus regressions get permanent probes — they've recurred (2026-03-13, 2026-04-16).
+
+For hidden launcher proof, observe the actual local GPUI input focus handle separately from native window focus (which remains false). The selected row is not the focused input. Exercise both real GPUI key/pointer events and revision-bound semantic actions; selecting the already-selected row deliberately must still establish anchored intent.
 
 ## 5. Consistency — one system, zero drift
 
@@ -126,8 +131,11 @@ Notably: John has *never* complained about missing animation — only about moti
 - **Sources surface without secret prefixes** — if browser history is enabled, "amazon" finds it without `tabs:` (2026-05-20).
 - **Placeholder and ghost text teach**, they don't brand: "Search or type @ / | . ; for commands" (`9515cd69f`); ghost text must be substantive, not filler (2026-05-30).
 - Rows show friendly names, never raw sigils (`777b99e8f`).
+- Search providers distinguish success, empty, unavailable, failure, cancellation, and stale completion. A disconnected worker is not successful empty data. Empty/header-only/status-only projections have no selectable marker, preview subject, or runnable row; disabled explanations remain non-activatable. An empty rich source sub-search is unarmed until the first Down selects its first eligible row.
 
 **Proof:** state-matrix walkthrough per surface (empty / error / loading / overflow / long-text / zero-match), screenshot each cell; undesigned cells become tickets.
+
+The owned search inventory must account for every required state and schedule. Missing capability, trace overflow, stale framebuffer, blank readback, or failed cleanup invalidates the corresponding proof; none is a skip-as-pass. Use bounded pixel samples from the exact completed frame for the matrix, reserving images for representative or failing cases.
 
 ---
 

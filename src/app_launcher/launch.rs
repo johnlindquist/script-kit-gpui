@@ -9,6 +9,7 @@
 /// Ok(()) if the application was launched successfully, Err otherwise.
 ///
 pub fn launch_application(app: &AppInfo) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)?;
     info!(
         app_name = %app.name,
         app_path = %app.path.display(),
@@ -67,7 +68,8 @@ pub fn launch_application(app: &AppInfo) -> Result<()> {
 /// Ok(()) if the application was found and launched, Err otherwise.
 #[allow(dead_code)]
 pub fn launch_application_by_name(name: &str) -> Result<()> {
-    let apps = scan_applications();
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)?;
+    let apps = scan_applications()?;
     let name_lower = name.to_lowercase();
 
     let app = apps
@@ -77,4 +79,3 @@ pub fn launch_application_by_name(name: &str) -> Result<()> {
 
     launch_application(app)
 }
-

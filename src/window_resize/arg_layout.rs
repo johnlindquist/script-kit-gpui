@@ -6,17 +6,17 @@
 //! mixed `ARG_HEADER_HEIGHT` that baked a stale 30px GPUI footer into the
 //! "header". The renderer truth is:
 //!
-//! - header row: `ui::chrome::HEADER_PADDING_Y * 2` around a
-//!   `panel::HEADER_BUTTON_HEIGHT` min-height input row, plus the 1px header
-//!   divider (`render_minimal_list_prompt_shell_with_footer`);
+//! - complete canonical context/input header, measured by `main_view_header_metrics`;
 //! - rows: the legacy `ListItem` component rendered with the CURRENT main-menu
 //!   theme metrics (`ListItemMetricsOverride::from_main_menu_theme`), i.e. the
 //!   canonical 44px general row — not the stale 40px constant;
 //! - no painted list padding and no painted divider inside the choice list;
-//! - footer: the native main-window footer reservation
-//!   (`footer_chrome::current_main_menu_footer_height()`), carried as the
-//!   derived `RenderedFooterReservation` role — not a header component;
+//! - footer: the native main-window footer and its detached gutter (when active),
+//!   carried as the derived `RenderedFooterReservation` role — not a header
+//!   component;
 //! - window border: `layout::WINDOW_BORDER_Y` painted by `render_impl`.
+//! - additional in-flow chrome, including the real missing-Bun warning, is
+//!   reconciled from the rendered prompt shell's available height.
 //!
 //! [`resolved_arg_layout`] is pure and testable; the runtime constructors
 //! ([`current_arg_layout_inputs`]) obtain every input from the current
@@ -144,6 +144,24 @@ pub fn target_arg_window_height(
     requested.clamp(min_height, max_height)
 }
 
+/// Resolve the chrome excluded by the production root's actual shell allocation.
+/// Both target sizing and semantic geometry consume these same inputs. A
+/// detached footer is already outside the shell; an in-flow footer is inside.
+pub fn arg_layout_inputs_from_rendered_content(
+    mut inputs: ArgLayoutInputs,
+    rendered_content_height: f32,
+    footer_outside_content: bool,
+) -> ArgLayoutInputs {
+    let outside_footer_height = if footer_outside_content {
+        inputs.footer.reservation_height
+    } else {
+        0.0
+    };
+    inputs.window_non_content_height =
+        (inputs.window_height - rendered_content_height - outside_footer_height).max(0.0);
+    inputs
+}
+
 /// Mini's intended visible-row policy (product policy, not a measured value).
 pub const MINI_VISIBLE_ROW_LIMIT: usize = 5;
 
@@ -154,20 +172,24 @@ pub const ARG_ROW_MEASUREMENT_ID_PREFIX: &str = "arg-row";
 pub const MINI_LIST_VIEWPORT_MEASUREMENT_ID: &str = "mini-list-viewport";
 pub const MINI_ROW_MEASUREMENT_ID_PREFIX: &str = "mini-row";
 
-/// Header chrome the minimal list prompt shell actually paints:
-/// vertical padding pair + input row (min-height clamped) + header divider.
+/// Complete context/input header owned by the main-view chrome renderer.
 pub fn arg_header_chrome_height() -> f32 {
-    (crate::ui::chrome::HEADER_PADDING_Y * 2.0)
-        + crate::panel::HEADER_BUTTON_HEIGHT.max(super::layout::ARG_INPUT_LINE_HEIGHT)
-        + crate::panel::HEADER_DIVIDER_HEIGHT
+    let def = crate::designs::current_main_menu_theme().def();
+    crate::components::main_view_chrome::main_view_header_metrics(def, Some(def.search.height))
+        .header_height
 }
 
-/// The rendered footer reservation for Arg/Mini prompts: the native
-/// main-window footer spacer height, owned by the footer chrome resolver.
+/// The full footer exclusion for Arg/Mini prompts. The detached footer's real
+/// gutter belongs to the reservation too; it is not usable choice-list space.
 pub fn arg_rendered_footer_reservation() -> RenderedFooterReservation {
     RenderedFooterReservation {
         owner_role: GeometryRole::FooterNativeHost,
-        reservation_height: crate::components::footer_chrome::current_main_menu_footer_height(),
+        reservation_height: crate::components::footer_chrome::current_main_menu_footer_height()
+            + if crate::footer_popup::glass_scroll_bands_active() {
+                crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+            } else {
+                0.0
+            },
     }
 }
 
@@ -194,8 +216,7 @@ pub fn current_arg_layout_inputs(
         // Arg/Mini choice lists are unsectioned.
         section_slot_height: 0.0,
         row_slot_height: arg_row_slot_height(),
-        // The minimal prompt shell paints no list padding and no divider
-        // inside the choice list; modeled-only padding is gone (GEO-002).
+        // Canonical chrome has no list padding or interior list divider.
         list_padding_top: 0.0,
         list_padding_bottom: 0.0,
         footer: arg_rendered_footer_reservation(),
@@ -292,14 +313,14 @@ mod arg_layout_contract_tests {
         assert!(
             !GeometryRole::RenderedFooterReservation.comparable_to(GeometryRole::MainHeaderChrome)
         );
-        // Header chrome is padding + input row + divider only; the stale
-        // model's 30px GPUI footer must not be inside it.
+        let def = crate::designs::current_main_menu_theme().def();
         assert_eq!(
             layout.header_chrome_height,
-            (crate::ui::chrome::HEADER_PADDING_Y * 2.0)
-                + crate::panel::HEADER_BUTTON_HEIGHT
-                    .max(crate::window_resize::layout::ARG_INPUT_LINE_HEIGHT)
-                + crate::panel::HEADER_DIVIDER_HEIGHT
+            crate::components::main_view_chrome::main_view_header_metrics(
+                def,
+                Some(def.search.height)
+            )
+            .header_height,
         );
         assert_ne!(layout.footer_reservation_height, 0.0);
     }
@@ -391,5 +412,104 @@ mod arg_layout_contract_tests {
             let layout = resolved_arg_layout(inputs(mode, 0));
             assert_eq!(layout.intended_visible_rows, 0);
         }
+    }
+
+    #[test]
+    fn canonical_mini_target_preserves_exact_five_row_viewport() {
+        let (mini, height) =
+            current_resolved_arg_layout_for_target(ArgPresentationMode::Mini, 6, 0.0, 2000.0);
+        assert_eq!(mini.visible_row_capacity, MINI_VISIBLE_ROW_LIMIT);
+        assert!((mini.viewport_height - 5.0 * mini.row_slot_height).abs() < 0.001);
+        let (full, full_height) =
+            current_resolved_arg_layout_for_target(ArgPresentationMode::Full, 6, 0.0, 2000.0);
+        assert_eq!(full.visible_row_capacity, 6);
+        assert!((full_height - height - full.row_slot_height).abs() < 0.001);
+    }
+
+    #[test]
+    fn rendered_warning_and_footer_chrome_preserve_five_whole_mini_rows() {
+        for warning_height in [0.0, 60.5] {
+            for detached_footer in [false, true] {
+                let footer_height = 32.0;
+                let gutter_height = if detached_footer {
+                    crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+                } else {
+                    0.0
+                };
+                let reservation_height = footer_height + gutter_height;
+                let header_height = 58.0;
+                let root_chrome = 2.0
+                    + warning_height
+                    + if detached_footer {
+                        reservation_height
+                    } else {
+                        0.0
+                    };
+                let initial = ArgLayoutInputs {
+                    window_height: 312.0,
+                    header_chrome_height: header_height,
+                    footer: RenderedFooterReservation {
+                        owner_role: GeometryRole::FooterNativeHost,
+                        reservation_height,
+                    },
+                    ..inputs(ArgPresentationMode::Mini, 6)
+                };
+                let rendered_inputs = arg_layout_inputs_from_rendered_content(
+                    initial,
+                    initial.window_height - root_chrome,
+                    detached_footer,
+                );
+                let target = target_arg_window_height(
+                    resolved_arg_layout(rendered_inputs),
+                    rendered_inputs.window_non_content_height,
+                    68.0,
+                    500.0,
+                );
+                assert_eq!(
+                    target,
+                    2.0 + warning_height + header_height + reservation_height + 5.0 * 44.0
+                );
+                let settled_inputs = arg_layout_inputs_from_rendered_content(
+                    ArgLayoutInputs {
+                        window_height: target,
+                        ..initial
+                    },
+                    target - root_chrome,
+                    detached_footer,
+                );
+                let settled = resolved_arg_layout(settled_inputs);
+                assert_eq!(settled.viewport_height, 220.0);
+                assert_eq!(settled.visible_row_capacity, 5);
+                assert_eq!(settled.intended_visible_rows, 5);
+                assert_eq!(
+                    target_arg_window_height(
+                        settled,
+                        settled_inputs.window_non_content_height,
+                        68.0,
+                        500.0,
+                    ),
+                    target,
+                    "settled geometry must not schedule another resize"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_chrome_reconciliation_preserves_the_window_clamp() {
+        let rendered_inputs = arg_layout_inputs_from_rendered_content(
+            inputs(ArgPresentationMode::Mini, 6),
+            100.0,
+            true,
+        );
+        assert_eq!(
+            target_arg_window_height(
+                resolved_arg_layout(rendered_inputs),
+                rendered_inputs.window_non_content_height,
+                68.0,
+                300.0,
+            ),
+            300.0,
+        );
     }
 }

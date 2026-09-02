@@ -14,9 +14,8 @@
  * rather than "no failures".
  *
  * Usage:
- *   SCRIPT_KIT_AGENT_ARTIFACT_NAME=ai-chat-parity \
- *     ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
- *   bun scripts/agentic/ai-chat-parity-probe.ts
+ *   bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out .test-output/ai-chat-parity.reference.json
+ *   SCRIPT_KIT_ARTIFACT_REFERENCE=.test-output/ai-chat-parity.reference.json bun scripts/agentic/ai-chat-parity-probe.ts
  *
  * Negative control — confirm the probe can actually fail before trusting it:
  *   SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE=0 \
@@ -37,6 +36,7 @@
 import { join, resolve } from "node:path";
 
 import { Driver, type Json } from "../devtools/driver";
+import { runtimeArtifactFromEnvironment } from "../devtools/lib/runtime-task-proof.ts";
 import {
   FLOW_ANSWER_SCOPE_PREFIX,
   FLOW_ANSWER_SCOPE_SUFFIX,
@@ -52,14 +52,15 @@ import {
 const repoRoot = resolve(import.meta.dir, "../..");
 const flowFixture = join(import.meta.dir, "fixtures/flow-ux-project");
 const packageFixture = join(import.meta.dir, "fixtures/flow-desk-package");
-const binary =
-  process.env.SCRIPT_KIT_GPUI_BINARY ?? "target-agent/artifacts/ai-chat-parity/script-kit-gpui";
+const artifact = runtimeArtifactFromEnvironment();
+const binary = process.env.SCRIPT_KIT_GPUI_BINARY ?? artifact.executablePath;
 
 const receipt: Json = {
   schemaVersion: 1,
   tool: "ai-chat-parity-probe",
   repoRoot,
   binary,
+  artifact: artifact.reference,
   assertions: [],
   failures: [],
   evidence: {},
@@ -85,6 +86,7 @@ function components(layout: Json): LayoutComponent[] {
 
 const driver = await Driver.launch({
   binary,
+  immutableArtifact: artifact.reference,
   sessionName: `ai-chat-parity-${process.pid}`,
   sandboxHome: true,
   readyTimeoutMs: 30_000,

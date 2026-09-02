@@ -32,7 +32,7 @@ pub struct AutomationSurfaceSnapshot {
 }
 
 /// Schema version for the launcher surface contract snapshot in `getState`.
-pub const LAUNCHER_SURFACE_CONTRACT_SCHEMA_VERSION: u32 = 1;
+pub const LAUNCHER_SURFACE_CONTRACT_SCHEMA_VERSION: u32 = 2;
 
 /// Screenshot-free identity observed from the same monotonic owner as
 /// `inspectAutomationWindow`. A missing value means the target could not be
@@ -47,6 +47,12 @@ pub struct AutomationTargetIdentitySnapshot {
     pub target_generation: u64,
     pub surface_generation: u64,
     pub data_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_generation: Option<u64>,
 }
 
 /// The only permitted general-purpose row systems, plus explicitly named
@@ -205,6 +211,9 @@ mod tests {
             target_generation: 11,
             surface_generation: 13,
             data_generation: 17,
+            presentation_revision: Some(19),
+            theme_revision: Some(23),
+            frame_generation: Some(29),
         });
 
         let json = serde_json::to_value(&snapshot).expect("serialize target identity");
@@ -215,6 +224,9 @@ mod tests {
         assert_eq!(identity["targetGeneration"], 11);
         assert_eq!(identity["surfaceGeneration"], 13);
         assert_eq!(identity["dataGeneration"], 17);
+        assert_eq!(identity["presentationRevision"], 19);
+        assert_eq!(identity["themeRevision"], 23);
+        assert_eq!(identity["frameGeneration"], 29);
         assert!(identity.get("screenshot").is_none());
         assert!(identity.get("pixelProbes").is_none());
     }

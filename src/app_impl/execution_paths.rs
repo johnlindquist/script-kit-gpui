@@ -33,7 +33,7 @@ impl ScriptListApp {
                         .iter()
                         .position(|e| e.path == path_info.path)
                     {
-                        prompt.selected_index = idx;
+                        prompt.set_selected_index(idx);
                     }
                     // For directories, navigate into them; for files, submit
                     if path_info.is_dir && action == PathAction::OpenDirectory {

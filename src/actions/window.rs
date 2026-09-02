@@ -9,7 +9,8 @@
 // - Shares the ActionsDialog entity with the main app for keyboard routing
 
 use crate::platform;
-use crate::protocol::AutomationWindowKind;
+use crate::protocol::{AutomationWindowInfo, AutomationWindowKind};
+use crate::runtime_policy::WindowHostPolicy;
 use crate::theme::get_cached_theme;
 use crate::ui_foundation::{is_key_backspace, is_key_down, is_key_enter, is_key_escape, is_key_up};
 use crate::window_resize::layout::FOOTER_HEIGHT;
@@ -421,15 +422,22 @@ pub struct ActionsWindow {
     opening_shell_basis: ActionsDialogShellSizingSnapshot,
     registered_displayed_shortcuts: HashSet<String>,
     did_request_focus: bool,
+    host_policy: WindowHostPolicy,
+    parent_generation: u64,
+    theme_revision_seen: u64,
+    window_handle: Option<WindowHandle<ActionsWindow>>,
+    automation_generation: Option<u64>,
+    close_subscription: Option<Subscription>,
 }
 
 impl ActionsWindow {
     fn new(
         dialog: Entity<ActionsDialog>,
-        parent_automation_id: String,
-        parent_kind: AutomationWindowKind,
+        parent: &AutomationWindowInfo,
         fixed_shell_size: Size<Pixels>,
         opening_shell_basis: ActionsDialogShellSizingSnapshot,
+        host_policy: WindowHostPolicy,
+        parent_generation: u64,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -438,12 +446,18 @@ impl ActionsWindow {
             focus_handle,
             activation_subscription: None,
             close_requested: false,
-            parent_automation_id,
-            parent_kind,
+            parent_automation_id: parent.id.clone(),
+            parent_kind: parent.kind,
             fixed_shell_size,
             opening_shell_basis,
             registered_displayed_shortcuts: HashSet::new(),
             did_request_focus: false,
+            host_policy,
+            parent_generation,
+            theme_revision_seen: crate::theme::service::theme_revision(),
+            window_handle: None,
+            automation_generation: None,
+            close_subscription: None,
         }
     }
 
@@ -518,7 +532,20 @@ impl ActionsWindow {
             &format!("ACTIONS_WINDOW_LIFECYCLE defer_close_scheduled: reason={reason}"),
         );
         let dialog_for_close = dialog;
+        let expected_handle = window.window_handle();
+        let generation = crate::windows::automation_window_by_id("actions-dialog")
+            .and_then(|info| info.generation);
         window.defer(cx, move |window, cx| {
+            let current = generation.is_some_and(|generation| {
+                crate::windows::get_runtime_window_handle_for_generation(
+                    "actions-dialog",
+                    generation,
+                ) == Some(expected_handle)
+            });
+            if !current {
+                window.remove_window();
+                return;
+            }
             crate::logging::log(
                 "ACTIONS",
                 &format!("ACTIONS_WINDOW_LIFECYCLE defer_close_executing: reason={reason}"),
@@ -533,6 +560,10 @@ impl ActionsWindow {
             dialog_for_close.update(cx, |dialog, _cx| {
                 dialog.release_fixed_shell();
             });
+            if window.is_owned_hidden() {
+                window.remove_window();
+                return;
+            }
             crate::platform::dematerialize_then_remove_gpui_window_from_app(
                 window,
                 cx,
@@ -571,17 +602,29 @@ impl ActionsWindow {
         // macOS window activation is async; starting it early gives the OS
         // more time to make the parent window key before the deferred
         // on_close callback runs and sets pending focus.
-        if activate_main_window {
+        if activate_main_window && !self.host_policy.is_hidden() {
             if self.parent_kind == AutomationWindowKind::Main {
                 platform::activate_main_window();
             } else if let Some(parent_handle) =
-                crate::windows::get_runtime_window_handle(&self.parent_automation_id)
+                crate::windows::get_runtime_window_handle_for_generation(
+                    &self.parent_automation_id,
+                    self.parent_generation,
+                )
             {
                 // Secondary hosts (Notes, detached Agent Chat) keep their
                 // popups when AppKit promotes the popup to key window. On
                 // Escape/Cmd+K the key status must hand back to the host
                 // window, or keyboard focus lands nowhere after the close.
+                let parent_id = self.parent_automation_id.clone();
+                let parent_generation = self.parent_generation;
                 cx.defer(move |cx| {
+                    if crate::windows::get_runtime_window_handle_for_generation(
+                        &parent_id,
+                        parent_generation,
+                    ) != Some(parent_handle)
+                    {
+                        return;
+                    }
                     let _ = parent_handle.update(cx, |_root, window, _cx| {
                         window.activate_window();
                     });
@@ -597,7 +640,7 @@ impl ActionsWindow {
     }
 
     fn ensure_activation_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.activation_subscription.is_some() {
+        if self.host_policy.is_hidden() || self.activation_subscription.is_some() {
             return;
         }
 
@@ -1000,6 +1043,27 @@ impl ActionsWindow {
     }
 }
 
+fn retire_actions_lifetime(handle: WindowHandle<ActionsWindow>, generation: Option<u64>) {
+    if let Some(generation) = generation {
+        crate::windows::remove_runtime_window_instance("actions-dialog", generation);
+    }
+    if get_actions_window_handle() == Some(handle) {
+        clear_actions_window_handle("exact_window_closed");
+        clear_actions_popup_automation_snapshot();
+        crate::windows::automation_surface_collector::remove_actions_dialog_snapshot(
+            "actions-dialog",
+        );
+    }
+}
+
+impl Drop for ActionsWindow {
+    fn drop(&mut self) {
+        if let Some(handle) = self.window_handle {
+            retire_actions_lifetime(handle, self.automation_generation);
+        }
+    }
+}
+
 impl Focusable for ActionsWindow {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1008,6 +1072,14 @@ impl Focusable for ActionsWindow {
 
 impl Render for ActionsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let publication = crate::theme::get_theme_snapshot();
+        if self.theme_revision_seen != publication.revision {
+            self.theme_revision_seen = publication.revision;
+            self.dialog.update(cx, |dialog, cx| {
+                dialog.update_theme(publication.theme.clone());
+                cx.notify();
+            });
+        }
         self.ensure_activation_subscription(window, cx);
 
         // Log focus state AND window focus state
@@ -1027,8 +1099,11 @@ impl Render for ActionsWindow {
             ),
         );
 
-        let parent_window_focused = actions_parent_window_focused(&self.parent_automation_id);
-        if should_auto_close_actions_window(parent_window_focused, window_is_active) {
+        let parent_window_focused = self.host_policy.is_hidden()
+            || actions_parent_window_focused(&self.parent_automation_id);
+        if !self.host_policy.is_hidden()
+            && should_auto_close_actions_window(parent_window_focused, window_is_active)
+        {
             crate::logging::log(
                 "ACTIONS",
                 &format!(
@@ -1094,6 +1169,7 @@ impl Render for ActionsWindow {
         // Render inside the full hosting window. The native outer size is frozen
         // at open; the dialog owns only interior flex/scroll changes.
         div()
+            .debug_selector(|| "actions-window-root".to_string())
             .size_full()
             .key_context("actions_popup")
             .track_focus(&self.focus_handle)
@@ -1253,229 +1329,7 @@ mod tests {
     }
 }
 
-/// Single source of truth for Actions shell height. Detached windows evaluate
-/// it once from the opening root/unfiltered snapshot; inline dialogs use it for
-/// their local content-derived shell.
-#[inline]
-pub(super) fn actions_window_dynamic_height(
-    num_actions: usize,
-    section_header_count: usize,
-    hide_search: bool,
-    has_header: bool,
-    show_footer: bool,
-    max_height: f32,
-    row_height: f32,
-) -> f32 {
-    let tokens = crate::designs::current_actions_popup_theme();
-    resolved_actions_popup_height(
-        &tokens,
-        (num_actions, section_header_count),
-        hide_search,
-        has_header,
-        show_footer,
-        max_height,
-        row_height,
-    )
-}
-
-/// Pure popup-height formula over an explicit token definition. Production
-/// passes `current_actions_popup_theme()`; the design-contract exporter passes
-/// `base_actions_popup_theme()` so checked-in artifacts always match the base
-/// token definition.
-pub(crate) fn resolved_actions_popup_height(
-    tokens: &crate::designs::ActionsPopupThemeDef,
-    row_counts: (usize, usize),
-    hide_search: bool,
-    has_header: bool,
-    show_footer: bool,
-    max_height: f32,
-    row_height: f32,
-) -> f32 {
-    let (num_actions, section_header_count) = row_counts;
-    const POPUP_FOOTER_HEIGHT: f32 = 32.0;
-    let search_box_height = if hide_search {
-        0.0
-    } else {
-        tokens.search.height
-    };
-    let header_height = if has_header {
-        tokens.context_header.height
-    } else {
-        0.0
-    };
-    let footer_height = if show_footer {
-        POPUP_FOOTER_HEIGHT
-    } else {
-        0.0
-    };
-    let section_headers_height = section_header_count as f32 * tokens.list.section_header_height;
-    let min_items_height = if num_actions == 0 {
-        tokens.list.empty_row_height
-    } else {
-        0.0
-    };
-    let list_padding_height = tokens.list.padding_top + tokens.list.padding_bottom;
-    let max_height = max_height.min(tokens.shell.max_height);
-    let items_height = ((num_actions as f32 * row_height + section_headers_height)
-        .max(min_items_height)
-        + list_padding_height)
-        .min(max_height - search_box_height - header_height - footer_height);
-    let border_height = tokens.shell.border_height;
-    items_height + search_box_height + header_height + footer_height + border_height
-}
-
-/// Compute the origin point for the actions popup window.
-///
-/// Pure helper that encapsulates all position-dependent origin math so it can
-/// be tested without standing up a real window.
-fn actions_popup_origin(
-    main_window_bounds: Bounds<Pixels>,
-    window_width: Pixels,
-    window_height: Pixels,
-    position: WindowPosition,
-) -> Point<Pixels> {
-    let tokens = crate::designs::current_actions_popup_theme();
-    let right_aligned_x = main_window_bounds.origin.x + main_window_bounds.size.width
-        - window_width
-        - px(tokens.shell.margin_x);
-
-    let y = match position {
-        WindowPosition::BottomRight => {
-            main_window_bounds.origin.y + main_window_bounds.size.height
-                - window_height
-                - px(FOOTER_HEIGHT)
-                - px(tokens.shell.margin_y)
-        }
-        WindowPosition::TopRight | WindowPosition::TopCenter => {
-            main_window_bounds.origin.y
-                + px(tokens.shell.titlebar_offset_y)
-                + px(tokens.shell.margin_y)
-        }
-    };
-
-    let x = match position {
-        WindowPosition::TopCenter => {
-            main_window_bounds.origin.x + (main_window_bounds.size.width - window_width) / 2.0
-        }
-        _ => right_aligned_x,
-    };
-
-    Point { x, y }
-}
-
-/// Full popup bounds (origin + size) for the actions window.
-///
-/// Wraps [`actions_popup_origin`] so callers get a single `Bounds` value
-/// without reconstructing size separately.
-fn actions_popup_bounds(
-    main_window_bounds: Bounds<Pixels>,
-    window_width: Pixels,
-    window_height: Pixels,
-    position: WindowPosition,
-) -> Bounds<Pixels> {
-    Bounds {
-        origin: actions_popup_origin(main_window_bounds, window_width, window_height, position),
-        size: Size {
-            width: window_width,
-            height: window_height,
-        },
-    }
-}
-
-/// Structured placement receipt for the actions popup.
-///
-/// Captures all inputs and computed outputs of a placement decision so that
-/// agentic callers can verify geometry deterministically.
-#[derive(Debug)]
-struct ActionsPopupPlacementReceipt {
-    position: WindowPosition,
-    display_id: Option<DisplayId>,
-    main_window_bounds: Bounds<Pixels>,
-    popup_bounds: Bounds<Pixels>,
-    anchor_x: Pixels,
-    anchor_y: Pixels,
-    pinned_edge: &'static str,
-}
-
-fn actions_popup_placement_receipt(
-    main_window_bounds: Bounds<Pixels>,
-    window_width: Pixels,
-    window_height: Pixels,
-    position: WindowPosition,
-    display_id: Option<DisplayId>,
-) -> ActionsPopupPlacementReceipt {
-    let tokens = crate::designs::current_actions_popup_theme();
-    let popup_bounds =
-        actions_popup_bounds(main_window_bounds, window_width, window_height, position);
-
-    let (anchor_x, anchor_y, pinned_edge) = match position {
-        WindowPosition::BottomRight => (
-            main_window_bounds.origin.x + main_window_bounds.size.width - px(tokens.shell.margin_x),
-            main_window_bounds.origin.y + main_window_bounds.size.height
-                - px(FOOTER_HEIGHT)
-                - px(tokens.shell.margin_y),
-            "bottom",
-        ),
-        WindowPosition::TopRight => (
-            main_window_bounds.origin.x + main_window_bounds.size.width - px(tokens.shell.margin_x),
-            main_window_bounds.origin.y
-                + px(tokens.shell.titlebar_offset_y)
-                + px(tokens.shell.margin_y),
-            "top",
-        ),
-        WindowPosition::TopCenter => (
-            main_window_bounds.origin.x + (main_window_bounds.size.width / 2.0),
-            main_window_bounds.origin.y
-                + px(tokens.shell.titlebar_offset_y)
-                + px(tokens.shell.margin_y),
-            "top",
-        ),
-    };
-
-    ActionsPopupPlacementReceipt {
-        position,
-        display_id,
-        main_window_bounds,
-        popup_bounds,
-        anchor_x,
-        anchor_y,
-        pinned_edge,
-    }
-}
-
-fn log_actions_popup_placement(stage: &'static str, receipt: &ActionsPopupPlacementReceipt) {
-    let main_origin_x_px: f32 = receipt.main_window_bounds.origin.x.into();
-    let main_origin_y_px: f32 = receipt.main_window_bounds.origin.y.into();
-    let main_width_px: f32 = receipt.main_window_bounds.size.width.into();
-    let main_height_px: f32 = receipt.main_window_bounds.size.height.into();
-
-    let popup_origin_x_px: f32 = receipt.popup_bounds.origin.x.into();
-    let popup_origin_y_px: f32 = receipt.popup_bounds.origin.y.into();
-    let popup_width_px: f32 = receipt.popup_bounds.size.width.into();
-    let popup_height_px: f32 = receipt.popup_bounds.size.height.into();
-
-    let anchor_x_px: f32 = receipt.anchor_x.into();
-    let anchor_y_px: f32 = receipt.anchor_y.into();
-
-    tracing::info!(
-        target: "ACTIONS_POPUP",
-        stage = stage,
-        position = ?receipt.position,
-        display_id = ?receipt.display_id,
-        pinned_edge = receipt.pinned_edge,
-        main_origin_x_px,
-        main_origin_y_px,
-        main_width_px,
-        main_height_px,
-        popup_origin_x_px,
-        popup_origin_y_px,
-        popup_width_px,
-        popup_height_px,
-        anchor_x_px,
-        anchor_y_px,
-        "actions popup placement receipt"
-    );
-}
+include!("window_placement.rs");
 
 fn protocol_bounds_json(bounds: Bounds<Pixels>) -> serde_json::Value {
     serde_json::json!({
@@ -1532,6 +1386,7 @@ fn record_actions_popup_automation_snapshot(
             AutomationWindowKind::ActionsDialog => "actionsDialog.actions",
             AutomationWindowKind::PromptPopup => "promptPopup.actions",
             AutomationWindowKind::Hud => "hud.actions",
+            AutomationWindowKind::SnapOverlay => "snapOverlay.actions",
         },
         "parentAutomationId": parent_automation_id,
         "parentKind": format!("{parent_kind:?}"),
@@ -1599,7 +1454,8 @@ fn attach_actions_popup_to_parent_window(
     cx: &mut App,
     parent_window_handle: AnyWindowHandle,
     child_ns_window: cocoa::base::id,
-) {
+) -> anyhow::Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)?;
     let attach_result = cx.update_window(parent_window_handle, move |_, parent_window, _cx| {
         let Some(parent_ns_window) = actions_popup_ns_window(parent_window) else {
             return false;
@@ -1635,97 +1491,36 @@ fn attach_actions_popup_to_parent_window(
         true
     });
 
-    match attach_result {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(
-                target: "script_kit::actions",
-                event = "actions_popup_attach_parent_skipped",
-                "Skipped attaching actions popup as native child window"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "script_kit::actions",
-                event = "actions_popup_attach_parent_failed",
-                error = ?error,
-                "Failed to attach actions popup as native child window"
-            );
-        }
-    }
+    anyhow::ensure!(attach_result?, "actions_parent_attachment_failed");
+    Ok(())
 }
 
 fn resolve_actions_popup_parent_automation_id(
     parent_window_handle: AnyWindowHandle,
-    parent_window_bounds: Bounds<Pixels>,
+    _parent_window_bounds: Bounds<Pixels>,
     parent_automation_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    if let Some(id) = parent_automation_id {
-        return Ok(id.to_string());
+    let parent = match parent_automation_id {
+        Some(id) => crate::windows::automation_window_by_id(id),
+        None => crate::windows::list_automation_windows()
+            .into_iter()
+            .find(|info| {
+                info.generation.is_some_and(|generation| {
+                    crate::windows::get_runtime_window_handle_for_generation(&info.id, generation)
+                        == Some(parent_window_handle)
+                })
+            }),
     }
-
-    let Some(main_window_handle) = crate::get_main_window_handle() else {
-        tracing::warn!(
-            target: "script_kit::actions",
-            event = "actions_popup_open_blocked_missing_parent",
-            "Actions popup open blocked: no parent automation identity"
-        );
-        anyhow::bail!("Cannot open actions popup: parent automation identity is required");
-    };
-
-    if main_window_handle != parent_window_handle {
-        tracing::warn!(
-            target: "script_kit::actions",
-            event = "actions_popup_open_blocked_missing_parent",
-            "Actions popup open blocked: no parent automation identity"
-        );
-        anyhow::bail!("Cannot open actions popup: parent automation identity is required");
-    }
-
-    let synthesized_parent_id = "main".to_string();
-    crate::windows::upsert_runtime_window_handle(&synthesized_parent_id, parent_window_handle);
-
-    // Preserve the existing main window's semantic_surface if the registry
-    // already has one (e.g. "clipboardHistory" when the clipboard-history
-    // builtin is hosted in main, or "fileSearch" for file-search, or
-    // "agentChatChat" for embedded Agent Chat). Previously this `upsert_automation_window`
-    // call hardcoded `semantic_surface: "scriptList"` and so REWROTE main's
-    // surface tag mid-flight every time actions opened, which broke any
-    // automation caller that routed on surface. See
-    // `[?] actions-cmdk-clipboard-main-surface-flip` filed Run 7 Pass #17
-    // and independently reproduced Pass #20.
-    let preserved_semantic_surface = crate::windows::list_automation_windows()
-        .into_iter()
-        .find(|w| w.id == synthesized_parent_id)
-        .and_then(|w| w.semantic_surface)
-        .unwrap_or_else(|| "scriptList".to_string());
-
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: synthesized_parent_id.clone(),
-        kind: crate::protocol::AutomationWindowKind::Main,
-        title: Some("Script Kit".to_string()),
-        focused: true,
-        visible: true,
-        semantic_surface: Some(preserved_semantic_surface),
-        bounds: Some(crate::protocol::AutomationWindowBounds {
-            x: f32::from(parent_window_bounds.origin.x) as f64,
-            y: f32::from(parent_window_bounds.origin.y) as f64,
-            width: f32::from(parent_window_bounds.size.width) as f64,
-            height: f32::from(parent_window_bounds.size.height) as f64,
-        }),
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
-    });
-    tracing::info!(
-        target: "script_kit::actions",
-        event = "actions_popup_synthesized_main_parent",
-        parent_window_id = %synthesized_parent_id,
-        "Synthesized main-window automation identity for actions popup"
+    .ok_or_else(|| anyhow::anyhow!("actions_parent_identity_missing"))?;
+    let generation = parent
+        .generation
+        .ok_or_else(|| anyhow::anyhow!("actions_parent_generation_missing"))?;
+    anyhow::ensure!(
+        crate::windows::get_runtime_window_handle_for_generation(&parent.id, generation)
+            == Some(parent_window_handle),
+        "actions_parent_stale"
     );
-
-    Ok(synthesized_parent_id)
+    Ok(parent.id)
 }
 
 /// Open the actions window as a separate floating window with vibrancy.
@@ -1735,38 +1530,51 @@ fn resolve_actions_popup_parent_automation_id(
 ///
 /// # Arguments
 /// * `cx` - The application context
-/// * `parent_window_handle` - The window that owns the popup
-/// * `main_window_bounds` - The bounds of the parent window in SCREEN-RELATIVE coordinates
-///   (as returned by GPUI's window.bounds() - top-left origin relative to the window's screen)
-/// * `display_id` - The display where the parent window is located (actions window will be on same display)
+/// * `placement` - Owning parent handle, screen-relative bounds from GPUI's
+///   `window.bounds()`, and display on which the popup must open
 /// * `dialog_entity` - The shared ActionsDialog entity (created by main app)
 /// * `position` - Where to position the window relative to the parent window
+/// * `parent_automation_id` - Exact parent identity, or resolve it from the handle
+/// * `host_policy` - Required host policy, checked against the parent's lifetime
 ///
 /// # Returns
 /// The window handle on success
 pub fn open_actions_window(
     cx: &mut App,
-    parent_window_handle: AnyWindowHandle,
-    main_window_bounds: Bounds<Pixels>,
-    display_id: Option<DisplayId>,
+    placement: super::ActionsWindowPlacement,
     dialog_entity: Entity<ActionsDialog>,
     position: WindowPosition,
     parent_automation_id: Option<&str>,
+    host_policy: WindowHostPolicy,
 ) -> anyhow::Result<WindowHandle<ActionsWindow>> {
+    let super::ActionsWindowPlacement {
+        parent_window_handle,
+        main_bounds: main_window_bounds,
+        display_id,
+    } = placement;
+    host_policy.validate()?;
     crate::platform::host_clock::log_entry_timeline_event("actions_open_requested");
     let parent_automation_id = resolve_actions_popup_parent_automation_id(
         parent_window_handle,
         main_window_bounds,
         parent_automation_id,
     )?;
-    let parent_kind = crate::windows::automation_window_by_id(&parent_automation_id)
-        .map(|info| info.kind)
-        .ok_or_else(|| {
+    let parent =
+        crate::windows::automation_window_by_id(&parent_automation_id).ok_or_else(|| {
             anyhow::anyhow!(
                 "Cannot open actions popup: parent '{}' is missing from automation registry",
                 parent_automation_id
             )
         })?;
+    let parent_kind = parent.kind;
+    let parent_generation = parent
+        .generation
+        .ok_or_else(|| anyhow::anyhow!("actions_parent_generation_missing"))?;
+    anyhow::ensure!(
+        crate::windows::runtime_window_host_policy(&parent_automation_id, parent_generation)?
+            == host_policy,
+        "actions_parent_host_policy_mismatch"
+    );
 
     // Close any existing actions window first
     close_actions_window(cx);
@@ -1775,7 +1583,7 @@ pub fn open_actions_window(
     // Load theme for vibrancy settings
     let theme = get_cached_theme();
     let is_dark_vibrancy = theme.should_use_dark_vibrancy();
-    let window_background = if theme.is_vibrancy_enabled() {
+    let window_background = if !host_policy.is_hidden() && theme.is_vibrancy_enabled() {
         crate::platform::vibrancy_window_background()
     } else {
         gpui::WindowBackgroundAppearance::Opaque
@@ -1847,9 +1655,12 @@ pub fn open_actions_window(
         // via the popup's own handlers when AppKit click-promotes it
         // (`setBecomesKeyOnlyIfNeeded:` in `configure_actions_popup_window`).
         focus: false,
-        show: true,
+        show: !host_policy.is_hidden(),
         kind: WindowKind::PopUp, // Floating popup window
         display_id,              // CRITICAL: Position on same display as main window
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
         ..Default::default()
     };
 
@@ -1861,7 +1672,6 @@ pub fn open_actions_window(
     dialog_entity.update(cx, |dialog, _cx| {
         dialog.attach_to_fixed_shell(fixed_height);
     });
-    let parent_automation_id_for_window = parent_automation_id.clone();
     let fixed_shell_size_for_window = fixed_shell_size;
     let opening_shell_basis_for_window = opening_shell_basis.clone();
     let handle = match cx.open_window(window_options, |window, cx| {
@@ -1872,10 +1682,11 @@ pub fn open_actions_window(
         cx.new(|cx| {
             ActionsWindow::new(
                 dialog_entity.clone(),
-                parent_automation_id_for_window.clone(),
-                parent_kind,
+                &parent,
                 fixed_shell_size_for_window,
                 opening_shell_basis_for_window.clone(),
+                host_policy,
+                parent_generation,
                 cx,
             )
         })
@@ -1887,177 +1698,163 @@ pub fn open_actions_window(
             return Err(error);
         }
     };
+    handle.update(cx, |root, _, _| root.window_handle = Some(handle))?;
 
-    // Configure the window as non-movable on macOS
-    // Use window.defer() to avoid RefCell borrow conflicts - GPUI may still have
-    // internal state borrowed immediately after open_window returns.
-    #[cfg(target_os = "macos")]
-    {
-        let configure_result = handle.update(cx, move |_this, window, cx| {
-            window.defer(cx, move |window, cx| {
-                if let Some(ns_window) = actions_popup_ns_window(window) {
-                    // Instrumentation only (Oracle `glass-entry-feel-options`
-                    // WP0). The configure-then-attach ORDER below is load
-                    // bearing product behavior and is deliberately unchanged:
-                    // the popup's entry morph is armed while `parentWindow` is
-                    // still nil, and the attach lands while that animation is
-                    // in flight. The user likes the resulting feel, so these
-                    // events exist to MEASURE that sequence, not to correct it.
-                    crate::platform::host_clock::log_entry_timeline_event(
-                        "actions_native_configure_started",
-                    );
-                    // SAFETY: `ns_window` comes from the live GPUI popup window via
-                    // `actions_popup_ns_window`, so it is a valid AppKit NSWindow
-                    // pointer on the main thread when configuration runs.
-                    unsafe {
-                        platform::configure_actions_popup_window(ns_window, is_dark_vibrancy);
-                    }
-                    crate::platform::host_clock::log_entry_timeline_event("actions_morph_armed");
-                    attach_actions_popup_to_parent_window(cx, parent_window_handle, ns_window);
-                    crate::platform::host_clock::log_entry_timeline_event(
-                        "actions_parent_attached",
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "script_kit::actions",
-                        event = "actions_popup_missing_nswindow",
-                        "Could not resolve NSWindow for actions popup configuration"
-                    );
-                }
-            });
-        });
-
-        if let Err(error) = configure_result {
-            crate::logging::log(
-                "WARN",
-                &format!(
-                    "ACTIONS_WINDOW_OP_FAIL configure_popup_window update failed: operation=position_focus error={error:?}"
-                ),
-            );
-            crate::logging::log_debug(
-                "ACTIONS",
-                &format!(
-                    "ACTIONS_WINDOW_OP_FAIL configure_popup_window context: display_id={display_id:?}, position={position:?}"
-                ),
-            );
-        }
-    }
-
-    // Store the one fixed-size popup handle globally.
-    let window_storage = ACTIONS_WINDOW.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = window_storage.lock() {
-        *guard = Some(handle);
-    }
-
-    crate::logging::log("ACTIONS", "Actions popup window opened with vibrancy");
-
-    // Register in the automation window registry with parent identity.
-    // Fail-closed: if registration fails, close the popup and propagate the error.
-    //
-    // `bounds` carries the lifetime-fixed placement receipt verbatim so
-    // `listAutomationWindows` / `inspectAutomationWindow` surface the same
-    // popup frame through every filter, route, and action-data mutation.
-    let popup_automation_id = "actions-dialog".to_string();
-    let popup_bounds_for_registry = crate::protocol::AutomationWindowBounds {
-        x: f32::from(bounds.origin.x) as f64,
-        y: f32::from(bounds.origin.y) as f64,
-        width: f32::from(bounds.size.width) as f64,
-        height: f32::from(bounds.size.height) as f64,
-    };
-    if let Err(e) = crate::windows::register_attached_popup(
-        popup_automation_id.clone(),
-        crate::protocol::AutomationWindowKind::ActionsDialog,
-        Some("Actions".to_string()),
-        Some("actionsDialog".to_string()),
-        Some(popup_bounds_for_registry),
-        Some(parent_automation_id.as_str()),
-    ) {
-        tracing::warn!(
-            target: "script_kit::actions",
-            event = "actions_popup_registry_failed",
-            error = %e,
-            "Failed to register actions popup in automation registry — closing popup"
+    *ACTIONS_WINDOW
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("actions_window_state_poisoned"))? = Some(handle);
+    let exact_parent_id = parent_automation_id.clone();
+    let publish = move |cx: &mut App| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            get_actions_window_handle() == Some(handle),
+            "actions_lifetime_superseded"
         );
-        // Close the already-opened popup before returning the error
-        close_actions_window(cx);
-        return Err(e);
+        let info = crate::windows::register_runtime_window_instance(
+            crate::protocol::AutomationWindowInfo {
+                id: "actions-dialog".into(),
+                kind: AutomationWindowKind::ActionsDialog,
+                title: Some("Actions".into()),
+                focused: false,
+                visible: !host_policy.is_hidden(),
+                semantic_surface: Some("actionsDialog".into()),
+                bounds: Some(crate::protocol::AutomationWindowBounds {
+                    x: f32::from(bounds.origin.x) as f64,
+                    y: f32::from(bounds.origin.y) as f64,
+                    width: f32::from(bounds.size.width) as f64,
+                    height: f32::from(bounds.size.height) as f64,
+                }),
+                parent_window_id: Some(parent_automation_id.clone()),
+                parent_kind: Some(parent_kind),
+                parent_window_generation: Some(parent_generation),
+                pid: Some(std::process::id()),
+                generation: None,
+            },
+            handle.into(),
+            cx,
+        )?;
+        let generation = info
+            .generation
+            .ok_or_else(|| anyhow::anyhow!("actions_generation_missing"))?;
+        let on_close = cx.on_window_closed(move |_, window_id| {
+            if window_id == handle.window_id() {
+                retire_actions_lifetime(handle, Some(generation));
+            }
+        });
+        handle.update(cx, |root, _, _| {
+            root.automation_generation = Some(generation);
+            root.close_subscription = Some(on_close);
+        })?;
+        crate::windows::automation_surface_collector::upsert_actions_dialog_snapshot(
+            "actions-dialog",
+            &dialog_entity,
+            cx,
+        );
+        record_actions_popup_automation_snapshot(
+            &parent_automation_id,
+            parent_kind,
+            &receipt,
+            fixed_shell_size,
+            &opening_shell_basis,
+        );
+        emit_actions_popup_event(
+            ActionsPopupEvent::OpenSucceeded,
+            None,
+            Some(position),
+            Some(opening_shell_basis.action_count),
+            Some(opening_shell_basis.section_header_count),
+            Some(fixed_height),
+        );
+        Ok(())
+    };
+    #[cfg(target_os = "macos")]
+    if !host_policy.is_hidden() {
+        handle.update(cx, move |_, window, cx| {
+            window.defer(cx, move |window, cx| {
+                if get_actions_window_handle() != Some(handle)
+                    || crate::windows::get_runtime_window_handle_for_generation(
+                        &exact_parent_id,
+                        parent_generation,
+                    ) != Some(parent_window_handle)
+                {
+                    window.remove_window();
+                    return;
+                }
+                if crate::runtime_policy::check(
+                    crate::runtime_policy::ExternalEffect::NativeVisibility,
+                )
+                .is_err()
+                {
+                    window.remove_window();
+                    return;
+                }
+                let Some(ns_window) = actions_popup_ns_window(window) else {
+                    window.remove_window();
+                    return;
+                };
+                // Preserve the calibrated configure -> morph -> attach order.
+                crate::platform::host_clock::log_entry_timeline_event(
+                    "actions_native_configure_started",
+                );
+                // SAFETY: pointer belongs to this exact live GPUI window in the foreground turn.
+                unsafe {
+                    platform::configure_actions_popup_window(ns_window, is_dark_vibrancy);
+                }
+                crate::platform::host_clock::log_entry_timeline_event("actions_morph_armed");
+                if let Err(error) =
+                    attach_actions_popup_to_parent_window(cx, parent_window_handle, ns_window)
+                {
+                    tracing::error!(%error, "actions_attach_failed");
+                    window.remove_window();
+                    return;
+                }
+                crate::platform::host_clock::log_entry_timeline_event("actions_parent_attached");
+                cx.defer(move |cx| {
+                    if let Err(error) = publish(cx) {
+                        tracing::error!(%error, "actions_registration_failed");
+                        if get_actions_window_handle() == Some(handle) {
+                            close_actions_window(cx);
+                        }
+                    }
+                });
+            });
+        })?;
+        return Ok(handle);
     }
-    let popup_any_handle: AnyWindowHandle = handle.into();
-    let popup_generation = crate::windows::resolve_automation_window(Some(
-        &crate::protocol::AutomationWindowTarget::Id {
-            id: popup_automation_id.clone(),
-        },
-    ))
-    .ok()
-    .and_then(|info| info.generation);
-    crate::windows::upsert_runtime_window_handle_instance(
-        &popup_automation_id,
-        popup_any_handle,
-        popup_generation,
-    );
-    crate::windows::automation_surface_collector::upsert_actions_dialog_snapshot(
-        popup_automation_id.as_str(),
-        &dialog_entity,
-        cx,
-    );
-    record_actions_popup_automation_snapshot(
-        &parent_automation_id,
-        parent_kind,
-        &receipt,
-        fixed_shell_size,
-        &opening_shell_basis,
-    );
-
-    // Structured receipt reports the same root/unfiltered sizing basis that
-    // owns the lifetime-fixed shell.
-    emit_actions_popup_event(
-        ActionsPopupEvent::OpenSucceeded,
-        None,
-        Some(position),
-        Some(opening_shell_basis.action_count),
-        Some(opening_shell_basis.section_header_count),
-        Some(fixed_height),
-    );
+    if let Err(error) = publish(cx) {
+        close_actions_window(cx);
+        return Err(error);
+    }
 
     Ok(handle)
 }
 
 /// Close the actions window if it's open
 pub fn close_actions_window(cx: &mut App) {
+    let handle = ACTIONS_WINDOW
+        .get()
+        .and_then(|storage| storage.lock().ok().and_then(|mut slot| slot.take()));
+    let Some(handle) = handle else {
+        return;
+    };
     set_actions_window_parent_kind(None);
-    // Unregister from automation registry before destroying the window
     unregister_actions_dialog_automation_surfaces();
-
-    if let Some(window_storage) = ACTIONS_WINDOW.get() {
-        if let Ok(mut guard) = window_storage.lock() {
-            if let Some(handle) = guard.take() {
-                crate::logging::log("ACTIONS", "Closing actions popup window");
-                emit_actions_popup_event(ActionsPopupEvent::Closed, None, None, None, None, None);
-                // Close the window
-                let close_result = handle.update(cx, |this, window, cx| {
-                    this.dialog
-                        .update(cx, |dialog, _cx| dialog.release_fixed_shell());
-                    crate::platform::dematerialize_then_remove_gpui_window(
-                        window,
-                        cx,
-                        "ACTIONS",
-                        "Actions popup",
-                    );
-                });
-                if let Err(error) = close_result {
-                    crate::logging::log(
-                        "WARN",
-                        &format!(
-                            "ACTIONS_WINDOW_OP_FAIL close_actions_window update failed: operation=focus_cleanup error={error:?}"
-                        ),
-                    );
-                    crate::logging::log_debug(
-                        "ACTIONS",
-                        "ACTIONS_WINDOW_OP_FAIL close_actions_window context: remove_window requested",
-                    );
-                }
-            }
+    emit_actions_popup_event(ActionsPopupEvent::Closed, None, None, None, None, None);
+    if let Err(error) = handle.update(cx, |this, window, cx| {
+        this.dialog
+            .update(cx, |dialog, _| dialog.release_fixed_shell());
+        if this.host_policy.is_hidden() {
+            window.remove_window();
+        } else {
+            crate::platform::dematerialize_then_remove_gpui_window(
+                window,
+                cx,
+                "ACTIONS",
+                "Actions popup",
+            );
         }
+    }) {
+        tracing::warn!(%error, "actions_close_failed");
     }
 }
 
@@ -2394,8 +2191,8 @@ mod actions_popup_origin_tests {
         let fn_body = &source[fn_start..];
 
         assert!(
-            fn_body.contains("parent_window_handle: AnyWindowHandle"),
-            "open_actions_window should accept the parent window handle"
+            fn_body.contains("placement: super::ActionsWindowPlacement"),
+            "open_actions_window should accept the owning parent's placement"
         );
         assert!(
             fn_body.contains("attach_actions_popup_to_parent_window("),
@@ -2421,15 +2218,21 @@ mod actions_popup_origin_tests {
         let open_body = &source[fn_start..close_start];
         let close_body = &source[close_start..];
 
+        let registration = open_body
+            .split("let info = crate::windows::register_runtime_window_instance(")
+            .nth(1)
+            .and_then(|body| body.split(")?;").next())
+            .expect("actions popup must atomically register its runtime instance");
         assert!(
-            open_body.contains("let popup_any_handle: AnyWindowHandle = handle.into();"),
-            "open_actions_window must convert the popup handle to an AnyWindowHandle"
+            registration.contains("handle.into()")
+                && registration.contains("id: \"actions-dialog\".into()")
+                && registration.contains("kind: AutomationWindowKind::ActionsDialog"),
+            "actions-dialog protocol identity must be registered with the exact popup handle"
         );
         assert!(
-            open_body.contains(
-                "crate::windows::upsert_runtime_window_handle(&popup_automation_id, popup_any_handle)"
-            ),
-            "open_actions_window must register the actions-dialog runtime handle for simulateGpuiEvent"
+            registration.contains("parent_window_id: Some(parent_automation_id.clone())")
+                && registration.contains("parent_window_generation: Some(parent_generation)"),
+            "actions-dialog runtime registration must retain its exact owning parent generation"
         );
         // The runtime-handle removal moved into the shared
         // unregister_actions_dialog_automation_surfaces() helper; follow the

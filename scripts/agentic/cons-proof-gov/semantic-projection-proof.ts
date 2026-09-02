@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -19,10 +20,7 @@ import {
 
 assertNoninteractiveVisualProbe("cons-proof-gov.semantic-projection");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY
-    ?? "target-agent/artifacts/cons-proof-c04/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const artifactPath = resolve(
   process.env.CONSISTENCY_RECEIPT_PATH
     ?? ".artifacts/consistency/PF-004/semantic-projection.json",
@@ -154,18 +152,16 @@ let observedNodes: Obj[] = [];
 let observedProjection: Obj = {};
 
 try {
-  driver = await Driver.launch({
-    binary,
-    sessionName: `cons-proof-pf004-${process.pid}`,
-    sandboxHome: true,
-    sharedModels: false,
-    defaultTimeoutMs: 10_000,
-    env: {
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+  sessionName: `cons-proof-pf004-${process.pid}`,
+  sandboxHome: true,
+  sharedModels: false,
+  defaultTimeoutMs: 10_000,
+  env: {
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  }, });
 
   runtimeStage = "open-settings";
   driver.send({ type: "triggerBuiltin", name: "settings" });

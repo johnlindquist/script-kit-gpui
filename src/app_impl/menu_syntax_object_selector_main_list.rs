@@ -8,26 +8,22 @@ impl ScriptListApp {
             && self.menu_syntax_object_selector_state.owns_main_list()
     }
 
-    pub(crate) fn set_menu_syntax_object_selector_selection(&mut self, row_id: String) {
-        self.menu_syntax_object_selector_state.selected_row_id = Some(row_id);
-    }
-
     pub(crate) fn selected_menu_syntax_object_selector_row_id_from_main_list(
         &mut self,
     ) -> Option<String> {
-        let (grouped, flat) = self.get_grouped_results_cached();
-        let crate::list_item::GroupedListItem::Item(flat_index) =
-            grouped.get(self.selected_index)?
+        let crate::ResolvedMainMenuSelection::SearchResult {
+            result: crate::scripts::SearchResult::SpineProjection(row),
+            ..
+        } = self.resolved_main_menu_selected_subject()?
         else {
             return None;
         };
-        let Some(crate::scripts::SearchResult::SpineProjection(row)) = flat.get(*flat_index) else {
-            return None;
-        };
-        row.id
-            .as_ref()
-            .strip_prefix("menu-syntax-object:")
-            .map(str::to_string)
+        match &row.action {
+            crate::spine::SpineListAction::AcceptMenuSyntaxObject { row_id } => {
+                Some(row_id.to_string())
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn accept_menu_syntax_object_selector_row(
@@ -36,6 +32,30 @@ impl ScriptListApp {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.menu_syntax_object_selector_owns_main_keyboard() {
+            return false;
+        }
+        let Some(crate::ResolvedMainMenuSelection::SearchResult {
+            row,
+            result: crate::scripts::SearchResult::SpineProjection(projection),
+            ..
+        }) = self.resolved_main_menu_selected_subject()
+        else {
+            return false;
+        };
+        if !row.eligibility.activatable
+            || !matches!(&projection.action, crate::spine::SpineListAction::AcceptMenuSyntaxObject { row_id: owner_id } if owner_id.as_ref() == row_id)
+            || projection.id.as_ref().strip_prefix("menu-syntax-object:") != Some(row_id)
+        {
+            return false;
+        }
+        let observation = crate::MainMenuDispatchObservation {
+            query: self.root_search.query_stamp(),
+            stable_key: row.stable_key.clone(),
+            content_fingerprint: row.content_fingerprint.clone(),
+            status: "dispatchRequested",
+            reason: None,
+        };
         let Some(snapshot) = self
             .menu_syntax_object_selector_state
             .snapshot
@@ -54,7 +74,15 @@ impl ScriptListApp {
             Some(selected_index),
             &raw_filter_text,
         );
+        if matches!(
+            outcome,
+            crate::menu_syntax::ObjectSelectorIntentOutcome::Ignored
+                | crate::menu_syntax::ObjectSelectorIntentOutcome::SelectionChanged { .. }
+        ) {
+            return false;
+        }
         self.dispatch_menu_syntax_object_selector_outcome(outcome, window, cx);
+        self.set_main_menu_dispatch_observation(Some(observation));
         true
     }
 
@@ -68,25 +96,15 @@ impl ScriptListApp {
             crate::menu_syntax::ObjectSelectorIntentOutcome::Ignored
             | crate::menu_syntax::ObjectSelectorIntentOutcome::SelectionChanged { .. } => {}
             crate::menu_syntax::ObjectSelectorIntentOutcome::ReplaceInput { text } => {
-                self.filter_text = text.clone();
+                self.filter_text = text;
                 self.pending_filter_sync = true;
-                self.computed_filter_text = text.clone();
-                self.set_menu_syntax_mode_from_filter(&text);
-                self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_object_selector_replace",
-                    cx,
-                );
                 self.menu_syntax_object_selector_state = Default::default();
+                self.flush_pending_main_menu_query(cx);
                 cx.notify();
             }
             crate::menu_syntax::ObjectSelectorIntentOutcome::Close => {
                 self.menu_syntax_object_selector_state = Default::default();
-                self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_object_selector_close",
-                    cx,
-                );
+                self.flush_pending_main_menu_query(cx);
                 cx.notify();
             }
         }
@@ -101,10 +119,6 @@ impl ScriptListApp {
         if self.menu_syntax_form_input_active && self.menu_syntax_capture_form_owns_input() {
             self.menu_syntax_object_selector_state = Default::default();
             self.invalidate_grouped_cache();
-            self.reconcile_script_list_after_filter_change(
-                "menu_syntax_object_selector_form_input",
-                cx,
-            );
             cx.notify();
             return;
         }
@@ -124,10 +138,6 @@ impl ScriptListApp {
             crate::menu_syntax::ObjectSelectorTransition::Close => {
                 self.menu_syntax_object_selector_state = Default::default();
                 self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_object_selector_close",
-                    cx,
-                );
                 cx.notify();
             }
             crate::menu_syntax::ObjectSelectorTransition::Open {
@@ -142,10 +152,6 @@ impl ScriptListApp {
                     };
                 self.menu_syntax_trigger_picker_state = Default::default();
                 self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_object_selector_open",
-                    cx,
-                );
                 cx.notify();
             }
             crate::menu_syntax::ObjectSelectorTransition::Update {
@@ -169,10 +175,6 @@ impl ScriptListApp {
                     };
                 self.menu_syntax_trigger_picker_state = Default::default();
                 self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_object_selector_update",
-                    cx,
-                );
                 cx.notify();
             }
         }
@@ -229,6 +231,38 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
+        let main_list_activation = self.menu_syntax_object_selector_owns_main_keyboard()
+            && matches!(
+                intent,
+                crate::menu_syntax::InlinePickerKeyIntent::Accept
+                    | crate::menu_syntax::InlinePickerKeyIntent::Apply
+                    | crate::menu_syntax::InlinePickerKeyIntent::SecondaryAction
+                    | crate::menu_syntax::InlinePickerKeyIntent::CreateAction
+            );
+        let observation = if main_list_activation {
+            self.set_main_menu_dispatch_observation(None);
+            let Some(subject) = self.resolved_main_menu_selected_subject() else {
+                return false;
+            };
+            let crate::ResolvedMainMenuSelection::SearchResult { row, .. } = subject else {
+                return false;
+            };
+            if !row.eligibility.activatable {
+                return false;
+            }
+            Some(crate::MainMenuDispatchObservation {
+                query: self.root_search.query_stamp(),
+                stable_key: row.stable_key.clone(),
+                content_fingerprint: row.content_fingerprint.clone(),
+                status: "dispatchRequested",
+                reason: None,
+            })
+        } else {
+            None
+        };
         let Some(snapshot) = self
             .menu_syntax_object_selector_state
             .snapshot
@@ -237,16 +271,21 @@ impl ScriptListApp {
         else {
             return false;
         };
-        let selected_row_id = self
-            .selected_menu_syntax_object_selector_row_id_from_main_list()
-            .or_else(|| {
-                self.menu_syntax_object_selector_state
-                    .selected_row_id
-                    .clone()
-            });
+        let selected_row_id = self.selected_menu_syntax_object_selector_row_id_from_main_list();
+        if main_list_activation && selected_row_id.is_none() {
+            return false;
+        }
+        let selected_row_id = selected_row_id.or_else(|| {
+            self.menu_syntax_object_selector_state
+                .selected_row_id
+                .clone()
+        });
         let selected_index = selected_row_id
             .as_deref()
             .and_then(|id| snapshot.rows.iter().position(|row| row.id == id));
+        if main_list_activation && selected_index.is_none() {
+            return false;
+        }
         let raw_filter_text = self.filter_text.clone();
         let outcome = crate::menu_syntax::apply_object_selector_intent(
             intent,
@@ -257,6 +296,32 @@ impl ScriptListApp {
         match outcome {
             crate::menu_syntax::ObjectSelectorIntentOutcome::SelectionChanged { new_index } => {
                 let next_row_id = snapshot.rows.get(new_index).map(|row| row.id.clone());
+                if self.menu_syntax_object_selector_owns_main_keyboard() {
+                    let Some(id) = next_row_id.as_deref() else {
+                        return false;
+                    };
+                    let Some(index) = self.main_menu_committed_rows().iter().find_map(|row| {
+                        (row.eligibility.selectable
+                            && row.stable_key.strip_prefix("menu-syntax-object:") == Some(id))
+                        .then_some(row.grouped_index)
+                    }) else {
+                        return false;
+                    };
+                    if !self.select_main_menu_row(
+                        index,
+                        crate::MainMenuSelectionOrigin::Keyboard,
+                        cx,
+                    ) {
+                        return false;
+                    }
+                    self.reveal_main_list_selection_above_footer(
+                        "menu_syntax_object_selector_selection",
+                    );
+                    self.schedule_main_list_selection_reveal_above_footer(
+                        "menu_syntax_object_selector_selection",
+                        cx,
+                    );
+                }
                 self.menu_syntax_object_selector_state.visible_start =
                     crate::menu_syntax::object_selector_visible_start_for_selection(
                         self.menu_syntax_object_selector_state.visible_start,
@@ -264,17 +329,15 @@ impl ScriptListApp {
                         snapshot.rows.len(),
                     );
                 self.menu_syntax_object_selector_state.selected_row_id = next_row_id;
-                self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_object_selector_selection",
-                    cx,
-                );
                 cx.notify();
                 true
             }
             crate::menu_syntax::ObjectSelectorIntentOutcome::Ignored => false,
             other => {
                 self.dispatch_menu_syntax_object_selector_outcome(other, Some(window), cx);
+                if let Some(observation) = observation {
+                    self.set_main_menu_dispatch_observation(Some(observation));
+                }
                 true
             }
         }

@@ -1,3 +1,25 @@
+// --- merged from part_000.rs ---
+pub(super) fn app_shell_footer_colors(theme: &crate::theme::Theme) -> PromptFooterColors {
+    PromptFooterColors::from_theme(theme)
+}
+
+pub(super) fn script_list_footer_info_label(
+    window_tweaker_enabled: bool,
+    is_dark_mode: bool,
+    opacity_percent: i32,
+    material: &str,
+    appearance: &str,
+) -> Option<String> {
+    if window_tweaker_enabled && !is_dark_mode {
+        Some(format!(
+            "{}% | {} | {} | ⌘-/+ ⌘M ⌘⇧A",
+            opacity_percent, material, appearance
+        ))
+    } else {
+        None
+    }
+}
+
 /// Agent Chat's contextual footer controls may disappear while its content is
 /// unavailable, but that state must not remove the main window's persistent
 /// footer chrome.
@@ -104,7 +126,6 @@ fn notes_browse_footer_buttons(
     ]
 }
 
-static MAIN_FOOTER_ACTION_LISTENER: Once = Once::new();
 
 pub(crate) fn flow_session_footer_buttons(
     working: bool,
@@ -472,6 +493,63 @@ impl ScriptListApp {
             event = "agent_chat_footer_paste_response_dispatched",
             "Dispatched latest Agent Chat assistant response to frontmost app"
         );
+    }
+
+    fn quick_terminal_footer_buttons(&self) -> Vec<crate::footer_popup::FooterButtonConfig> {
+        use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+        let footer_disabled = self.main_window_footer_buttons_blocked();
+        let enabled = !footer_disabled;
+        let can_apply = self.quick_terminal_can_apply_back();
+        let can_attach_to_agent = self.quick_terminal_can_attach_to_agent_chat();
+
+        let mut buttons = Vec::with_capacity(if can_apply || can_attach_to_agent {
+            2
+        } else {
+            1
+        });
+        if can_apply {
+            buttons
+                .push(FooterButtonConfig::new(FooterAction::Apply, "⌘↩", "Apply").enabled(enabled));
+        } else if can_attach_to_agent {
+            buttons.push(FooterButtonConfig::new(FooterAction::Ai, "⌘↩", "Agent").enabled(enabled));
+        }
+        buttons.push(FooterButtonConfig::new(FooterAction::Close, "⌘W", "Close").enabled(enabled));
+
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "quick_terminal_footer_buttons_resolved",
+            can_apply,
+            can_attach_to_agent,
+            footer_disabled,
+            button_count = buttons.len(),
+            "Resolved quick-terminal native footer buttons"
+        );
+
+        buttons
+    }
+
+    /// Footer buttons for an in-window `ConfirmPrompt`. Reuses the native
+    /// Apply/Close slots so no AppKit ObjC selector wiring needs to change —
+    /// only the labels and `selected` flag change per options + focused button.
+    fn confirm_prompt_footer_buttons(
+        &self,
+        options: &crate::confirm::ParentConfirmOptions,
+        focused_button: ConfirmFocusedButton,
+    ) -> Vec<crate::footer_popup::FooterButtonConfig> {
+        use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+        let confirm_focused = matches!(focused_button, ConfirmFocusedButton::Confirm);
+        let cancel_focused = matches!(focused_button, ConfirmFocusedButton::Cancel);
+
+        vec![
+            FooterButtonConfig::new(FooterAction::Apply, "↵", options.confirm_text.to_string())
+                .selected(confirm_focused)
+                .enabled(true),
+            FooterButtonConfig::new(FooterAction::Close, "Esc", options.cancel_text.to_string())
+                .selected(cancel_focused)
+                .enabled(true),
+        ]
     }
 
     fn latest_agent_chat_assistant_response(&self, cx: &App) -> Option<String> {

@@ -1,5 +1,68 @@
 import { createHash } from "node:crypto";
 
+export interface AutomationInstance { readonly type: "instance"; readonly id: string; readonly generation: number }
+export interface AutomationTargetSnapshot {
+  readonly windowId: string;
+  readonly windowGeneration: number;
+  readonly appViewVariant: string;
+  readonly targetGeneration: number;
+  readonly surfaceGeneration: number;
+  readonly dataGeneration: number;
+  readonly presentationRevision: number;
+  readonly themeRevision: number;
+  readonly frameGeneration: number;
+}
+export interface OwnedRuntimeIdentity {
+  readonly pid: number;
+  readonly processStartTime: string;
+  readonly processInstanceId: string;
+  readonly sessionGeneration: string;
+  readonly binarySha256: string;
+  readonly manifestSha256: string;
+}
+export interface CompletedFrameIdentity extends OwnedRuntimeIdentity {
+  readonly requestedTarget: AutomationInstance;
+  readonly target: AutomationTargetSnapshot;
+  readonly nativeWindowId?: number | null;
+}
+
+export function evaluatorTargetIssues(requested: AutomationInstance, target: AutomationTargetSnapshot): string[] {
+  const issues: string[] = [];
+  if (!target || requested.type !== "instance" || !requested.id || !Number.isSafeInteger(requested.generation) || requested.generation <= 0 ||
+      target.windowId !== requested.id || target.windowGeneration !== requested.generation) issues.push("requested_instance_mismatch");
+  for (const key of ["windowGeneration", "targetGeneration", "surfaceGeneration", "dataGeneration", "presentationRevision", "themeRevision", "frameGeneration"] as const)
+    if (!Number.isSafeInteger(target?.[key]) || target[key] < 0) issues.push(`invalid_${key}`);
+  if (typeof target?.appViewVariant !== "string" || !target.appViewVariant) issues.push("missing_surface_identity");
+  return issues;
+}
+
+export function completedFrameIssues(requested: AutomationInstance, frame: CompletedFrameIdentity,
+  owned: OwnedRuntimeIdentity, expected?: AutomationTargetSnapshot): string[] {
+  const issues = evaluatorTargetIssues(requested, frame?.target);
+  if (frame?.requestedTarget?.type !== "instance" || frame.requestedTarget.id !== requested.id ||
+      frame.requestedTarget.generation !== requested.generation) issues.push("frame_requested_instance_mismatch");
+  for (const key of ["pid", "processStartTime", "processInstanceId", "sessionGeneration", "binarySha256", "manifestSha256"] as const)
+    if (frame?.[key] !== owned[key] || owned[key] == null || owned[key] === "") issues.push(`frame_${key}_mismatch`);
+  if (!Number.isSafeInteger(frame?.target?.frameGeneration) || frame.target.frameGeneration <= 0) issues.push("frame_not_completed");
+  if (expected) {
+    for (const key of ["targetGeneration", "surfaceGeneration", "dataGeneration", "presentationRevision", "themeRevision"] as const)
+      if (frame?.target?.[key] !== expected[key]) issues.push(`frame_${key}_stale`);
+    if (frame?.target?.frameGeneration < expected.frameGeneration) issues.push("frame_generation_stale");
+  }
+  return issues;
+}
+
+export function declaredTransitionIssues(before: AutomationTargetSnapshot, after: AutomationTargetSnapshot,
+  allowed: readonly (keyof AutomationTargetSnapshot)[]): string[] {
+  const issues = evaluatorTargetIssues({ type: "instance", id: before.windowId, generation: before.windowGeneration }, after);
+  for (const key of ["targetGeneration", "surfaceGeneration", "dataGeneration", "presentationRevision", "themeRevision", "frameGeneration"] as const) {
+    if (after[key] < before[key]) issues.push(`revision_regressed:${key}`);
+    if (!allowed.includes(key) && after[key] !== before[key]) issues.push(`undeclared_transition:${key}`);
+  }
+  if (!allowed.includes("appViewVariant") && before.appViewVariant !== after.appViewVariant) issues.push("undeclared_transition:appViewVariant");
+  return issues;
+}
+
 /**
  * scripts/devtools/lib/target-identity.ts — strict target identity resolution,
  * extracted from targets.ts so inspector CLIs (elements/focus/layout/keyboard/
@@ -219,6 +282,8 @@ export function targetIdentity(args: TargetIdentityArgs, inspect: JsonObject, wi
       targetGeneration: snapshot.targetGeneration ?? null,
       surfaceGeneration: snapshot.surfaceGeneration ?? null,
       dataGeneration: snapshot.dataGeneration ?? null,
+      presentationRevision: snapshot.presentationRevision ?? null,
+      themeRevision: snapshot.themeRevision ?? null,
       layoutGeneration: snapshot.layoutGeneration ?? null,
       selectionGeneration: snapshot.selectionGeneration ?? null,
       scrollGeneration: snapshot.scrollGeneration ?? null,
@@ -282,6 +347,8 @@ export interface ProofTransactionIdentity extends JsonObject {
   targetGeneration: number | null;
   surfaceGeneration: number | null;
   dataGeneration: number | null;
+  presentationRevision?: number | null;
+  themeRevision?: number | null;
   layoutGeneration: number | null;
   selectionGeneration: number | null;
   scrollGeneration: number | null;
@@ -325,6 +392,9 @@ export function proofTransactionIdentity(
     targetGeneration: resolvedTarget.targetGeneration ?? null,
     surfaceGeneration: resolvedTarget.surfaceGeneration ?? null,
     dataGeneration: resolvedTarget.dataGeneration ?? null,
+    presentationRevision: resolvedTarget.presentationRevision ?? null,
+    themeRevision: resolvedTarget.themeRevision ?? null,
+    frameGeneration: resolvedTarget.frameGeneration ?? null,
   });
   return {
     transactionId: `proof:${createHash("sha256").update(identitySeed).digest("hex").slice(0, 24)}`,
@@ -386,6 +456,8 @@ export function proofTransactionIdentity(
     dataGeneration: typeof resolvedTarget.dataGeneration === "number"
       ? resolvedTarget.dataGeneration
       : null,
+    presentationRevision: typeof resolvedTarget.presentationRevision === "number" ? resolvedTarget.presentationRevision : null,
+    themeRevision: typeof resolvedTarget.themeRevision === "number" ? resolvedTarget.themeRevision : null,
     layoutGeneration: typeof resolvedTarget.layoutGeneration === "number"
       ? resolvedTarget.layoutGeneration
       : null,
@@ -639,6 +711,8 @@ export function hiddenTargetInspectionSnapshot(
     targetGeneration: canonicalIdentity.targetGeneration ?? null,
     surfaceGeneration: canonicalIdentity.surfaceGeneration ?? null,
     dataGeneration: canonicalIdentity.dataGeneration ?? null,
+    presentationRevision: canonicalIdentity.presentationRevision ?? null,
+    themeRevision: canonicalIdentity.themeRevision ?? null,
     layoutGeneration: canonicalIdentity.layoutGeneration ?? null,
     selectionGeneration: canonicalIdentity.selectionGeneration ?? null,
     scrollGeneration: canonicalIdentity.scrollGeneration ?? null,

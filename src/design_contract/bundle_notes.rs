@@ -1,7 +1,7 @@
 fn append_notes_design_tokens(
     b: &mut BundleBuilder,
     theme: &Theme,
-    fm: crate::designs::FooterMetricsTokens,
+    _fm: crate::designs::FooterMetricsTokens,
 ) {
     // ── Notes window (separate NSPanel) ─────────────────────────────────
     // App-authored chrome + the layout model come from the production
@@ -9,20 +9,17 @@ fn append_notes_design_tokens(
     // window_ops, the titlebar renderer, and autosize consume (and
     // explicitly NOT the feature-sensitive `adopted_style()`). Editor
     // typography/caret resolve through the notes-editor contract (the
-    // theme → gpui-component bridge, NOT `FontConfig::default()`), the
-    // painted footer band through the shared footer_chrome formula owner,
-    // and markdown capture styles through the real highlight-theme resolver
-    // beside `register_markdown_highlighter`.
+    // theme → gpui-component bridge, NOT `FontConfig::default()`), and
+    // markdown capture styles through the real highlight-theme resolver.
     let notes_chrome = crate::notes::window::contract::production_notes_window_contract();
     let notes_layout = crate::notes::window::contract::production_notes_layout_model();
     let notes_editor =
-        crate::components::notes_editor::contract::resolved_notes_editor_metrics(&theme);
+        crate::components::notes_editor::contract::resolved_notes_editor_metrics(theme);
     let notes_markdown =
-        crate::notes::markdown_highlighting::resolved_notes_markdown_styles(&theme, true);
+        crate::notes::markdown_highlighting::resolved_notes_markdown_styles(theme, true);
     let notes_markdown_runtime =
         crate::notes::markdown_highlighting::markdown_editor_runtime_info();
-    let notes_footer_intrinsic =
-        crate::notes::window::contract::resolved_notes_footer_intrinsic_height(fm.button_padding_y);
+    let footer_row = crate::notes::window::layout::production_notes_footer_action_row();
 
     // Source: app-authored Notes chrome (writable leaves).
     for (id, var, value, path) in [
@@ -86,24 +83,6 @@ fn append_notes_design_tokens(
             notes_chrome.editor_padding_y,
             "NotesWindowStyle::current().editor_padding_y",
         ),
-        (
-            "notes.footer.statusMinWidth",
-            "--sk-notes-footer-status-min-width",
-            notes_chrome.footer_status_min_width,
-            "notes::window::MIN_TARGET_SIZE",
-        ),
-        (
-            "notes.footer.contentInsetX",
-            "--sk-notes-footer-content-inset-x",
-            notes_chrome.footer_content_inset_x,
-            "crate::window_resize::main_layout::HINT_STRIP_PADDING_X",
-        ),
-        (
-            "notes.footer.actionGap",
-            "--sk-notes-footer-action-gap",
-            crate::components::footer_chrome::FOOTER_ACTION_ITEM_GAP_PX,
-            "footer_chrome::FOOTER_ACTION_ITEM_GAP_PX",
-        ),
     ] {
         b.source_len(id, var, value, path);
     }
@@ -129,31 +108,19 @@ fn append_notes_design_tokens(
         true,
         &[],
     );
-    b.add(
-        "notes.footer.restOpacity",
-        TokenStage::Source,
-        Some("--sk-notes-footer-rest-opacity"),
-        TokenValue::Number {
-            value: notes_chrome.footer_rest_opacity as f64,
-        },
-        Some("notes::window::OPACITY_SUBTLE"),
-        true,
-        &[],
-    );
 
-    // Layout MODEL (autosize + automation_layout_info reservation), under
-    // honest model names — NOT painted geometry. The 28px footer
-    // reservation deliberately stays 28 (see the conflict below).
+    // The same absent row feeds autosize, automation and export; no CSS
+    // alias or hypothetical painted footer is emitted for Notes.
     b.add(
         "notes.layout.footerReservationHeight",
-        TokenStage::Source,
+        TokenStage::Resolved,
         None,
         TokenValue::Length {
-            value: notes_layout.footer_reservation_height as f64,
+            value: footer_row.height as f64,
         },
-        Some("NotesLayoutMetrics::footer_height (autosize + automation_layout_info)"),
-        true,
-        &[],
+        Some("notes::window::layout::production_notes_footer_action_row().height"),
+        false,
+        &["notes.footer.presentation"],
     );
     for (id, value, path) in [
         (
@@ -273,22 +240,10 @@ fn append_notes_design_tokens(
             "gpui_component::Size::Medium.input_py() — the REAL vendored accessor, not a copy",
         ),
         (
-            "resolved.notes.footer.intrinsicHeight",
-            "--sk-notes-footer-height",
-            notes_footer_intrinsic,
-            "footer_chrome::footer_button_height_in(HINT_STRIP_HEIGHT, footer.buttonPaddingY)",
-        ),
-        (
             "resolved.notes.titlebar.titleFontSize",
             "--sk-notes-titlebar-title-font-size",
             14.0,
             "gpui text_sm (0.875rem × 16px rem) in render_editor_titlebar",
-        ),
-        (
-            "resolved.notes.footer.statusFontSize",
-            "--sk-notes-footer-status-font-size",
-            12.0,
-            "gpui text_xs (0.75rem × 16px rem) in render_editor_footer",
         ),
     ] {
         b.add(
@@ -495,56 +450,6 @@ fn append_notes_design_tokens(
         }
     }
 
-    // ── Notes conflicts (recorded, not collapsed) ───────────────────────
-    b.conflict(
-        "notesFooter.layoutReservationVsIntrinsicPaint",
-        &[
-            (
-                "NotesLayoutMetrics.footer_height / autosize",
-                format!("{}", notes_layout.footer_reservation_height),
-            ),
-            (
-                "automation_layout_info footer bounds",
-                format!("{}", notes_layout.footer_reservation_height),
-            ),
-            (
-                "GPUI universal footer action row",
-                format!("{notes_footer_intrinsic}"),
-            ),
-        ],
-        "warning",
-        "The layout model reserves 28px for the Notes footer while the painted \
-         universal action-button row is 32px: autosize and the layout oracle \
-         under-reserve the visible band by 4px. The 280px default-height fixture \
-         masks it (initial-height floor). Mockups must paint the 32px resolved \
-         truth; do NOT change NotesWindowStyle.footer_height here — that would be \
-         an app behavior fix, not a contract record.",
-    );
-    b.conflict(
-        "notesFooter.buttonHeightSourceDuplication",
-        &[
-            (
-                "Notes renderer host band",
-                format!(
-                    "main_layout::HINT_STRIP_HEIGHT = {}",
-                    crate::window_resize::main_layout::HINT_STRIP_HEIGHT
-                ),
-            ),
-            (
-                "main window native host",
-                format!(
-                    "NATIVE_MAIN_WINDOW_FOOTER_HEIGHT = {}",
-                    crate::window_resize::main_layout::NATIVE_MAIN_WINDOW_FOOTER_HEIGHT
-                ),
-            ),
-        ],
-        "info",
-        "Notes derives its 32px button row from HINT_STRIP_HEIGHT while the \
-         exported shared --sk-footer-button-height derives from the main window's \
-         native footer host. The numbers coincide (both 36-hosted) but the \
-         provenance differs; Notes has NO native 36px footer host — its footer is \
-         an in-window GPUI strip (notes.footer.presentation).",
-    );
     b.conflict(
         "notesMarkdown.titleGlyphExtentsVsLineBox",
         &[

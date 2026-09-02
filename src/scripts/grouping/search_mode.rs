@@ -6,6 +6,9 @@ use crate::fallbacks::collector::collect_fallbacks;
 use crate::frecency::FrecencyStore;
 use crate::list_item::GroupedListItem;
 
+use super::super::command_contract::{
+    record_main_menu_ranking_sections, MainMenuRankingEvidence, MainMenuRankingEvidenceMap,
+};
 use super::super::types::{FallbackMatch, Script, SearchResult};
 use super::{MAX_MENU_BAR_ITEMS, MIN_MENU_BAR_SCORE};
 
@@ -17,6 +20,7 @@ pub(super) fn build_search_mode_results(
     preferred_result_key: Option<&str>,
     launcher_context: Option<&crate::context_snapshot::launcher_context::LauncherContextSnapshot>,
     suppress_fallbacks: bool,
+    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) -> (Vec<GroupedListItem>, Vec<SearchResult>) {
     // Apply frecency boost: recently/frequently used items get a score bonus.
     // This is how modern launchers (Raycast, Alfred, Spotlight) work.
@@ -78,12 +82,17 @@ pub(super) fn build_search_mode_results(
         let effective_preferred_result_key =
             reserved_builtin_key.as_deref().or(preferred_result_key);
 
+        let stable_keys: Vec<_> = results
+            .iter()
+            .map(SearchResult::stable_selection_key)
+            .collect();
         // Pre-compute boosted score for every result
         let boosted: Vec<i32> = results
             .iter()
-            .map(|result| {
-                let frecency_bonus = if let Some(path) = get_path(result) {
-                    let score = frecency_store.get_score(&path);
+            .enumerate()
+            .map(|(index, result)| {
+                let frecency_score = get_path(result).map(|path| frecency_store.get_score(&path));
+                let frecency_bonus = if let Some(score) = frecency_score {
                     if score > 0.0 {
                         // Scale frecency (typically 0-100+) via log so very high values
                         // don't dominate. At least 1 point bonus for any frecency > 0.
@@ -107,6 +116,18 @@ pub(super) fn build_search_mode_results(
                         )
                     })
                     .unwrap_or(0);
+                if let (Some(ranking), Some(key)) = (ranking.as_deref_mut(), &stable_keys[index]) {
+                    let mut facts = MainMenuRankingEvidence::active(result);
+                    facts.frecency_score = frecency_score;
+                    facts.frecency_boost = Some(frecency_bonus);
+                    facts.exact_query_boost = Some(exact_query_bonus);
+                    facts.context_boost = Some(context_bonus);
+                    if let Some(evidence) = &mut facts.match_evidence {
+                        evidence.frecency_boost = frecency_bonus;
+                        evidence.context_boost = context_bonus;
+                    }
+                    ranking.insert(key.clone(), facts);
+                }
                 result
                     .score()
                     .saturating_add(frecency_bonus)
@@ -131,6 +152,7 @@ pub(super) fn build_search_mode_results(
                         .cmp(&crate::scripts::search::result_type_order(&results[b]))
                 })
                 .then_with(|| results[a].name().cmp(results[b].name()))
+                .then_with(|| stable_keys[a].cmp(&stable_keys[b]))
         });
 
         // Re-order results according to boosted sort
@@ -220,6 +242,29 @@ pub(super) fn build_search_mode_results(
         "Search mode: returning list with menu bar and fallback sections"
     );
 
+    record_main_menu_ranking_sections(ranking.as_deref_mut(), &grouped, &results);
+    if let Some(ranking) = ranking {
+        for row in &grouped {
+            if let GroupedListItem::Item(index) = row {
+                let result = &results[*index];
+                if let Some(key) = result.stable_selection_key() {
+                    let facts = ranking.entry(key).or_default();
+                    match result {
+                        SearchResult::BuiltIn(item)
+                            if item.entry.group == BuiltInGroup::MenuBar =>
+                        {
+                            facts.budget_limit = Some(MAX_MENU_BAR_ITEMS);
+                            facts.admitted_count = Some(menu_bar_count);
+                        }
+                        SearchResult::Fallback(_) if fallbacks_elevated => {
+                            facts.pin_reason = Some("fallback-only-results")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     (grouped, results)
 }
 
@@ -244,6 +289,84 @@ fn reserved_exact_builtin_preferred_result_key(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn committed_ranking_facts_record_real_boosts_not_observer_defaults() {
+        let result = app("Editor", score_from_tier(900, 2));
+        let key = result.stable_selection_key().unwrap();
+        let mut store = FrecencyStore::new();
+        store.record_use_at("/Applications/Editor.app", u64::MAX);
+        let mut evidence = crate::scripts::command_contract::MainMenuRankingEvidenceMap::new();
+        let (_, results) = build_search_mode_results(
+            vec![result],
+            &[],
+            &store,
+            "Editor",
+            Some("app/editor"),
+            None,
+            true,
+            Some(&mut evidence),
+        );
+        assert_eq!(results.len(), 1);
+        let facts = &evidence[&key];
+        assert_eq!(facts.frecency_score, Some(1.0));
+        assert_eq!(facts.frecency_boost, Some(1));
+        assert_eq!(facts.exact_query_boost, Some(500));
+        assert_eq!(facts.context_boost, Some(0));
+        assert_eq!(facts.score, Some(score_from_tier(900, 2)));
+        assert_eq!(facts.tier, Some(900));
+        assert_eq!(facts.provider_score, None);
+        assert_eq!(facts.section.as_deref(), Some("Results"));
+    }
+
+    #[test]
+    fn boosted_ties_are_deterministic_but_query_preference_and_tiers_still_win() {
+        let mut first = app("Editor", score_from_tier(900, 0));
+        let mut second = first.clone();
+        let SearchResult::App(item) = &mut first else {
+            unreachable!()
+        };
+        item.app.path = "/Applications/A/Editor.app".into();
+        item.app.bundle_id = Some("com.example.a".into());
+        let SearchResult::App(item) = &mut second else {
+            unreachable!()
+        };
+        item.app.path = "/Applications/B/Editor.app".into();
+        item.app.bundle_id = Some("com.example.b".into());
+        let weak = app("Weak", score_from_tier(100, 0));
+        let entries = [first, second, weak];
+        let mut expected_ties = entries[..2]
+            .iter()
+            .map(|row| row.stable_selection_key().unwrap())
+            .collect::<Vec<_>>();
+        expected_ties.sort();
+        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2], [2, 0, 1]] {
+            for preferred in [None, Some("app/com.example.b"), Some("app/weak")] {
+                let input = order.into_iter().map(|i| entries[i].clone()).collect();
+                let (_, results) = build_search_mode_results(
+                    input,
+                    &[],
+                    &FrecencyStore::new(),
+                    "Editor",
+                    preferred,
+                    None,
+                    true,
+                    None,
+                );
+                let keys = results
+                    .iter()
+                    .map(|row| row.stable_selection_key().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(results[2].name(), "Weak");
+                if preferred == Some("app/com.example.b") {
+                    assert_eq!(keys[0], entries[1].stable_selection_key().unwrap());
+                } else {
+                    assert_eq!(&keys[..2], expected_ties.as_slice());
+                }
+            }
+        }
+    }
+
     use std::path::PathBuf;
 
     use crate::app_launcher::AppInfo;
@@ -296,6 +419,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
 
         assert!(matches!(
@@ -316,6 +440,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         );
 
         assert!(
@@ -337,8 +462,16 @@ mod tests {
             builtin("Zed Command", BuiltInGroup::Core, score_from_tier(900, 10)),
         ];
 
-        let (_grouped, sorted_results) =
-            build_search_mode_results(results, &[], &FrecencyStore::new(), "z", None, None, true);
+        let (_grouped, sorted_results) = build_search_mode_results(
+            results,
+            &[],
+            &FrecencyStore::new(),
+            "z",
+            None,
+            None,
+            true,
+            None,
+        );
 
         assert_eq!(sorted_results[0].name(), "Zed Command");
         assert_eq!(sorted_results[1].name(), "Alpha");
@@ -363,6 +496,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
 
         let first_item = grouped
@@ -400,6 +534,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         );
 
         assert!(

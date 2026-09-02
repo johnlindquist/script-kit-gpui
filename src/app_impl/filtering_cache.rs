@@ -1,4 +1,8 @@
 use super::*;
+use crate::design_evaluation::search_fixtures::{
+    self as owned_search, ProviderTerminal as PassiveProviderTerminal,
+};
+use crate::scripts::main_menu_rows::INLINE_CALCULATOR_RESULT_INDEX;
 use crate::scripts::root_search_contract::{
     RootLocalContentOptions, RootLocalContentProvider, RootPrivateHistoryProvider,
 };
@@ -14,7 +18,6 @@ use rich_results::{
 };
 
 const INLINE_CALCULATOR_SECTION_LABEL: &str = "Calculator";
-const INLINE_CALCULATOR_RESULT_INDEX: usize = usize::MAX;
 const ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS: usize = 256;
 
 struct RootPassiveFrameOptions {
@@ -37,6 +40,20 @@ pub(super) fn root_passive_search_needle(query: &str) -> &str {
         .char_indices()
         .nth(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS)
         .map_or(query, |(byte_index, _)| &query[..byte_index])
+}
+
+async fn receive_root_passive_provider<T>(
+    receiver: std::sync::mpsc::Receiver<T>,
+    executor: &gpui::BackgroundExecutor,
+) -> std::result::Result<T, std::sync::mpsc::TryRecvError> {
+    loop {
+        match receiver.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                executor.timer(std::time::Duration::from_millis(16)).await;
+            }
+            terminal => return terminal,
+        }
+    }
 }
 
 fn timed_root_passive_source<T>(
@@ -64,95 +81,7 @@ fn timed_root_passive_source<T>(
     rows
 }
 
-fn grouped_selectable_bounds(
-    grouped_items: &[GroupedListItem],
-    flat_results: &[scripts::SearchResult],
-) -> (Option<usize>, Option<usize>) {
-    let mut first = None;
-    let mut last = None;
-    for (index, item) in grouped_items.iter().enumerate() {
-        let GroupedListItem::Item(flat_idx) = item else {
-            continue;
-        };
-        // SpineProjection rows carry their own is_selectable flag (Empty
-        // placeholders are non-selectable but pushed as Items so they render).
-        // Exclude them from selectable bounds so selectedIndex and
-        // visibleChoiceCount don't treat them as targets.
-        if let Some(scripts::SearchResult::SpineProjection(row)) = flat_results.get(*flat_idx) {
-            if !row.is_selectable {
-                continue;
-            }
-        }
-        if first.is_none() {
-            first = Some(index);
-        }
-        last = Some(index);
-    }
-    (first, last)
-}
-
-fn prepend_inline_calculator_group(
-    grouped_items: Vec<GroupedListItem>,
-    flat_results: Vec<scripts::SearchResult>,
-    calculator: Option<&crate::calculator::CalculatorInlineResult>,
-) -> (Vec<GroupedListItem>, Vec<scripts::SearchResult>) {
-    let Some(_calculator) = calculator else {
-        return (grouped_items, flat_results);
-    };
-
-    let mut merged_grouped_items = Vec::with_capacity(grouped_items.len() + 2);
-    merged_grouped_items.push(GroupedListItem::SectionHeader(
-        INLINE_CALCULATOR_SECTION_LABEL.to_string(),
-        None,
-    ));
-    merged_grouped_items.push(GroupedListItem::Item(INLINE_CALCULATOR_RESULT_INDEX));
-    merged_grouped_items.extend(grouped_items);
-
-    (merged_grouped_items, flat_results)
-}
-
-fn build_menu_syntax_trigger_picker_main_list_results(
-    snapshot: &crate::menu_syntax::TriggerPickerSnapshot,
-) -> (Vec<GroupedListItem>, Vec<scripts::SearchResult>) {
-    let section = snapshot.mode.main_list_section();
-    let mut grouped_items = Vec::with_capacity(snapshot.rows.len() + 1);
-    let mut flat_results = Vec::with_capacity(snapshot.rows.len());
-    grouped_items.push(GroupedListItem::SectionHeader(
-        section.0.to_string(),
-        Some(section.1.to_string()),
-    ));
-
-    for row in &snapshot.rows {
-        let flat_index = flat_results.len();
-        flat_results.push(scripts::SearchResult::SpineProjection(
-            crate::menu_syntax_trigger_picker::trigger_picker_row_to_main_list_row(row),
-        ));
-        grouped_items.push(GroupedListItem::Item(flat_index));
-    }
-
-    (grouped_items, flat_results)
-}
-
-fn build_menu_syntax_object_selector_main_list_results(
-    snapshot: &crate::menu_syntax::ObjectSelectorSnapshot,
-) -> (Vec<GroupedListItem>, Vec<scripts::SearchResult>) {
-    let mut grouped_items = Vec::with_capacity(snapshot.rows.len() + 1);
-    let mut flat_results = Vec::with_capacity(snapshot.rows.len());
-    grouped_items.push(GroupedListItem::SectionHeader(
-        "Objects".to_string(),
-        Some("at-sign".to_string()),
-    ));
-
-    for row in &snapshot.rows {
-        let flat_index = flat_results.len();
-        flat_results.push(scripts::SearchResult::SpineProjection(
-            crate::menu_syntax::object_selector_row_to_main_list_row(row),
-        ));
-        grouped_items.push(GroupedListItem::Item(flat_index));
-    }
-
-    (grouped_items, flat_results)
-}
+include!("filtering_cache_main_list_rows.rs");
 
 impl ScriptListApp {
     pub(crate) fn filter_text(&self) -> &str {
@@ -164,17 +93,12 @@ impl ScriptListApp {
         windows: Vec<crate::window_control::WindowInfo>,
         cx: &mut Context<Self>,
     ) {
-        let interaction_before = self.main_menu_interaction_snapshot();
-        self.cached_windows = windows;
-        self.root_search
-            .install_root_windows(&self.cached_windows, &self.apps);
-        self.invalidate_grouped_cache();
-        self.reconcile_script_list_after_results_refresh(
-            "root_windows_refresh_complete",
-            interaction_before,
-            cx,
-        );
-        cx.notify();
+        self.commit_main_menu_results_refresh("root_windows_install", None, cx, |app, _cx| {
+            app.cached_windows = windows;
+            app.root_search
+                .install_root_windows(&app.cached_windows, &app.apps);
+            true
+        });
     }
 
     pub(crate) fn rebuild_root_windows_after_app_icon_cache_update(
@@ -185,12 +109,23 @@ impl ScriptListApp {
         if self.cached_windows.is_empty() {
             return;
         }
+        self.commit_main_menu_results_refresh(reason, None, cx, |app, _cx| {
+            app.root_search
+                .rebuild_root_windows(&app.cached_windows, &app.apps);
+            true
+        });
+    }
 
-        let interaction_before = self.main_menu_interaction_snapshot();
-        self.root_search
-            .rebuild_root_windows(&self.cached_windows, &self.apps);
-        self.invalidate_grouped_cache();
-        self.reconcile_script_list_after_results_refresh(reason, interaction_before, cx);
+    pub(crate) fn refresh_root_windows_source(&mut self, cx: &mut Context<Self>) {
+        if !self.root_search.query_is_current() {
+            return;
+        }
+        self.root_search.invalidate_root_windows_source_snapshot();
+        if let Some(generation) = self.root_search.active_named_provider_generation("windows") {
+            self.root_search
+                .detach_named_provider_consumer("windows", generation);
+        }
+        self.maybe_start_root_windows_refresh_for_query(&self.computed_filter_text.clone(), cx);
     }
 
     pub(crate) fn maybe_start_root_windows_refresh_for_query(
@@ -198,64 +133,181 @@ impl ScriptListApp {
         query_text: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(advanced_query) = self.menu_syntax_mode.advanced_query_for(query_text) else {
-            return;
-        };
-        let windows_explicit = advanced_query
-            .source_filters
-            .includes(crate::menu_syntax::RootUnifiedSourceFilter::Windows)
-            && advanced_query
-                .source_filters
-                .allows(crate::menu_syntax::RootUnifiedSourceFilter::Windows);
-        if !windows_explicit || !self.root_search.root_windows_refresh_needed() {
+        if !self.root_search.query_is_current() || self.computed_filter_text != query_text {
             return;
         }
-
-        let token = self.root_search.begin_root_windows_refresh();
-        self.invalidate_grouped_cache();
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::window_control::list_windows() })
-                .await;
-
-            let _ = this.update(cx, |app, cx| {
-                if !app.root_search.root_windows_refresh_token_matches(token) {
+        let owned_gate = self.main_services.search_gate();
+        if !self.main_services.is_production() && owned_gate.is_none() {
+            return;
+        }
+        if !self.current_query_includes_root_source(
+            query_text,
+            crate::menu_syntax::RootUnifiedSourceFilter::Windows,
+        ) {
+            return;
+        }
+        if let Some(generation) = self.root_search.active_named_provider_generation("windows") {
+            if !self
+                .root_search
+                .accepts_named_provider("windows", generation)
+            {
+                self.root_search.note_desired_provider(
+                    "windows",
+                    "window-snapshot",
+                    "window-server",
+                    RootProviderPublicationPolicy::Visible,
+                );
+            }
+            return;
+        }
+        if !self.root_search.root_windows_refresh_needed() {
+            return;
+        }
+        let mut token = 0;
+        self.commit_main_menu_results_refresh(
+            "root_windows_refresh_started",
+            None,
+            cx,
+            |app, _cx| {
+                token = app.root_search.begin_root_windows_refresh();
+                app.root_search.begin_named_provider(
+                    "windows",
+                    token,
+                    "window-snapshot",
+                    "window-server",
+                    RootProviderPublicationPolicy::Visible,
+                    // Window discovery is a global snapshot, filtered only when rows commit.
+                    false,
+                );
+                true
+            },
+        );
+        let owned_run = if let Some(gate) = &owned_gate {
+            match gate.begin(
+                "windows",
+                query_text,
+                token,
+                RootProviderPublicationPolicy::Visible,
+            ) {
+                Some(run) => Some(Arc::new(run)),
+                None => {
+                    self.finish_root_windows_worker(
+                        token,
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "owned_windows_gate_unavailable",
+                        )
+                        .into()),
+                        None,
+                        cx,
+                    );
                     return;
                 }
-                match result {
-                    Ok(windows) => app.install_root_windows(windows, cx),
-                    Err(error) => {
-                        let interaction_before = app.main_menu_interaction_snapshot();
-                        let message = error.to_string();
-                        let lower = message.to_ascii_lowercase();
-                        let status =
-                            if lower.contains("accessibility") || lower.contains("permission") {
-                                crate::window_control::RootWindowsProviderStatus::PermissionRequired
-                            } else {
-                                crate::window_control::RootWindowsProviderStatus::ProviderError {
-                                    message: message
-                                        .lines()
-                                        .next()
-                                        .unwrap_or("unknown error")
-                                        .to_string(),
-                                }
-                            };
-                        app.root_search.fail_root_windows_refresh(status);
-                        app.invalidate_grouped_cache();
-                        app.reconcile_script_list_after_results_refresh(
-                            "root_windows_refresh_error",
-                            interaction_before,
-                            cx,
-                        );
-                        cx.notify();
-                    }
+            }
+        } else {
+            None
+        };
+        self.ensure_root_app_icons(cx);
+        let (tx, rx) = async_channel::bounded(1);
+        if let Some(run) = owned_run.clone() {
+            cx.background_executor()
+                .spawn(async move {
+                    run.deliver(
+                        move |result| tx.try_send(result),
+                        crate::design_evaluation::search_fixtures::window_result,
+                    )
+                    .await;
+                })
+                .detach();
+        } else {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = tx.try_send(crate::window_control::list_windows());
+                })
+                .detach();
+        }
+        cx.spawn(async move |this, cx| {
+            let result = match rx.recv().await {
+                Ok(result) => {
+                    result.map_err(super::root_file_search::MainSearchWorkerFailure::Source)
                 }
-            });
+                Err(_) => Err(super::root_file_search::MainSearchWorkerFailure::Disconnected),
+            };
+            if this
+                .update(cx, |app, cx| {
+                    app.finish_root_windows_worker(token, result, owned_run.as_deref(), cx)
+                })
+                .is_err()
+            {
+                if let Some(run) = owned_run.as_deref() {
+                    run.finish(
+                        crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
+            }
         })
         .detach();
+    }
+
+    fn finish_root_windows_worker(
+        &mut self,
+        token: u64,
+        result: super::root_file_search::MainSearchWorkerResult<crate::window_control::WindowInfo>,
+        owned_run: Option<&crate::design_evaluation::search_fixtures::SearchRun>,
+        cx: &mut Context<Self>,
+    ) {
+        let accepted = self.root_search.accepts_named_provider("windows", token)
+            && self.root_search.root_windows_refresh_token_matches(token);
+        if let Some(run) = owned_run {
+            run.finish(
+                if accepted {
+                    super::root_file_search::main_search_fixture_terminal(&result)
+                } else {
+                    crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded
+                },
+                RootProviderPublicationPolicy::Visible,
+            );
+        }
+        if !self
+            .root_search
+            .named_provider_work_is_current("windows", token)
+        {
+            return;
+        }
+        let terminal = super::root_file_search::main_search_worker_terminal(&result);
+        if accepted {
+            self.commit_main_menu_results_refresh("root_windows_refresh_complete", Some(("windows", token)), cx, |app, _cx| {
+                app.root_search.finish_named_provider("windows", token, terminal);
+                match result {
+                    Ok(windows) => {
+                        app.cached_windows = windows;
+                        app.root_search.install_root_windows(&app.cached_windows, &app.apps);
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let permission_denied = matches!(&error, super::root_file_search::MainSearchWorkerFailure::Source(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied));
+                        let status = if permission_denied {
+                            crate::window_control::RootWindowsProviderStatus::PermissionRequired
+                        } else {
+                            crate::window_control::RootWindowsProviderStatus::ProviderError { message: message.lines().next().unwrap_or("unknown error").to_owned() }
+                        };
+                        app.root_search.fail_root_windows_refresh(status);
+                    }
+                }
+                true
+            });
+        } else {
+            self.root_search.finish_named_provider(
+                "windows",
+                token,
+                RootProviderTerminal::StaleDiscarded,
+            );
+            self.root_search.discard_root_windows_refresh(token);
+        }
+        if self.root_search.take_named_provider_desired("windows") {
+            self.refresh_root_windows_source(cx);
+        }
     }
 
     pub(crate) fn current_query_includes_root_source(
@@ -275,6 +327,173 @@ impl ScriptListApp {
         self.root_search.clear_root_passive_frame();
         self.invalidate_grouped_cache();
         self.invalidate_main_window_preflight();
+    }
+
+    fn record_root_passive_provider_terminal(
+        &mut self,
+        request: &sk_protocol::search_contract::ProviderRequest,
+        owned_run: Option<&owned_search::SearchRun>,
+        terminal: PassiveProviderTerminal,
+    ) -> bool {
+        let changed = self
+            .root_search
+            .finish_provider_request(request, terminal.into());
+        if let Some(run) = owned_run {
+            run.finish(terminal, RootProviderPublicationPolicy::Visible);
+        }
+        changed
+    }
+
+    /// Called only inside the accepted source publication transaction.
+    fn apply_root_passive_provider_completion(
+        &mut self,
+        request: &sk_protocol::search_contract::ProviderRequest,
+        owned_run: Option<&owned_search::SearchRun>,
+        terminal: PassiveProviderTerminal,
+        source_changed: bool,
+    ) -> bool {
+        let terminal =
+            if !source_changed && matches!(terminal, PassiveProviderTerminal::Completed { .. }) {
+                PassiveProviderTerminal::StaleDiscarded
+            } else {
+                terminal
+            };
+        let terminal_changed =
+            self.record_root_passive_provider_terminal(request, owned_run, terminal);
+        let observable_changed = source_changed
+            || (terminal_changed && terminal != PassiveProviderTerminal::StaleDiscarded);
+        if observable_changed {
+            self.invalidate_root_passive_and_grouped_cache();
+        }
+        observable_changed
+    }
+
+    /// A cache alternative to new provider admission. This neither attaches an
+    /// old worker to the query nor consumes demand or starts source work.
+    pub(crate) fn owned_search_source_cache_readiness(
+        &self,
+        source: &str,
+    ) -> Option<crate::root_search_store::RootSearchSourceCacheReadiness<'_>> {
+        if !crate::runtime_policy::is_owned_evaluation()
+            || !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || self.filter_text != self.computed_filter_text
+            || self.main_menu_committed_query_stamp() != Some(self.root_search.query_stamp())
+        {
+            return None;
+        }
+        match source {
+            "tabs" => {
+                if self.root_search.named_provider_in_flight(source) {
+                    return None;
+                }
+                let (options, _) =
+                    self.root_browser_tabs_refresh_options_for_query(&self.computed_filter_text)?;
+                let cache = crate::browser_tabs::root_browser_tabs_fresh_cache_status(
+                    options.cache_ttl_ms,
+                )?;
+                Some(crate::root_search_store::RootSearchSourceCacheReadiness {
+                    query: self.root_search.query_stamp(),
+                    identity: "browser-tabs-snapshot",
+                    generation: Some(cache.generation),
+                    row_count: cache.cached_count,
+                })
+            }
+            "files" | "directory" => self.owned_root_file_cache_readiness(source),
+            "history" | "notes" | "todos" | "clipboard" | "dictation" | "conversations"
+            | "windows" => {
+                if self.root_search.named_provider_in_flight(source) {
+                    return None;
+                }
+                let query = &self.computed_filter_text;
+                let (identity, (generation, row_count)) = match source {
+                    "history" => {
+                        let (options, _) =
+                            self.root_browser_history_refresh_options_for_query(query)?;
+                        let cache =
+                            crate::browser_history::root_browser_history_fresh_cache_status(
+                                options.cache_ttl_ms,
+                            )?;
+                        (
+                            "browser-history-snapshot",
+                            (cache.generation, cache.cached_count),
+                        )
+                    }
+                    "notes" => {
+                        let (needle, RootLocalContentOptions::Notes(options)) = self
+                            .root_local_content_refresh_options_for_query(
+                                RootLocalContentProvider::Notes,
+                                query,
+                            )?
+                        else {
+                            return None;
+                        };
+                        (
+                            "notes-query-cache",
+                            crate::notes::root_notes_search_fresh_cache_status(&needle, options)?,
+                        )
+                    }
+                    "todos" => {
+                        self.root_local_content_refresh_options_for_query(
+                            RootLocalContentProvider::Todos,
+                            query,
+                        )?;
+                        (
+                            "todos-snapshot",
+                            crate::menu_syntax::root_todos_fresh_cache_status()?,
+                        )
+                    }
+                    "clipboard" => {
+                        if !self.root_private_history_provider_is_eligible(
+                            RootPrivateHistoryProvider::Clipboard,
+                            query,
+                        ) {
+                            return None;
+                        }
+                        (
+                            "clipboard-history-snapshot",
+                            crate::clipboard_history::root_clipboard_history_fresh_cache_status()?,
+                        )
+                    }
+                    "dictation" => {
+                        if !self.root_private_history_provider_is_eligible(
+                            RootPrivateHistoryProvider::Dictation,
+                            query,
+                        ) {
+                            return None;
+                        }
+                        (
+                            "dictation-history-snapshot",
+                            crate::dictation::root_dictation_history_fresh_cache_status()?,
+                        )
+                    }
+                    "conversations" => {
+                        self.root_agent_chat_history_refresh_options_for_query(query)?;
+                        ("conversation-history-snapshot", crate::ai::agent_chat::ui::history::root_agent_chat_history_fresh_cache_status()?)
+                    }
+                    "windows" => {
+                        if !self.current_query_includes_root_source(
+                            query,
+                            crate::menu_syntax::RootUnifiedSourceFilter::Windows,
+                        ) {
+                            return None;
+                        }
+                        (
+                            "window-snapshot",
+                            self.root_search.root_windows_fresh_cache_status()?,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                Some(crate::root_search_store::RootSearchSourceCacheReadiness {
+                    query: self.root_search.query_stamp(),
+                    identity,
+                    generation: Some(generation),
+                    row_count,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn root_browser_tabs_refresh_options_for_query(
@@ -326,100 +545,155 @@ impl ScriptListApp {
         Some((options, false))
     }
 
-    fn current_query_can_show_root_browser_tabs(&self, query_text: &str) -> bool {
-        self.root_browser_tabs_refresh_options_for_query(query_text)
-            .is_some()
-    }
-
     pub(crate) fn maybe_start_root_browser_tabs_refresh_for_query(
         &mut self,
         query_text: &str,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || query_text != self.computed_filter_text.as_str()
+        {
+            return;
+        }
+        let owned_gate = self.main_services.search_gate();
+        if !self.main_services.is_production() && owned_gate.is_none() {
+            return;
+        }
+        let source = sk_protocol::command_contract::CommandSource::BrowserTab;
         let Some((options, explicit_tabs)) =
             self.root_browser_tabs_refresh_options_for_query(query_text)
         else {
-            self.root_search.invalidate_provider_request(
-                sk_protocol::command_contract::CommandSource::BrowserTab,
-            );
+            self.root_search.invalidate_provider_request(source);
             return;
         };
-
         let providers = options.providers.clone();
         let reason = if explicit_tabs {
             "explicit_tabs_query"
         } else {
             "implicit_tabs_query"
         };
+        self.root_search.note_desired_request(source, query_text);
         let refresh = crate::browser_tabs::try_begin_root_browser_tabs_refresh(
             options.cache_ttl_ms,
             providers.len(),
             reason,
         );
         if explicit_tabs {
-            // Explicit `tabs:` queries get the braille loading treatment.
-            // Runs whether or not THIS call began the refresh: `None` with a
-            // refresh already in flight (e.g. an implicit warm started it)
-            // must still attach the animation; `None` with a fresh cache is
-            // a no-op inside the helper.
             self.ensure_main_list_loading_animation(cx);
         }
         let Some(refresh) = refresh else {
             return;
         };
-
-        let provider_request = self.root_search.begin_provider_request(
-            sk_protocol::command_contract::CommandSource::BrowserTab,
-            query_text,
-        );
-
+        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        let source_name = "tabs";
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                source_name,
+                query_text,
+                provider_request.generation,
+                RootProviderPublicationPolicy::Visible,
+            ) else {
+                crate::browser_tabs::discard_root_browser_tabs_refresh(refresh);
+                self.root_search
+                    .finish_provider_request(&provider_request, RootProviderTerminal::Cancelled);
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
         self.invalidate_root_passive_and_grouped_cache();
         cx.notify();
 
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owned_sender = if owned_run.is_some() {
+            Some(tx)
+        } else {
+            cx.background_executor()
+                .spawn(async move {
+                    let result = crate::browser_tabs::refresh_root_browser_tabs_snapshot(providers);
+                    let _ = tx.send(result);
+                })
+                .detach();
+            None
+        };
         cx.spawn(async move |this, cx| {
-            let result =
-                cx.background_executor()
-                    .spawn(async move {
-                        crate::browser_tabs::refresh_root_browser_tabs_snapshot(providers)
-                    })
-                    .await;
-
-            let _ = this.update(cx, |app, cx| {
-                if !app
-                    .root_search
-                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+            if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
+                run.deliver(
+                    move |snapshot| tx.send(snapshot),
+                    |outcome, run| owned_search::tab_result(outcome, run),
+                )
+                .await;
+            }
+            let received = receive_root_passive_provider(rx, cx.background_executor()).await;
+            let terminal = match &received {
+                Ok(Ok(snapshot)) => PassiveProviderTerminal::Completed {
+                    count: snapshot.len(),
+                },
+                Ok(Err(error)) => PassiveProviderTerminal::for_error(error),
+                Err(_) => PassiveProviderTerminal::Disconnected,
+            };
+            let updated = this.update(cx, |app, cx| {
+                let released = if !matches!(app.current_view, AppView::ScriptList)
+                    || !app
+                        .root_search
+                        .accepts_provider_request(&provider_request, &app.computed_filter_text)
                 {
-                    let canceled = crate::browser_tabs::discard_root_browser_tabs_refresh(refresh);
-                    tracing::debug!(
-                        target: "script_kit::search",
-                        source = "browser-tabs",
-                        generation = provider_request.generation,
-                        "Dropped stale provider completion before snapshot or favicon publication"
+                    let released = crate::browser_tabs::discard_root_browser_tabs_refresh(refresh);
+                    app.record_root_passive_provider_terminal(
+                        &provider_request,
+                        owned_run.as_ref(),
+                        PassiveProviderTerminal::StaleDiscarded,
                     );
-                    if canceled {
-                        let query_text = app.computed_filter_text.clone();
+                    released
+                } else {
+                    let mut released = false;
+                    app.commit_main_menu_results_refresh(
+                        "browser_tabs_refresh_complete",
+                        Some((source_name, provider_request.generation)),
+                        cx,
+                        |app, _cx| {
+                            let source_changed = match received {
+                                Ok(result) => {
+                                    released = true;
+                                    crate::browser_tabs::finish_root_browser_tabs_refresh(
+                                        refresh, result,
+                                    )
+                                }
+                                Err(_) => {
+                                    released =
+                                        crate::browser_tabs::discard_root_browser_tabs_refresh(
+                                            refresh,
+                                        );
+                                    false
+                                }
+                            };
+                            app.apply_root_passive_provider_completion(
+                                &provider_request,
+                                owned_run.as_ref(),
+                                terminal,
+                                source_changed,
+                            )
+                        },
+                    );
+                    released
+                };
+                if released {
+                    if let Some(query_text) = app.root_search.take_desired_provider_query(source) {
                         app.maybe_start_root_browser_tabs_refresh_for_query(&query_text, cx);
                     }
-                    return;
                 }
-                let changed =
-                    crate::browser_tabs::finish_root_browser_tabs_refresh(refresh, result);
-                if !changed {
-                    return;
-                }
-                let interaction_before = app.main_menu_interaction_snapshot();
-                app.invalidate_root_passive_and_grouped_cache();
-                if app.current_query_can_show_root_browser_tabs(&app.computed_filter_text) {
-                    app.reconcile_script_list_after_results_refresh(
-                        "browser_tabs_refresh_complete",
-                        interaction_before,
-                        cx,
-                    );
-                } else {
-                    app.rebuild_main_window_preflight_if_needed();
-                }
-                cx.notify();
             });
+            if updated.is_err() {
+                crate::browser_tabs::discard_root_browser_tabs_refresh(refresh);
+                if let Some(run) = &owned_run {
+                    run.finish(
+                        PassiveProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
+            }
         })
         .detach();
     }
@@ -491,16 +765,21 @@ impl ScriptListApp {
         query_text: &str,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || query_text != self.computed_filter_text.as_str()
+        {
+            return;
+        }
+        let owned_gate = self.main_services.search_gate();
+        if !self.main_services.is_production() && owned_gate.is_none() {
+            return;
+        }
+        let source = sk_protocol::command_contract::CommandSource::BrowserHistory;
         let Some((options, explicit_history)) =
             self.root_browser_history_refresh_options_for_query(query_text)
         else {
-            self.root_search.invalidate_provider_request(
-                sk_protocol::command_contract::CommandSource::BrowserHistory,
-            );
-            return;
-        };
-
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            self.root_search.invalidate_provider_request(source);
             return;
         };
         let reason = if explicit_history {
@@ -508,92 +787,121 @@ impl ScriptListApp {
         } else {
             "implicit_history_query"
         };
+        self.root_search.note_desired_request(source, query_text);
         let refresh =
             crate::browser_history::try_begin_root_browser_history_refresh(&options, reason);
         if explicit_history {
-            // Mirror of the tabs wiring: explicit `history:` queries attach
-            // the loading treatment even when the refresh was already begun
-            // elsewhere; a fresh cache leaves this a no-op.
             self.ensure_main_list_loading_animation(cx);
         }
         let Some(refresh) = refresh else {
             return;
         };
-
-        let provider_request = self.root_search.begin_provider_request(
-            sk_protocol::command_contract::CommandSource::BrowserHistory,
-            query_text,
-        );
-
+        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        let source_name = "history";
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                source_name,
+                query_text,
+                provider_request.generation,
+                RootProviderPublicationPolicy::Visible,
+            ) else {
+                crate::browser_history::discard_root_browser_history_refresh(refresh);
+                self.root_search
+                    .finish_provider_request(&provider_request, RootProviderTerminal::Cancelled);
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
         self.invalidate_root_passive_and_grouped_cache();
         cx.notify();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = crate::browser_history::refresh_root_browser_history_snapshot_from_home(
-                &home, &options,
-            );
-            let _ = tx.send(result);
-        });
-
+        let owned_sender = if owned_run.is_some() {
+            Some(tx)
+        } else {
+            std::thread::spawn(move || {
+                let result = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow::Error::from(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "browser_history_home_unavailable",
+                        ))
+                    })
+                    .and_then(|home| {
+                        crate::browser_history::refresh_root_browser_history_snapshot_from_home(
+                            &home, &options,
+                        )
+                    });
+                let _ = tx.send(result);
+            });
+            None
+        };
         cx.spawn(async move |this, cx| {
-            let result = loop {
-                match rx.try_recv() {
-                    Ok(result) => break result,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(16))
-                            .await;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        break Err(anyhow::anyhow!(
-                            "browser history refresh worker disconnected"
-                        ));
-                    }
-                }
+            if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
+                run.deliver(
+                    move |snapshot| tx.send(snapshot),
+                    |outcome, run| owned_search::history_result(outcome, run),
+                ).await;
+            }
+            let received = receive_root_passive_provider(rx, cx.background_executor()).await;
+            let terminal = match &received {
+                Ok(Ok(snapshot)) => PassiveProviderTerminal::Completed { count: snapshot.len() },
+                Ok(Err(error)) => PassiveProviderTerminal::for_error(error),
+                Err(_) => PassiveProviderTerminal::Disconnected,
             };
-
-            let _ = this.update(cx, |app, cx| {
-                if !app
-                    .root_search
-                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+            let updated = this.update(cx, |app, cx| {
+                let released = if !matches!(app.current_view, AppView::ScriptList)
+                    || !app.root_search.accepts_provider_request(&provider_request, &app.computed_filter_text)
                 {
-                    let canceled =
-                        crate::browser_history::discard_root_browser_history_refresh(refresh);
-                    tracing::debug!(
-                        target: "script_kit::search",
-                        source = "browser-history",
-                        generation = provider_request.generation,
-                        "Dropped stale provider completion before snapshot or favicon publication"
+                    let released = crate::browser_history::discard_root_browser_history_refresh(refresh);
+                    app.record_root_passive_provider_terminal(
+                        &provider_request,
+                        owned_run.as_ref(),
+                        PassiveProviderTerminal::StaleDiscarded,
                     );
-                    if canceled {
-                        let query_text = app.computed_filter_text.clone();
+                    released
+                } else {
+                    let mut released = false;
+                    app.commit_main_menu_results_refresh(
+                        "browser_history_refresh_complete",
+                        Some((source_name, provider_request.generation)),
+                        cx,
+                        |app, _cx| {
+                            let source_changed = match received {
+                                Ok(result) => {
+                                    released = true;
+                                    crate::browser_history::finish_root_browser_history_refresh(refresh, result)
+                                }
+                                Err(_) => {
+                                    released = crate::browser_history::discard_root_browser_history_refresh(refresh);
+                                    false
+                                }
+                            };
+                            app.apply_root_passive_provider_completion(
+                                &provider_request,
+                                owned_run.as_ref(),
+                                terminal,
+                                source_changed,
+                            )
+                        },
+                    );
+                    released
+                };
+                if released {
+                    if let Some(query_text) = app.root_search.take_desired_provider_query(source) {
                         app.maybe_start_root_browser_history_refresh_for_query(&query_text, cx);
                     }
-                    return;
                 }
-                let changed =
-                    crate::browser_history::finish_root_browser_history_refresh(refresh, result);
-                if !changed {
-                    return;
-                }
-                let interaction_before = app.main_menu_interaction_snapshot();
-                app.invalidate_root_passive_and_grouped_cache();
-                let query_text = app.computed_filter_text.clone();
-                if app
-                    .root_browser_history_refresh_options_for_query(&query_text)
-                    .is_some()
-                {
-                    app.reconcile_script_list_after_results_refresh(
-                        "browser_history_refresh_complete",
-                        interaction_before,
-                        cx,
-                    );
-                } else {
-                    app.rebuild_main_window_preflight_if_needed();
-                }
-                cx.notify();
             });
+            if updated.is_err() {
+                crate::browser_history::discard_root_browser_history_refresh(refresh);
+                if let Some(run) = &owned_run {
+                    run.finish(PassiveProviderTerminal::StaleDiscarded, RootProviderPublicationPolicy::Visible);
+                }
+            }
         })
         .detach();
     }
@@ -666,79 +974,151 @@ impl ScriptListApp {
         query_text: &str,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || query_text != self.computed_filter_text.as_str()
+        {
+            return;
+        }
+        let owned_gate = self.main_services.search_gate();
+        if !self.main_services.is_production() && owned_gate.is_none() {
+            return;
+        }
+        let source = provider.source();
         let Some((needle, options)) =
             self.root_local_content_refresh_options_for_query(provider, query_text)
         else {
-            self.root_search
-                .invalidate_provider_request(provider.source());
+            self.root_search.invalidate_provider_request(source);
             return;
         };
         if provider.cache_is_fresh(&needle, options) {
             return;
         }
-
-        let provider_request = self
-            .root_search
-            .begin_provider_request(provider.source(), query_text);
+        self.root_search.note_desired_request(source, query_text);
         let Some(refresh) = provider.begin(&needle, options) else {
             return;
         };
-
+        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        let source_name = match provider {
+            RootLocalContentProvider::Notes => "notes",
+            RootLocalContentProvider::Todos => "todos",
+        };
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                source_name,
+                query_text,
+                provider_request.generation,
+                RootProviderPublicationPolicy::Visible,
+            ) else {
+                provider.discard(&refresh);
+                self.root_search
+                    .finish_provider_request(&provider_request, RootProviderTerminal::Cancelled);
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
         self.invalidate_root_passive_and_grouped_cache();
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owned_sender = if owned_run.is_some() {
+            Some(tx)
+        } else {
             let worker_refresh = refresh.clone();
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move { provider.read_snapshot(&worker_refresh) })
+            cx.background_executor()
+                .spawn(async move {
+                    let snapshot = provider.read_snapshot(&worker_refresh).ok_or_else(|| {
+                        anyhow::Error::from(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "root_local_content_snapshot_owner_mismatch",
+                        ))
+                    });
+                    let _ = tx.send(snapshot);
+                })
+                .detach();
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
+                run.deliver(
+                    move |snapshot| tx.send(snapshot),
+                    |outcome, run| owned_search::local_snapshot(&refresh, outcome, run),
+                )
                 .await;
-
+            }
+            let received = receive_root_passive_provider(rx, cx.background_executor()).await;
+            let terminal = match &received {
+                Ok(Ok(snapshot)) => match snapshot {
+                    crate::scripts::root_search_contract::RootLocalContentSnapshot::Notes(
+                        snapshot,
+                    ) => PassiveProviderTerminal::for_read_outcome(snapshot.read_outcome()),
+                    crate::scripts::root_search_contract::RootLocalContentSnapshot::Todos(
+                        snapshot,
+                    ) => PassiveProviderTerminal::for_read_outcome(snapshot.read_outcome()),
+                },
+                Ok(Err(error)) => PassiveProviderTerminal::for_error(error),
+                Err(_) => PassiveProviderTerminal::Disconnected,
+            };
             let updated = this.update(cx, |app, cx| {
-                if !app
-                    .root_search
-                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                let released = if !matches!(app.current_view, AppView::ScriptList)
+                    || !app
+                        .root_search
+                        .accepts_provider_request(&provider_request, &app.computed_filter_text)
                 {
                     let released = provider.discard(&refresh);
-                    tracing::debug!(
-                        target: "script_kit::search",
-                        source = provider.source().prefix(),
-                        generation = provider_request.generation,
-                        "Dropped stale local content completion before snapshot publication"
+                    app.record_root_passive_provider_terminal(
+                        &provider_request,
+                        owned_run.as_ref(),
+                        PassiveProviderTerminal::StaleDiscarded,
                     );
-                    if released {
-                        let query_text = app.computed_filter_text.clone();
+                    released
+                } else {
+                    let mut released = false;
+                    app.commit_main_menu_results_refresh(
+                        provider.completion_reason(),
+                        Some((source_name, provider_request.generation)),
+                        cx,
+                        |app, _cx| {
+                            let source_changed = match received {
+                                Ok(Ok(snapshot)) => {
+                                    released = true;
+                                    provider.finish(refresh.clone(), snapshot)
+                                }
+                                Ok(Err(_)) | Err(_) => {
+                                    released = provider.discard(&refresh);
+                                    false
+                                }
+                            };
+                            app.apply_root_passive_provider_completion(
+                                &provider_request,
+                                owned_run.as_ref(),
+                                terminal,
+                                source_changed,
+                            )
+                        },
+                    );
+                    released
+                };
+                if released {
+                    if let Some(query_text) = app.root_search.take_desired_provider_query(source) {
                         app.maybe_start_root_local_content_refresh_for_query(
                             provider,
                             &query_text,
                             cx,
                         );
                     }
-                    return;
                 }
-
-                let Some(snapshot) = snapshot else {
-                    provider.discard(&refresh);
-                    return;
-                };
-                if !provider.finish(refresh.clone(), snapshot) {
-                    provider.discard(&refresh);
-                    let query_text = app.computed_filter_text.clone();
-                    app.maybe_start_root_local_content_refresh_for_query(provider, &query_text, cx);
-                    return;
-                }
-
-                let interaction_before = app.main_menu_interaction_snapshot();
-                app.invalidate_root_passive_and_grouped_cache();
-                app.reconcile_script_list_after_results_refresh(
-                    provider.completion_reason(),
-                    interaction_before,
-                    cx,
-                );
-                cx.notify();
             });
             if updated.is_err() {
                 provider.discard(&refresh);
+                if let Some(run) = &owned_run {
+                    run.finish(
+                        PassiveProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
             }
         })
         .detach();
@@ -830,75 +1210,142 @@ impl ScriptListApp {
         query_text: &str,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || query_text != self.computed_filter_text.as_str()
+        {
+            return;
+        }
+        let owned_gate = self.main_services.search_gate();
+        if !self.main_services.is_production() && owned_gate.is_none() {
+            return;
+        }
+        let source = provider.source();
         if !self.root_private_history_provider_is_eligible(provider, query_text) {
-            self.root_search
-                .invalidate_provider_request(provider.source());
+            self.root_search.invalidate_provider_request(source);
             return;
         }
         if provider.cache_is_fresh() {
             return;
         }
-
-        let provider_request = self
-            .root_search
-            .begin_provider_request(provider.source(), query_text);
+        self.root_search.note_desired_request(source, query_text);
         let Some(refresh) = provider.begin() else {
             return;
         };
-
+        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        let source_name = match provider {
+            RootPrivateHistoryProvider::Clipboard => "clipboard",
+            RootPrivateHistoryProvider::Dictation => "dictation",
+        };
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                source_name,
+                query_text,
+                provider_request.generation,
+                RootProviderPublicationPolicy::Visible,
+            ) else {
+                provider.discard(refresh);
+                self.root_search
+                    .finish_provider_request(&provider_request, RootProviderTerminal::Cancelled);
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
         self.invalidate_root_passive_and_grouped_cache();
         cx.notify();
 
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owned_sender = if owned_run.is_some() {
+            Some(tx)
+        } else {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = tx.send(Ok(provider.read_snapshot()));
+                })
+                .detach();
+            None
+        };
         cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move { provider.read_snapshot() })
+            if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
+                run.deliver(
+                    move |snapshot| tx.send(snapshot),
+                    |outcome, run| owned_search::private_snapshot(provider, outcome, run),
+                )
                 .await;
-
+            }
+            let received = receive_root_passive_provider(rx, cx.background_executor()).await;
+            let terminal = match &received {
+                Ok(Ok(snapshot)) => match snapshot {
+                    crate::scripts::root_search_contract::RootPrivateHistorySnapshot::Clipboard(
+                        snapshot,
+                    ) => PassiveProviderTerminal::for_read_outcome(snapshot.read_outcome()),
+                    crate::scripts::root_search_contract::RootPrivateHistorySnapshot::Dictation(
+                        snapshot,
+                    ) => PassiveProviderTerminal::for_read_outcome(snapshot.read_outcome()),
+                },
+                Ok(Err(error)) => PassiveProviderTerminal::for_error(error),
+                Err(_) => PassiveProviderTerminal::Disconnected,
+            };
             let updated = this.update(cx, |app, cx| {
-                if !app
-                    .root_search
-                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                let released = if !matches!(app.current_view, AppView::ScriptList)
+                    || !app
+                        .root_search
+                        .accepts_provider_request(&provider_request, &app.computed_filter_text)
                 {
                     let released = provider.discard(refresh);
-                    tracing::debug!(
-                        target: "script_kit::search",
-                        source = provider.source().prefix(),
-                        generation = provider_request.generation,
-                        "Dropped stale private history completion before snapshot publication"
+                    app.record_root_passive_provider_terminal(
+                        &provider_request,
+                        owned_run.as_ref(),
+                        PassiveProviderTerminal::StaleDiscarded,
                     );
-                    if released {
-                        let query_text = app.computed_filter_text.clone();
+                    released
+                } else {
+                    let mut released = false;
+                    app.commit_main_menu_results_refresh(
+                        provider.completion_reason(),
+                        Some((source_name, provider_request.generation)),
+                        cx,
+                        |app, _cx| {
+                            let source_changed = match received {
+                                Ok(Ok(snapshot)) => {
+                                    released = true;
+                                    provider.finish(refresh, snapshot)
+                                }
+                                Ok(Err(_)) | Err(_) => {
+                                    released = provider.discard(refresh);
+                                    false
+                                }
+                            };
+                            app.apply_root_passive_provider_completion(
+                                &provider_request,
+                                owned_run.as_ref(),
+                                terminal,
+                                source_changed,
+                            )
+                        },
+                    );
+                    released
+                };
+                if released {
+                    if let Some(query_text) = app.root_search.take_desired_provider_query(source) {
                         app.maybe_start_root_private_history_refresh_for_query(
                             provider,
                             &query_text,
                             cx,
                         );
                     }
-                    return;
                 }
-
-                if !provider.finish(refresh, snapshot) {
-                    let query_text = app.computed_filter_text.clone();
-                    app.maybe_start_root_private_history_refresh_for_query(
-                        provider,
-                        &query_text,
-                        cx,
-                    );
-                    return;
-                }
-
-                let interaction_before = app.main_menu_interaction_snapshot();
-                app.invalidate_root_passive_and_grouped_cache();
-                app.reconcile_script_list_after_results_refresh(
-                    provider.completion_reason(),
-                    interaction_before,
-                    cx,
-                );
-                cx.notify();
             });
             if updated.is_err() {
                 provider.discard(refresh);
+                if let Some(run) = &owned_run {
+                    run.finish(
+                        PassiveProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
             }
         })
         .detach();
@@ -976,6 +1423,16 @@ impl ScriptListApp {
         query_text: &str,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || query_text != self.computed_filter_text.as_str()
+        {
+            return;
+        }
+        let owned_gate = self.main_services.search_gate();
+        if !self.main_services.is_production() && owned_gate.is_none() {
+            return;
+        }
         let source = sk_protocol::command_contract::CommandSource::Conversation;
         if self
             .root_agent_chat_history_refresh_options_for_query(query_text)
@@ -987,71 +1444,110 @@ impl ScriptListApp {
         if crate::ai::agent_chat::ui::history::root_agent_chat_history_cache_is_fresh() {
             return;
         }
-
-        // Record a newer query even if its predecessor still owns the only
-        // worker. The stale completion will release that worker and retry
-        // against the actual live query before any snapshot can be published.
-        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        self.root_search.note_desired_request(source, query_text);
         let Some(refresh) =
             crate::ai::agent_chat::ui::history::try_begin_root_agent_chat_history_refresh()
         else {
             return;
         };
-
-        self.invalidate_root_passive_and_grouped_cache();
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::ai::agent_chat::ui::history::read_root_agent_chat_history_snapshot()
-                })
-                .await;
-
-            let updated = this.update(cx, |app, cx| {
-                if !app
-                    .root_search
-                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
-                {
-                    let released =
-                        crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(
-                            refresh,
-                        );
-                    tracing::debug!(
-                        target: "script_kit::search",
-                        source = "agent-chat-history",
-                        generation = provider_request.generation,
-                        "Dropped stale conversation completion before snapshot publication"
-                    );
-                    if released {
-                        let query_text = app.computed_filter_text.clone();
-                        app.maybe_start_root_agent_chat_history_refresh_for_query(&query_text, cx);
-                    }
-                    return;
-                }
-
-                if !crate::ai::agent_chat::ui::history::finish_root_agent_chat_history_refresh(
-                    refresh, snapshot,
-                ) {
-                    let query_text = app.computed_filter_text.clone();
-                    app.maybe_start_root_agent_chat_history_refresh_for_query(&query_text, cx);
-                    return;
-                }
-
-                let interaction_before = app.main_menu_interaction_snapshot();
-                app.invalidate_root_passive_and_grouped_cache();
-                app.reconcile_script_list_after_results_refresh(
-                    "agent_chat_history_refresh_complete",
-                    interaction_before,
-                    cx,
-                );
-                cx.notify();
-            });
-            if updated.is_err() {
+        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        let source_name = "conversations";
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                source_name,
+                query_text,
+                provider_request.generation,
+                RootProviderPublicationPolicy::Visible,
+            ) else {
                 crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(
                     refresh,
                 );
+                self.root_search
+                    .finish_provider_request(&provider_request, RootProviderTerminal::Cancelled);
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
+        self.invalidate_root_passive_and_grouped_cache();
+        cx.notify();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owned_sender = if owned_run.is_some() {
+            Some(tx)
+        } else {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = tx.send(Ok(
+                        crate::ai::agent_chat::ui::history::read_root_agent_chat_history_snapshot(),
+                    ));
+                })
+                .detach();
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
+                run.deliver(
+                    move |snapshot| tx.send(snapshot),
+                    |outcome, run| owned_search::conversation_snapshot(outcome, run),
+                ).await;
+            }
+            let received = receive_root_passive_provider(rx, cx.background_executor()).await;
+            let terminal = match &received {
+                Ok(Ok(snapshot)) => PassiveProviderTerminal::for_read_outcome(snapshot.read_outcome()),
+                Ok(Err(error)) => PassiveProviderTerminal::for_error(error),
+                Err(_) => PassiveProviderTerminal::Disconnected,
+            };
+            let updated = this.update(cx, |app, cx| {
+                let released = if !matches!(app.current_view, AppView::ScriptList)
+                    || !app.root_search.accepts_provider_request(&provider_request, &app.computed_filter_text)
+                {
+                    let released = crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(refresh);
+                    app.record_root_passive_provider_terminal(
+                        &provider_request,
+                        owned_run.as_ref(),
+                        PassiveProviderTerminal::StaleDiscarded,
+                    );
+                    released
+                } else {
+                    let mut released = false;
+                    app.commit_main_menu_results_refresh(
+                        "agent_chat_history_refresh_complete",
+                        Some((source_name, provider_request.generation)),
+                        cx,
+                        |app, _cx| {
+                            let source_changed = match received {
+                                Ok(Ok(snapshot)) => {
+                                    released = true;
+                                    crate::ai::agent_chat::ui::history::finish_root_agent_chat_history_refresh(refresh, snapshot)
+                                }
+                                Ok(Err(_)) | Err(_) => {
+                                    released = crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(refresh);
+                                    false
+                                }
+                            };
+                            app.apply_root_passive_provider_completion(
+                                &provider_request,
+                                owned_run.as_ref(),
+                                terminal,
+                                source_changed,
+                            )
+                        },
+                    );
+                    released
+                };
+                if released {
+                    if let Some(query_text) = app.root_search.take_desired_provider_query(source) {
+                        app.maybe_start_root_agent_chat_history_refresh_for_query(&query_text, cx);
+                    }
+                }
+            });
+            if updated.is_err() {
+                crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(refresh);
+                if let Some(run) = &owned_run {
+                    run.finish(PassiveProviderTerminal::StaleDiscarded, RootProviderPublicationPolicy::Visible);
+                }
             }
         })
         .detach();
@@ -1084,7 +1580,7 @@ impl ScriptListApp {
             source_filters: source_filters.clone(),
             todo_options,
             brain_options,
-            brain_semantic_epoch: self.root_search.root_brain_semantic_epoch(),
+            brain_source_epoch: self.root_search.root_brain_source_epoch(),
             notes_options,
             clipboard_history_options,
             dictation_history_options,
@@ -1138,10 +1634,8 @@ impl ScriptListApp {
         let allow_browser_history =
             source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::BrowserHistory);
 
-        // Single shared eligibility decision for both brain passes (sync
-        // lexical here, async semantic in `root_brain_search.rs`) so the two
-        // can never drift. `RecentsOnly` covers the armed bare `brain:` case
-        // (audit F6): show the most recent memories instead of a blank panel.
+        // Eligibility is shared with the source-owner reads. Grouping consumes
+        // only accepted snapshots, including recents for an armed bare `brain:`.
         let brain_plan = crate::brain::root_brain_query_plan(
             search_needle,
             explicit_brain,
@@ -1149,9 +1643,8 @@ impl ScriptListApp {
             allow_brain,
             brain_options,
         );
-        // Prefer the async hybrid (semantic) batch when it was computed for
-        // exactly this query; the sync lexical pass below is the instant
-        // first paint while semantic results are still in flight.
+        // Preserve semantic preference for the exact current query; lexical is
+        // the committed first-paint snapshot while the semantic worker is pending.
         let brain_semantic_hits = match &brain_plan {
             crate::brain::RootBrainQueryPlan::Search(brain_query) => {
                 crate::brain::semantic_root_brain_hits_for_query(
@@ -1167,15 +1660,10 @@ impl ScriptListApp {
                 "brain",
                 search_needle,
                 explicit_brain,
-                || match &brain_plan {
+                || match brain_plan {
                     crate::brain::RootBrainQueryPlan::Skip => Vec::new(),
-                    crate::brain::RootBrainQueryPlan::RecentsOnly => {
-                        crate::brain::recent_root_brain_hits(brain_options.max_results)
-                    }
-                    crate::brain::RootBrainQueryPlan::Search(brain_query) => brain_semantic_hits
-                        .unwrap_or_else(|| {
-                            crate::brain::search_root_brain_direct(brain_query, &brain_options)
-                        }),
+                    _ => brain_semantic_hits
+                        .unwrap_or_else(|| self.root_search.root_brain_lexical_results().to_vec()),
                 },
             );
 
@@ -1269,7 +1757,8 @@ impl ScriptListApp {
 
         let ai_vault_hits =
             timed_root_passive_source("ai_vault", search_needle, explicit_ai_vault, || {
-                if explicit_ai_vault
+                if self.main_services.is_production()
+                    && explicit_ai_vault
                     && !advanced_query_active
                     && allow_ai_vault
                     && crate::ai_vault::root_ai_vault_query_is_eligible(
@@ -1292,7 +1781,7 @@ impl ScriptListApp {
                         browser_tabs_options.clone(),
                     )
                 {
-                    if explicit_browser_tabs {
+                    if self.main_services.is_production() && explicit_browser_tabs {
                         crate::browser_tabs::search_root_browser_tabs_meta_direct(
                             search_needle,
                             browser_tabs_options.clone(),
@@ -1320,7 +1809,7 @@ impl ScriptListApp {
                         browser_history_options.clone(),
                     )
                 {
-                    if explicit_browser_history {
+                    if self.main_services.is_production() && explicit_browser_history {
                         crate::browser_history::search_root_browser_history_meta_direct(
                             search_needle,
                             browser_history_options.clone(),
@@ -1522,6 +2011,9 @@ impl ScriptListApp {
     /// arrives after a render still surfaces on the next cache read, without
     /// a background-thread cx handle.
     fn sync_flow_roster_cache_generation(&mut self) {
+        if !self.main_services.is_production() {
+            return;
+        }
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEEN: AtomicU64 = AtomicU64::new(0);
         // Keep the roster fresh even when result caches stay hot: a cache
@@ -1672,72 +2164,51 @@ impl ScriptListApp {
         (grouped_items, filtered_results)
     }
 
-    /// P1: Get grouped results with caching - avoids recomputing 9+ times per keystroke
-    ///
-    /// This is the ONLY place that should call scripts::get_grouped_results().
-    /// P3: Cache is keyed off computed_filter_text (not filter_text) for two-stage filtering.
-    ///
-    /// P1-Arc: Returns Arc clones for cheap sharing with render closures.
+    /// Read the last committed rows. Observation never adopts source generations.
     pub(crate) fn get_grouped_results_cached(
-        &mut self,
+        &self,
     ) -> (Arc<[GroupedListItem]>, Arc<[scripts::SearchResult]>) {
-        self.sync_flow_roster_cache_generation();
-        // The grouped cache is keyed by `computed_filter_text`. Menu syntax is
-        // an ownership boundary, so never return stale grouped rows while the
-        // live input is owned by the trigger picker or capture composer.
-        let live_filter_text = self.filter_text.as_str();
-        let computed_filter_text = self.computed_filter_text.as_str();
-        let spine_owns_live_main_list =
-            self.spine_projection_owns_main_list() && self.spine_parse.input == live_filter_text;
-        let popup_owns_live_main_list = self.menu_syntax_object_selector_state.owns_main_list()
-            || self.menu_syntax_trigger_picker_state.owns_main_list();
-        let active_filter_head_owns_live_main_list =
-            crate::menu_syntax::active_filter_head_owns_main_list(live_filter_text);
-        let live_menu_syntax_owns_main_list = popup_owns_live_main_list
-            || (!spine_owns_live_main_list
-                && (self
-                    .menu_syntax_mode
-                    .capture_composer_owns_input_for(live_filter_text)
-                    || self
-                        .menu_syntax_mode
-                        .command_owns_input_for(live_filter_text)
-                    || active_filter_head_owns_live_main_list));
-        if live_menu_syntax_owns_main_list && live_filter_text != computed_filter_text {
-            if self.menu_syntax_trigger_picker_state.owns_main_list() {
-                if let Some(snapshot) = self.menu_syntax_trigger_picker_state.snapshot.as_ref() {
-                    let (grouped_items, flat_results) =
-                        build_menu_syntax_trigger_picker_main_list_results(snapshot);
-                    return (
-                        Arc::<[GroupedListItem]>::from(grouped_items),
-                        Arc::<[scripts::SearchResult]>::from(flat_results),
-                    );
-                }
-            }
-            if self.menu_syntax_object_selector_state.owns_main_list() {
-                if let Some(snapshot) = self.menu_syntax_object_selector_state.snapshot.as_ref() {
-                    let (grouped_items, flat_results) =
-                        build_menu_syntax_object_selector_main_list_results(snapshot);
-                    return (
-                        Arc::<[GroupedListItem]>::from(grouped_items),
-                        Arc::<[scripts::SearchResult]>::from(flat_results),
-                    );
-                }
-            }
-            return (
-                Arc::<[GroupedListItem]>::from(Vec::new()),
-                Arc::<[scripts::SearchResult]>::from(Vec::new()),
-            );
+        self.main_menu_result_caches.clone_grouped_results()
+    }
+
+    /// Build through the production grouping path, publishing only a valid projection.
+    pub(crate) fn rebuild_main_menu_results_cache(
+        &mut self,
+        _cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
+        if !self.root_search.query_is_current() {
+            return Err("main_menu_query_pending".to_string());
         }
+        let query_stamp = self
+            .root_search
+            .computed_query_stamp()
+            .ok_or_else(|| "main_menu_query_uninitialized".to_string())?;
+        if self.main_menu_committed_query_stamp() != Some(query_stamp) {
+            self.main_menu_result_caches.invalidate_grouped_results();
+        }
+        self.sync_flow_roster_cache_generation();
+        // One cheap handle keeps text and parser ownership on the same committed
+        // query while collectors mutate their source-owned caches below.
+        let computed_inputs = self.root_search.computed_query_inputs();
+        let computed_filter_text = computed_inputs.raw.as_str();
+        let spine_owns_for_computed = self.spine_projection_owns_main_list_for(
+            &computed_inputs.spine_parse,
+            computed_inputs.spine_projection.as_ref(),
+        ) && computed_inputs.spine_parse.input
+            == computed_filter_text;
+        let popup_owns_computed_main_list = self.menu_syntax_object_selector_state.owns_main_list()
+            || self.menu_syntax_trigger_picker_state.owns_main_list();
+        let active_filter_head_owns_computed_main_list =
+            crate::menu_syntax::active_filter_head_owns_main_list(computed_filter_text);
 
         // ── Spine projection path ──────────────────────────────────────
         // When a sigil segment owns the list, build rows from the Spine
         // model instead of running normal fuzzy/root grouping.
-        if !popup_owns_live_main_list
-            && !active_filter_head_owns_live_main_list
-            && self.spine_projection_owns_main_list()
-            && self.spine_parse.input == live_filter_text
+        if !popup_owns_computed_main_list
+            && !active_filter_head_owns_computed_main_list
+            && spine_owns_for_computed
         {
-            if let Some(projection) = self.spine_projection.as_ref() {
+            if let Some(projection) = computed_inputs.spine_projection.as_ref() {
                 let preview_needs = match &projection.active_segment_kind {
                     crate::spine::SpineSegmentKind::Style { .. } => {
                         Some(crate::spine::live_preview::SpinePreviewNeeds::STYLE)
@@ -1764,9 +2235,9 @@ impl ScriptListApp {
                 let spine_cache_key = format!(
                     "{}\x1Fpreview-gen={preview_generation}",
                     crate::spine::spine_projection_cache_key(
-                        live_filter_text,
                         computed_filter_text,
-                        &self.spine_parse,
+                        computed_filter_text,
+                        &computed_inputs.spine_parse,
                         projection,
                     ),
                 );
@@ -1802,7 +2273,7 @@ impl ScriptListApp {
                         .main_menu_result_caches
                         .has_grouped_results_for(&rich_cache_key)
                     {
-                        return self.main_menu_result_caches.clone_grouped_results();
+                        return Ok(false);
                     }
 
                     let (mut grouped_items, mut flat_results) = match rich_source {
@@ -1947,7 +2418,7 @@ impl ScriptListApp {
                     // surface with the current sub-query.
                     if rich_source == crate::spine::catalog_subsearch::ContextSubsearchSource::File
                     {
-                        if let Some(segment) = self
+                        if let Some(segment) = computed_inputs
                             .spine_parse
                             .segments
                             .get(projection.active_segment_index)
@@ -1978,16 +2449,16 @@ impl ScriptListApp {
                         }
                     }
 
-                    let (first_sel, last_sel) =
-                        grouped_selectable_bounds(&grouped_items, &flat_results);
                     self.main_menu_result_caches.store_grouped_results(
                         rich_cache_key,
                         grouped_items,
                         flat_results,
-                        first_sel,
-                        last_sel,
-                    );
-                    return self.main_menu_result_caches.clone_grouped_results();
+                        None,
+                        query_stamp,
+                        computed_filter_text,
+                        Default::default(),
+                    )?;
+                    return Ok(true);
                 }
 
                 if let crate::spine::SpineSegmentKind::ProjectCwd { sub_query } =
@@ -2006,7 +2477,7 @@ impl ScriptListApp {
                             .main_menu_result_caches
                             .has_grouped_results_for(&cwd_cache_key)
                         {
-                            return self.main_menu_result_caches.clone_grouped_results();
+                            return Ok(false);
                         }
                         let (grouped_items, flat_results) = if has_query {
                             build_rich_cwd_subsearch_rows(
@@ -2016,16 +2487,16 @@ impl ScriptListApp {
                         } else {
                             build_rich_cwd_root_rows(&recent_dirs)
                         };
-                        let (first_sel, last_sel) =
-                            grouped_selectable_bounds(&grouped_items, &flat_results);
                         self.main_menu_result_caches.store_grouped_results(
                             cwd_cache_key,
                             grouped_items,
                             flat_results,
-                            first_sel,
-                            last_sel,
-                        );
-                        return self.main_menu_result_caches.clone_grouped_results();
+                            None,
+                            query_stamp,
+                            computed_filter_text,
+                            Default::default(),
+                        )?;
+                        return Ok(true);
                     }
                 }
 
@@ -2033,7 +2504,7 @@ impl ScriptListApp {
                     .main_menu_result_caches
                     .has_grouped_results_for(&spine_cache_key)
                 {
-                    return self.main_menu_result_caches.clone_grouped_results();
+                    return Ok(false);
                 }
 
                 let live_preview = preview_needs.map(|_| &self.spine_live_preview_cache.current);
@@ -2048,7 +2519,7 @@ impl ScriptListApp {
 
                 let sections =
                     crate::spine::list::build_spine_list_sections_full_with_resolved_tokens_and_context(
-                        &self.spine_parse,
+                        &computed_inputs.spine_parse,
                         projection,
                         live_preview,
                         &|token| self.spine_mention_aliases.contains_key(token),
@@ -2095,16 +2566,16 @@ impl ScriptListApp {
                     }
                 }
 
-                let (first_sel, last_sel) =
-                    grouped_selectable_bounds(&grouped_items, &flat_results);
                 self.main_menu_result_caches.store_grouped_results(
                     spine_cache_key,
                     grouped_items,
                     flat_results,
-                    first_sel,
-                    last_sel,
-                );
-                return self.main_menu_result_caches.clone_grouped_results();
+                    None,
+                    query_stamp,
+                    computed_filter_text,
+                    Default::default(),
+                )?;
+                return Ok(true);
             }
         }
 
@@ -2118,10 +2589,9 @@ impl ScriptListApp {
         #[cfg(not(target_os = "macos"))]
         let current_app_commands_app_name: Option<String> = None;
 
-        let grouped_advanced_query = self
-            .menu_syntax_mode
-            .advanced_query_for(&self.computed_filter_text)
-            .cloned();
+        let grouped_advanced_query = computed_inputs
+            .menu_syntax
+            .advanced_query_for(computed_filter_text);
         let grouped_source_filters = grouped_advanced_query
             .as_ref()
             .map(|query| query.source_filters.clone())
@@ -2137,11 +2607,11 @@ impl ScriptListApp {
         let grouped_cache_key = match current_app_commands_app_name.as_deref() {
             Some(app_name) => format!(
                 "{}\x1Fsource-filters={grouped_source_filter_key}\x1Fcurrent-app={app_name}\x1Fai-vault-gen={ai_vault_generation}\x1Fwindows-gen={root_windows_generation}\x1Fbrowser-tabs-gen={browser_tabs_generation}\x1Fbrowser-history-gen={browser_history_generation}\x1Fbrain-inbox-epoch={brain_inbox_epoch}",
-                self.computed_filter_text
+                computed_filter_text
             ),
             None => format!(
                 "{}\x1Fsource-filters={grouped_source_filter_key}\x1Fai-vault-gen={ai_vault_generation}\x1Fwindows-gen={root_windows_generation}\x1Fbrowser-tabs-gen={browser_tabs_generation}\x1Fbrowser-history-gen={browser_history_generation}\x1Fbrain-inbox-epoch={brain_inbox_epoch}",
-                self.computed_filter_text
+                computed_filter_text
             ),
         };
 
@@ -2152,17 +2622,17 @@ impl ScriptListApp {
         {
             // NOTE: Removed cache HIT log - fires every render frame, causing log spam.
             // Cache hits are normal operation. Only log cache MISS (below) for diagnostics.
-            return self.main_menu_result_caches.clone_grouped_results();
+            return Ok(false);
         }
 
-        let should_refresh_root_recent_files = self.computed_filter_text.is_empty()
+        let should_refresh_root_recent_files = computed_filter_text.is_empty()
             || matches!(
                 self.root_search.root_file_search_mode,
                 Some(crate::file_search::RootFileSectionMode::GlobalQuery)
             )
-            || self
-                .menu_syntax_mode
-                .advanced_query_for(&self.computed_filter_text)
+            || computed_inputs
+                .menu_syntax
+                .advanced_query_for(computed_filter_text)
                 .is_some_and(|query| {
                     query.free_text.trim().is_empty()
                         && query
@@ -2179,8 +2649,8 @@ impl ScriptListApp {
                 "FILTER_PERF",
                 &format!(
                     "[4b/5] GROUP_START for {} ({} bytes)",
-                    logging::log_private_user_value(&self.computed_filter_text),
-                    self.computed_filter_text.len(),
+                    logging::log_private_user_value(computed_filter_text),
+                    computed_filter_text.len(),
                 ),
             );
         }
@@ -2213,30 +2683,25 @@ impl ScriptListApp {
                 "APP",
                 &format!(
                     "get_grouped_results: filter={} ({} bytes), menu_bar_items={}, bundle_id={:?}",
-                    logging::log_private_user_value(&self.computed_filter_text),
-                    self.computed_filter_text.len(),
+                    logging::log_private_user_value(computed_filter_text),
+                    computed_filter_text.len(),
                     menu_bar_items.len(),
                     menu_bar_bundle_id
                 ),
             );
         }
-        let raw_filter_text = self.computed_filter_text.clone();
-        let spine_owns_for_computed =
-            self.spine_projection_owns_main_list() && self.spine_parse.input == raw_filter_text;
-        let popup_owns_computed_main_list = self.menu_syntax_object_selector_state.owns_main_list()
-            || self.menu_syntax_trigger_picker_state.owns_main_list();
-        let active_filter_head_owns_computed_main_list =
-            crate::menu_syntax::active_filter_head_owns_main_list(&raw_filter_text);
+        let raw_filter_text = computed_filter_text;
         let menu_syntax_owns_main_list = popup_owns_computed_main_list
             || (!spine_owns_for_computed
-                && (self
-                    .menu_syntax_mode
-                    .capture_composer_owns_input_for(&raw_filter_text)
-                    || self
-                        .menu_syntax_mode
-                        .command_owns_input_for(&raw_filter_text)
+                && (computed_inputs
+                    .menu_syntax
+                    .capture_composer_owns_input_for(raw_filter_text)
+                    || computed_inputs
+                        .menu_syntax
+                        .command_owns_input_for(raw_filter_text)
                     || active_filter_head_owns_computed_main_list));
 
+        let mut ranking_evidence = scripts::command_contract::MainMenuRankingEvidenceMap::new();
         let (grouped_items, flat_results) = if self
             .menu_syntax_object_selector_state
             .owns_main_list()
@@ -2259,29 +2724,30 @@ impl ScriptListApp {
             // active composer/form surface. Refine (`:`) remains structured
             // launcher search and is handled below.
             (Vec::new(), Vec::new())
-        } else if let Some(invocation) = self.menu_syntax_mode.capture_for(&raw_filter_text) {
+        } else if let Some(invocation) = computed_inputs.menu_syntax.capture_for(raw_filter_text) {
             // Capture mode replaces the normal launcher grouping entirely.
             // Do not mix with Suggested/Favorites/Recent/menu-bar/fallback.
             crate::scripts::build_capture_mode_results(&self.scripts, invocation)
-        } else if let Some(hint) = self.menu_syntax_mode.incomplete_hint_for(&raw_filter_text) {
+        } else if let Some(hint) = computed_inputs
+            .menu_syntax
+            .incomplete_hint_for(raw_filter_text)
+        {
             // Menu-syntax trigger picker rows are now owned by the main ScriptList surface.
             // The main launcher result list stays suppressed while trigger rows render
             // through menu_syntax_main_hint_snapshot.
             crate::scripts::build_menu_syntax_hint_results(hint)
         } else {
-            let search_text_owned =
-                crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, &raw_filter_text)
-                    .to_string();
-            let search_text = search_text_owned.as_str();
-            let advanced_query_owned = self
-                .menu_syntax_mode
-                .advanced_query_for(&raw_filter_text)
-                .cloned();
-            let source_filters = advanced_query_owned
+            let search_text = crate::menu_syntax::free_text_for_search(
+                &computed_inputs.menu_syntax,
+                raw_filter_text,
+            );
+            let advanced_query = computed_inputs
+                .menu_syntax
+                .advanced_query_for(raw_filter_text);
+            let source_filters = advanced_query
                 .as_ref()
                 .map(|query| query.source_filters.clone())
                 .unwrap_or_default();
-            let advanced_query = advanced_query_owned.as_ref();
             let advanced_predicate_query = advanced_query.filter(|query| query.has_predicates());
             let advanced_predicate_active = advanced_predicate_query.is_some();
             let unified_search = self.config.get_unified_search();
@@ -2506,6 +2972,7 @@ impl ScriptListApp {
                 browser_history_options,
                 &root_passive_source_order,
                 root_passive_result_limits,
+                Some(&mut ranking_evidence),
             )
         };
         // A1 decision (2026-06-09): an exact alias match pins the aliased
@@ -2521,6 +2988,7 @@ impl ScriptListApp {
                             &alias_match,
                             &mut grouped_items,
                             &mut flat_results,
+                            &mut ranking_evidence,
                         );
                     }
                 }
@@ -2545,6 +3013,7 @@ impl ScriptListApp {
                         .get_unified_search()
                         .brain_inbox_section_options(),
                     chrono::Utc::now().timestamp(),
+                    Some(&mut ranking_evidence),
                 );
             }
             (grouped_items, flat_results)
@@ -2566,6 +3035,7 @@ impl ScriptListApp {
                     &records,
                     &flows,
                     chrono::Utc::now().timestamp(),
+                    Some(&mut ranking_evidence),
                 );
             }
             (grouped_items, flat_results)
@@ -2587,26 +3057,23 @@ impl ScriptListApp {
             };
         let elapsed = start.elapsed();
 
-        let (first_selectable_index, last_selectable_index) =
-            grouped_selectable_bounds(&grouped_items, &flat_results);
-
         self.main_menu_result_caches.store_grouped_results(
             grouped_cache_key,
             grouped_items,
             flat_results,
-            first_selectable_index,
-            last_selectable_index,
-        );
-
-        self.refresh_ghost_from_cached_results();
+            self.inline_calculator.clone(),
+            query_stamp,
+            computed_filter_text,
+            ranking_evidence,
+        )?;
 
         if logging::filter_perf_trace_enabled() || elapsed >= std::time::Duration::from_millis(8) {
             logging::log(
                 "FILTER_PERF",
                 &format!(
                     "[4b/5] GROUP_DONE {} ({} bytes) in {:.2}ms -> {} items (from {} results)",
-                    logging::log_private_user_value(&self.computed_filter_text),
-                    self.computed_filter_text.len(),
+                    logging::log_private_user_value(computed_filter_text),
+                    computed_filter_text.len(),
                     elapsed.as_secs_f64() * 1000.0,
                     self.main_menu_result_caches.grouped_items().len(),
                     self.main_menu_result_caches.grouped_flat_result_count()
@@ -2624,15 +3091,15 @@ impl ScriptListApp {
                     "FILTER_PERF",
                     &format!(
                         "[5/5] TOTAL_TIME {} ({} bytes): {:.2}ms (input->grouped)",
-                        logging::log_private_user_value(&self.computed_filter_text),
-                        self.computed_filter_text.len(),
+                        logging::log_private_user_value(computed_filter_text),
+                        computed_filter_text.len(),
                         total_elapsed.as_secs_f64() * 1000.0
                     ),
                 );
             }
         }
 
-        self.main_menu_result_caches.clone_grouped_results()
+        Ok(true)
     }
 
     pub(crate) fn cached_grouped_results_snapshot(
@@ -2655,10 +3122,7 @@ impl ScriptListApp {
     /// whenever grouped rows are invalidated.
     pub(crate) fn invalidate_grouped_cache(&mut self) {
         logging::log_debug("CACHE", "Grouped cache INVALIDATED");
-        // Set grouped_cache_key to a sentinel that won't match computed_filter_text.
-        // This ensures the cache check (computed_filter_text == grouped_cache_key) fails,
-        // forcing a recompute on the next get_grouped_results_cached() call.
-        // DO NOT set computed_filter_text here - that would cause both to match (false cache HIT).
+        // Retain the committed arrays until an explicit publication rebuild succeeds.
         self.main_menu_result_caches.invalidate_grouped_results();
         self.invalidate_main_window_preflight();
     }
@@ -2674,44 +3138,41 @@ impl ScriptListApp {
     /// - The selected index is out of bounds
     /// - No results exist
     pub(crate) fn get_selected_result(&mut self) -> Option<scripts::SearchResult> {
-        let selected_index = self.selected_index;
-        self.get_grouped_results_cached();
-
-        let result_idx = self
-            .main_menu_result_caches
-            .flat_result_index_for_grouped_item(selected_index)?;
-        if self
-            .inline_calculator_for_result_index(result_idx)
-            .is_some()
-        {
-            None
-        } else {
-            self.main_menu_result_caches
-                .cloned_search_result_for_flat_index(result_idx)
+        match self.resolved_main_menu_selected_subject()? {
+            ResolvedMainMenuSelection::SearchResult { result, .. } => Some(result.clone()),
+            ResolvedMainMenuSelection::Calculator { .. } => None,
         }
     }
 
-    pub(crate) fn inline_calculator_for_result_index(
-        &self,
-        result_idx: usize,
-    ) -> Option<&crate::calculator::CalculatorInlineResult> {
-        if result_idx == INLINE_CALCULATOR_RESULT_INDEX {
-            self.inline_calculator.as_ref()
-        } else {
-            None
+    pub(crate) fn sync_main_menu_preview_binding(&mut self) {
+        let current = self
+            .resolved_main_menu_selected_subject()
+            .map(|subject| match subject {
+                ResolvedMainMenuSelection::SearchResult { row, .. }
+                | ResolvedMainMenuSelection::Calculator { row, .. } => row,
+            });
+        let query = self.root_search.query_stamp();
+        let unchanged = match (current, self.main_menu_preview_binding()) {
+            (Some(row), Some(binding)) => {
+                binding.query == query
+                    && binding.stable_key == row.stable_key
+                    && binding.content_fingerprint == row.content_fingerprint
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
         }
-    }
-
-    /// Get or update the preview cache for syntax-highlighted code lines.
-    /// Only re-reads and re-highlights when the script path actually changes.
-    /// Returns cached lines if path matches, otherwise updates cache and returns new lines.
-    pub(crate) fn get_or_update_preview_cache(
-        &mut self,
-        script_path: &str,
-        lang: &str,
-        is_dark: bool,
-    ) -> &[syntax::HighlightedLine] {
-        self.get_or_update_preview_cache_with_match(script_path, lang, is_dark, None)
+        let binding = current.map(|row| MainMenuPreviewBinding {
+            query,
+            stable_key: row.stable_key.clone(),
+            content_fingerprint: row.content_fingerprint.clone(),
+        });
+        self.invalidate_preview_cache();
+        self.scriptlet_preview_cache_key = None;
+        self.scriptlet_preview_cache_lines.clear();
+        self.set_main_menu_preview_binding(binding);
     }
 
     /// Get or update the preview cache with optional content-match centering.
@@ -2724,6 +3185,17 @@ impl ScriptListApp {
         is_dark: bool,
         content_match: Option<&scripts::ScriptContentMatch>,
     ) -> &[syntax::HighlightedLine] {
+        self.sync_main_menu_preview_binding();
+        let current_path = match self.resolved_main_menu_selected_subject() {
+            Some(ResolvedMainMenuSelection::SearchResult {
+                result: scripts::SearchResult::Script(script),
+                ..
+            }) => script.script.path.as_path(),
+            _ => return &[],
+        };
+        if current_path != std::path::Path::new(script_path) {
+            return &[];
+        }
         let match_signature = scripts::preview_match_signature(content_match);
         let matched_line = content_match.map(|cm| cm.line_number);
 
@@ -2792,6 +3264,7 @@ impl ScriptListApp {
         let read_start = std::time::Instant::now();
         self.preview_cache_lines = match std::fs::read_to_string(script_path) {
             Ok(content) => {
+                self.set_main_menu_preview_load_state("ready");
                 let read_elapsed = read_start.elapsed();
                 let all_lines: Vec<&str> = content.lines().collect();
                 let total_lines = all_lines.len();
@@ -2854,6 +3327,7 @@ impl ScriptListApp {
                 lines
             }
             Err(e) => {
+                self.set_main_menu_preview_load_state("failed");
                 let safe_error = logging::log_private_user_value(&e.to_string());
                 logging::log(
                     "ERROR",
@@ -2937,6 +3411,7 @@ impl ScriptListApp {
         self.preview_cache_path = None;
         self.preview_cache_match_signature = None;
         self.preview_cache_lines.clear();
+        self.set_main_menu_preview_binding(None);
     }
 
     /// Builds the matcher + synthetic-result fallback for the resolved alias
@@ -2946,6 +3421,7 @@ impl ScriptListApp {
         alias_match: &AliasMatch,
         grouped_items: &mut Vec<crate::list_item::GroupedListItem>,
         flat_results: &mut Vec<crate::scripts::SearchResult>,
+        ranking_evidence: &mut scripts::command_contract::MainMenuRankingEvidenceMap,
     ) {
         use crate::scripts::SearchResult;
 
@@ -3042,6 +3518,7 @@ impl ScriptListApp {
             flat_results,
             is_alias_target.as_ref(),
             fallback.as_ref(),
+            Some(ranking_evidence),
         );
     }
 
@@ -3110,10 +3587,13 @@ impl ScriptListApp {
             .spine_cwd
             .clone()
             .or_else(|| std::env::current_dir().ok());
-        let (ghost_context, context_rev) = cwd
-            .as_deref()
-            .map(|cwd| self.ghost_context_cache.context_for_cwd(cwd))
-            .unwrap_or_else(|| (crate::scripts::search::ghost::GhostContext::default(), 0));
+        let (ghost_context, context_rev) = match self.main_services.owned_sources() {
+            Some(sources) => (sources.ghost_context.clone(), 0),
+            None => cwd
+                .as_deref()
+                .map(|cwd| self.ghost_context_cache.context_for_cwd(cwd))
+                .unwrap_or_else(|| (crate::scripts::search::ghost::GhostContext::default(), 0)),
+        };
         // `query_rev` rides the LLM generation so revisions advance on every
         // input change; `context_rev` invalidates when the cwd docs change.
         let revision = crate::scripts::search::ghost::PredictionRevision {
@@ -3239,6 +3719,9 @@ impl ScriptListApp {
         cwd: Option<&std::path::PathBuf>,
         context_rev: u64,
     ) -> Option<crate::scripts::search::ghost::GhostPrediction> {
+        if !self.main_services.is_production() {
+            return None;
+        }
         let model_id = self.ghost_llm_model_id_hint();
         let key = crate::scripts::search::ghost::GhostLlmCacheKey {
             query: query.to_string(),
@@ -3291,6 +3774,9 @@ impl ScriptListApp {
         context_rev: u64,
         cx: &mut gpui::Context<Self>,
     ) {
+        if !self.main_services.is_production() {
+            return;
+        }
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 

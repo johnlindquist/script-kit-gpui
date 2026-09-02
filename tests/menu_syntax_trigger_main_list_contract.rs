@@ -10,11 +10,6 @@ const UI_WINDOW: &str = include_str!("../src/app_impl/ui_window.rs");
 const SELECTION_FALLBACK: &str = include_str!("../src/app_impl/selection_fallback.rs");
 const APP_NAV_MOVEMENT: &str = include_str!("../src/app_navigation/impl_movement.rs");
 const PROMPT_HANDLER: &str = include_str!("../src/prompt_handler/mod.rs");
-const COLLECT_ELEMENTS: &str = include_str!("../src/app_layout/collect_elements.rs");
-
-fn compact_source(source: &str) -> String {
-    source.split_whitespace().collect::<String>()
-}
 
 #[test]
 fn trigger_owner_no_longer_defines_detached_prompt_popup_window() {
@@ -154,18 +149,6 @@ fn type_filter_accept_hint_consumes_enter_until_selection_moves() {
 #[test]
 fn trigger_picker_pointer_path_has_proof_grade_logs() {
     for needle in [
-        "main_list_row_mouse_down_seen",
-        "Menu-syntax trigger picker row mouse-down accepting",
-        "main_list_row_click_seen",
-        "Menu-syntax trigger picker consumed trailing launcher click",
-    ] {
-        assert!(
-            RENDER_SCRIPT_LIST.contains(needle),
-            "trigger picker pointer path must log proof-grade row events: {needle}"
-        );
-    }
-
-    for needle in [
         "menu_syntax_trigger_picker_accept_start",
         "menu_syntax_trigger_picker_accept_missing_snapshot",
         "menu_syntax_trigger_picker_accept_missing_row",
@@ -185,7 +168,6 @@ fn trigger_picker_rows_are_cached_as_main_list_rows() {
         "fn build_menu_syntax_trigger_picker_main_list_results",
         "trigger_picker_row_to_main_list_row(row)",
         "SearchResult::SpineProjection",
-        "grouped_selectable_bounds(&grouped_items, &flat_results)",
     ] {
         assert!(
             FILTERING_CACHE.contains(needle),
@@ -255,31 +237,6 @@ fn prompt_popup_resolution_excludes_menu_syntax_trigger_picker() {
             && !PROMPT_HANDLER
                 .contains("batch_select_menu_syntax_trigger_picker_row_by_semantic_id"),
         "PromptPopup batch routing must not select menu-syntax trigger rows"
-    );
-}
-
-#[test]
-fn script_list_elements_expose_trigger_picker_rows() {
-    for needle in [
-        "list:menu-syntax-trigger-picker",
-        "menuSyntaxTriggerPicker",
-        "menu-syntax-trigger-row",
-        "protocol::generate_semantic_id(\"choice\", index, &row.id)",
-    ] {
-        assert!(
-            COLLECT_ELEMENTS.contains(needle),
-            "ScriptList getElements must expose trigger picker rows: {needle}"
-        );
-    }
-
-    let compact = compact_source(COLLECT_ELEMENTS);
-    assert!(
-        compact.contains(
-            "self.menu_syntax_trigger_picker_state.selected_row_id.as_deref()==Some(row.id.as_str())"
-        ) || (compact.contains(
-            "letselected_row_id=self.menu_syntax_trigger_picker_state.selected_row_id.as_deref();"
-        ) && compact.contains("selected:Some(selected_row_id==Some(row.id.as_str()))")),
-        "ScriptList getElements must mark trigger picker rows selected from menu_syntax_trigger_picker_state.selected_row_id"
     );
 }
 

@@ -3,15 +3,16 @@
 //! This module provides functions for loading scripts from the
 //! ~/.scriptkit/plugins/*/scripts/ directories.
 
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use rayon::prelude::*;
 
 use crate::setup::get_kit_path;
 
-use super::metadata::extract_metadata_full;
+use super::metadata::extract_full_metadata;
 use super::scriptlet_loader::extract_kit_from_path;
 use super::types::Script;
 use super::validation::{validate_script_catalog, ScriptCatalogReport};
@@ -22,23 +23,16 @@ use super::validation::{validate_script_catalog, ScriptCatalogReport};
 /// `plugin_id` and `plugin_title` from the owning plugin manifest.
 ///
 /// Returns a sorted list of Arc-wrapped Script structs for .ts and .js files.
-/// Returns empty vec if no plugins or scripts are found.
+/// Missing optional directories return an empty catalogue; failed reads return an error.
 ///
 /// H1 Optimization: Returns Arc<Script> to avoid expensive clones during filter operations.
 /// Uses rayon for parallel file scanning across plugin directories.
 #[instrument(level = "debug", skip_all)]
-pub fn read_scripts() -> Vec<Arc<Script>> {
-    let index = match crate::plugins::discover_plugins() {
-        Ok(index) => index,
-        Err(error) => {
-            warn!(error = %error, "Failed to discover plugins for script loading");
-            return Vec::new();
-        }
-    };
-
+pub fn read_scripts() -> Result<Vec<Arc<Script>>> {
+    let index = crate::plugins::discover_plugins()?;
     if index.plugins.is_empty() {
         debug!("No plugins discovered — no scripts to load");
-        return vec![];
+        return Ok(Vec::new());
     }
 
     let kit_path = get_kit_path();
@@ -48,25 +42,22 @@ pub fn read_scripts() -> Vec<Arc<Script>> {
     let mut scripts: Vec<Arc<Script>> = index
         .plugins
         .par_iter()
-        .flat_map_iter(|plugin| {
+        .map(|plugin| -> Result<Vec<Arc<Script>>> {
             let scripts_dir = plugin.root.join("scripts");
-            info!(
-                plugin_id = %plugin.id,
-                path = %scripts_dir.display(),
-                "plugin_scripts_loading"
-            );
-            read_scripts_from_dir(&scripts_dir, &kit_path)
-                .into_iter()
-                .map(|script| {
-                    Arc::new(Script {
-                        plugin_id: plugin.id.clone(),
-                        plugin_title: Some(plugin.manifest.title.clone()),
-                        kit_name: Some(plugin.id.clone()),
-                        ..(*script).clone()
-                    })
-                })
+            info!(plugin_id = %plugin.id, path = %scripts_dir.display(), "plugin_scripts_loading");
+            let mut scripts = read_scripts_from_dir(&scripts_dir, &kit_path)?;
+            for script in &mut scripts {
+                let script = Arc::make_mut(script);
+                script.plugin_id = plugin.id.clone();
+                script.plugin_title = Some(plugin.manifest.title.clone());
+                script.kit_name = Some(plugin.id.clone());
+            }
+            Ok(scripts)
         })
-        .collect();
+        .try_reduce(Vec::new, |mut all, scripts| {
+            all.extend(scripts);
+            Ok(all)
+        })?;
 
     // Sort by name for deterministic ordering
     scripts.sort_by(|a, b| a.name.cmp(&b.name));
@@ -87,22 +78,17 @@ pub fn read_scripts() -> Vec<Arc<Script>> {
         elapsed_ms = load_started.elapsed().as_secs_f64() * 1000.0,
         "Loaded scripts from all plugins with parallel body indexing"
     );
-    scripts
+    Ok(scripts)
 }
 
 /// Load scripts and run the startup-time validation pass, returning an
 /// immutable [`ScriptCatalogReport`] that pairs the kept catalog with a
 /// [`super::validation::ValidationReport`] for the MCP resource + menu-bar
 /// badge.
-///
-/// Oracle-Session `script-metadata-validation-fail-fast` PR1 foundation.
-/// This surface stays additive — `read_scripts()` keeps working unchanged
-/// for callers that don't yet care about validation state; the indexing
-/// and MCP wiring migrations ride in follow-up PRs.
 #[instrument(level = "debug", skip_all)]
-pub fn read_scripts_report() -> Arc<ScriptCatalogReport> {
-    let scripts = read_scripts();
-    Arc::new(validate_script_catalog(scripts))
+pub fn read_scripts_report() -> Result<Arc<ScriptCatalogReport>> {
+    let scripts = read_scripts()?;
+    Ok(Arc::new(validate_script_catalog(scripts)))
 }
 
 /// Read scripts from a single directory.
@@ -113,68 +99,64 @@ pub fn read_scripts_report() -> Arc<ScriptCatalogReport> {
 /// # Arguments
 /// * `scripts_dir` - Path to the scripts directory (e.g., ~/.scriptkit/plugins/main/scripts)
 /// * `kit_path` - Root kit path for extracting kit name (e.g., ~/.scriptkit)
-pub(crate) fn read_scripts_from_dir(scripts_dir: &Path, kit_path: &Path) -> Vec<Arc<Script>> {
-    let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(scripts_dir) {
-        Ok(entries) => entries.filter_map(|entry| entry.ok()).collect(),
-        Err(e) => {
-            warn!(
-                error = %e,
-                path = %scripts_dir.display(),
-                "Failed to read scripts directory"
-            );
-            return Vec::new();
+pub(crate) fn read_scripts_from_dir(
+    scripts_dir: &Path,
+    kit_path: &Path,
+) -> Result<Vec<Arc<Script>>> {
+    let entries = match std::fs::read_dir(scripts_dir) {
+        Ok(entries) => entries
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| {
+                format!(
+                    "Failed to enumerate scripts directory: {}",
+                    scripts_dir.display()
+                )
+            })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to read scripts directory: {}",
+                    scripts_dir.display()
+                )
+            })
         }
     };
-
     entries
         .into_par_iter()
-        .filter_map(|entry| load_script_entry(entry, kit_path))
-        .collect()
+        .map(|entry| load_script_entry(entry, kit_path))
+        .collect::<Result<Vec<_>>>()
+        .map(|scripts| scripts.into_iter().flatten().collect())
 }
 
 /// Load a single script entry from a directory entry.
-fn load_script_entry(entry: std::fs::DirEntry, kit_path: &Path) -> Option<Arc<Script>> {
-    let file_metadata = entry.metadata().ok()?;
-    if !file_metadata.is_file() {
-        return None;
-    }
-
+fn load_script_entry(entry: std::fs::DirEntry, kit_path: &Path) -> Result<Option<Arc<Script>>> {
     let path = entry.path();
-    let ext_str = path.extension()?.to_str()?;
-    if ext_str != "ts" && ext_str != "js" {
-        return None;
-    }
-
-    let filename_str = path.file_stem()?.to_str()?;
-
-    // Extract full metadata including typed and schema
-    let (script_metadata, typed_metadata, schema) = extract_metadata_full(&path);
-
-    // Use metadata name if available, otherwise filename
-    let name = script_metadata
-        .name
-        .unwrap_or_else(|| filename_str.to_string());
-
-    // Extract kit name from path
-    let kit_name = extract_kit_from_path(&path, kit_path);
-
-    // Read file body for content search indexing
-    let body = match std::fs::read_to_string(&path) {
-        Ok(contents) => Some(contents),
-        Err(e) => {
-            debug!(
-                error = %e,
-                path = %path.display(),
-                "Failed to read script body for content indexing"
-            );
-            None
-        }
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return Ok(None);
     };
-
-    Some(Arc::new(Script {
+    if !matches!(extension, "ts" | "js") {
+        return Ok(None);
+    }
+    let Some(filename) = path.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    if !std::fs::metadata(&path)
+        .with_context(|| format!("Failed to inspect script entry: {}", path.display()))?
+        .is_file()
+    {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read script: {}", path.display()))?;
+    let (script_metadata, typed_metadata, schema) = extract_full_metadata(&body);
+    let name = script_metadata.name.unwrap_or_else(|| filename.to_owned());
+    let extension = extension.to_owned();
+    let kit_name = extract_kit_from_path(&path, kit_path);
+    Ok(Some(Arc::new(Script {
         name,
-        path: path.clone(),
-        extension: ext_str.to_string(),
+        path,
+        extension,
         description: script_metadata.description,
         icon: script_metadata.icon,
         alias: script_metadata.alias,
@@ -184,8 +166,8 @@ fn load_script_entry(entry: std::fs::DirEntry, kit_path: &Path) -> Option<Arc<Sc
         plugin_id: String::new(),
         plugin_title: None,
         kit_name,
-        body,
-    }))
+        body: Some(body),
+    })))
 }
 
 #[cfg(test)]
@@ -204,6 +186,80 @@ mod tests {
     }
 
     #[test]
+    fn catalogue_read_distinguishes_optional_absence_from_failed_source_content() {
+        let root = tempfile::tempdir().expect("create root");
+        let source = root.path().join("scripts");
+        assert!(read_scripts_from_dir(&source, root.path())
+            .expect("optional absence")
+            .is_empty());
+        fs::create_dir(&source).expect("create source directory");
+        fs::write(
+            source.join("valid.ts"),
+            "// Name: Retained\nconsole.log('good');",
+        )
+        .expect("write valid source");
+        fs::write(source.join("invalid.ts"), [0xff, 0xfe]).expect("write unreadable UTF-8 source");
+        assert!(
+            read_scripts_from_dir(&source, root.path()).is_err(),
+            "partial source snapshots cannot replace last-good catalogue"
+        );
+        fs::remove_file(source.join("invalid.ts")).expect("repair source");
+        let scripts = read_scripts_from_dir(&source, root.path()).expect("read repaired source");
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].name, "Retained");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalogue_read_follows_script_symlinks() {
+        let root = tempfile::tempdir().expect("create source root");
+        let scripts = root.path().join("scripts");
+        fs::create_dir(&scripts).expect("create scripts directory");
+        let target = root.path().join("target.ts");
+        fs::write(&target, "// Name: Linked Command\nconsole.log('linked');")
+            .expect("write target");
+        std::os::unix::fs::symlink(&target, scripts.join("linked.ts")).expect("link source");
+        let loaded = read_scripts_from_dir(&scripts, root.path()).expect("read linked source");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Linked Command");
+    }
+    #[test]
+    fn full_catalogue_preserves_discovered_plugin_identity() {
+        let _lock = crate::test_utils::SK_PATH_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(path) => std::env::set_var(crate::setup::SK_PATH_ENV, path),
+                    None => std::env::remove_var(crate::setup::SK_PATH_ENV),
+                }
+            }
+        }
+        let root = tempfile::tempdir().expect("create plugin root");
+        let plugin = root.path().join("plugins/plugin-folder");
+        fs::create_dir_all(plugin.join("scripts")).expect("create scripts directory");
+        fs::write(
+            plugin.join("package.json"),
+            r#"{"name":"stable-plugin","title":"Plugin Title"}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            plugin.join("scripts/demo.ts"),
+            "// Name: Demo\nconsole.log('body');",
+        )
+        .expect("write script");
+        let _restore = RestorePath(std::env::var_os(crate::setup::SK_PATH_ENV));
+        std::env::set_var(crate::setup::SK_PATH_ENV, root.path());
+        let scripts = read_scripts().expect("read plugin catalogue");
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].plugin_id, "stable-plugin");
+        assert_eq!(scripts[0].plugin_title.as_deref(), Some("Plugin Title"));
+    }
+
+    #[test]
     fn read_scripts_from_dir_reloads_updated_body_content() {
         let root = unique_test_dir("loader-body-reload");
         let scripts_dir = root.join("plugins").join("main").join("scripts");
@@ -213,7 +269,8 @@ mod tests {
         fs::write(&script_path, "console.log('alphaUniqueToken');\n")
             .expect("first write should succeed");
 
-        let first = read_scripts_from_dir(&scripts_dir, &root);
+        let first =
+            read_scripts_from_dir(&scripts_dir, &root).expect("initial catalogue should load");
         assert_eq!(first.len(), 1);
         assert_eq!(
             first[0].body.as_deref(),
@@ -223,7 +280,8 @@ mod tests {
         fs::write(&script_path, "console.log('betaUniqueToken');\n")
             .expect("second write should succeed");
 
-        let second = read_scripts_from_dir(&scripts_dir, &root);
+        let second =
+            read_scripts_from_dir(&scripts_dir, &root).expect("updated catalogue should load");
         assert_eq!(second.len(), 1);
         assert_eq!(
             second[0].body.as_deref(),

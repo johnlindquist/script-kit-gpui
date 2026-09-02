@@ -710,6 +710,7 @@
                                         cx.stop_propagation();
                                         return;
                                     }
+                                    if is_up || is_down { this.flush_pending_main_menu_query(cx); }
 
                                     let menu_syntax_owns_main_list =
                                         this.menu_syntax_mode

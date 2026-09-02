@@ -11,7 +11,7 @@ fn append_agent_chat_design_tokens(
     // paint with, so exporter and renderer literally share bytes.
     use crate::components::conversation_style as agent_chat_contract;
     let chat = agent_chat_contract::production_conversation_style();
-    let chat_resolved = agent_chat_contract::resolved_conversation_transcript_colors(&chat, &theme);
+    let chat_resolved = agent_chat_contract::resolved_conversation_transcript_colors(&chat, theme);
     let chat_send_disabled = agent_chat_contract::resolved_conversation_send_state_chrome(
         false,
         false,
@@ -368,7 +368,7 @@ fn append_agent_chat_design_tokens(
             id,
             TokenStage::Source,
             Some(var),
-            TokenValue::Number {
+            TokenValue::NormalizedOpacity {
                 value: value as f64,
             },
             Some(path),
@@ -466,8 +466,8 @@ fn append_agent_chat_design_tokens(
             id,
             TokenStage::Source,
             None,
-            TokenValue::Number {
-                value: value as f64,
+            TokenValue::AlphaByte {
+                value: value.get(),
             },
             Some(path),
             true,
@@ -784,11 +784,6 @@ fn append_agent_chat_design_tokens(
             "AgentChatMessageStyle(assistant).radius — 0; assistant bg only paints when bg_alpha > 0",
         ),
         (
-            "agentChat.assistant.bgAlpha",
-            chat.assistant_message.bg_alpha as f64,
-            "AgentChatMessageStyle(assistant).bg_alpha — 0: no assistant surface painted in Standard",
-        ),
-        (
             "agentChat.activity.dotSize",
             agent_chat_contract::CONVERSATION_ACTIVITY_DOT_SIZE as f64,
             "conversation_style::CONVERSATION_ACTIVITY_DOT_SIZE — hidden (0px row) in the idle fixture",
@@ -797,11 +792,6 @@ fn append_agent_chat_design_tokens(
             "agentChat.activity.gap",
             agent_chat_contract::CONVERSATION_ACTIVITY_GAP as f64,
             "conversation_style::CONVERSATION_ACTIVITY_GAP",
-        ),
-        (
-            "agentChat.activity.labelAlpha",
-            agent_chat_contract::CONVERSATION_ACTIVITY_LABEL_ALPHA as f64,
-            "conversation_style::CONVERSATION_ACTIVITY_LABEL_ALPHA (0xB0)",
         ),
     ] {
         b.add(
@@ -814,6 +804,15 @@ fn append_agent_chat_design_tokens(
             &[],
         );
     }
+    for (id, value, path) in [
+        ("agentChat.assistant.bgAlpha", chat.assistant_message.bg_alpha,
+            "ConversationMessageStyle(assistant).bg_alpha"),
+        ("agentChat.activity.labelAlpha", agent_chat_contract::CONVERSATION_ACTIVITY_LABEL_ALPHA,
+            "conversation_style::CONVERSATION_ACTIVITY_LABEL_ALPHA"),
+    ] {
+        b.add(id, TokenStage::Source, None, TokenValue::AlphaByte { value: value.get() },
+            Some(path), false, &[]);
+    }
 
     // ── Agent Chat conflicts (recorded, not collapsed) ──────────────────
     b.conflict(
@@ -821,7 +820,7 @@ fn append_agent_chat_design_tokens(
         &[
             (
                 "AgentChatErrorStyle.bg_alpha",
-                format!("{} (DECIMAL — 0x32)", chat.error.bg_alpha),
+                format!("{} (alphaByte — 0x32)", chat.error.bg_alpha.get()),
             ),
             (
                 "sibling alphas",
@@ -829,9 +828,9 @@ fn append_agent_chat_design_tokens(
             ),
         ],
         "info",
-        "The error background alpha is authored as decimal 50 while every sibling \
-         alpha is hex-authored — a real edit foot-gun. Recorded, not normalized; the \
-         shared pack_rgb_alpha resolver rounds it to 0x32 either way.",
+        "The error background preserves the authored decimal byte 50 (0x32). All \
+         conversation alpha fields now use AlphaByte, distinct from normalized \
+         opacity. This is an intentional unit fact, not an unresolved conversion.",
     );
     b.conflict(
         "agentChat.standard.roleSplitOnlyFields",
@@ -843,7 +842,7 @@ fn append_agent_chat_design_tokens(
                     chat.user_message.max_width,
                     chat.assistant_message.max_width,
                     chat.assistant_message.radius,
-                    chat.assistant_message.bg_alpha
+                    chat.assistant_message.bg_alpha.get()
                 ),
             ),
             (

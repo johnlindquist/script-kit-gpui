@@ -37,6 +37,10 @@ START_APP=1
 SHOW_APP=1
 EXTRA_CONTEXT=()
 RUN_DIR_ARG=""
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]]; then
+  START_APP=0
+  SHOW_APP=0
+fi
 
 usage() {
   cat <<'EOF'
@@ -160,6 +164,10 @@ parse_common_args() {
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
+  if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]] \
+    && (( START_APP || SHOW_APP || ALLOW_NATIVE || ALLOW_MIC || ALLOW_REAL_DATA || ALLOW_SUBMIT )); then
+    die 'noninteractive agy cannot claim ordinary startup, visible/native/device/private-data/live submission authority; use the owned evaluator client'
+  fi
   done
 }
 
@@ -354,35 +362,19 @@ if fast:
     theme_fast_path = ""
     if inference.get("surface", {}).get("id") == "agent_chat":
         agent_chat_fast_path = f"""
-Known minimal Agent Chat path for this repo:
-1. Start/show main and inspect once:
-   `bun scripts/devtools/inspect.ts --session {session} --start --show --bug "{prompt}" --surface AgentChat --main > {receipts_dir}/010-inspect-main.json`
-2. Select the allowlisted Search Files launcher row:
-   `bun scripts/devtools/act.ts select --semantic-id "choice:1:search-files" --session {session} --main > {receipts_dir}/020-select-search-files.json`
-3. Open Agent Chat through the known Cmd+Enter shortcut path:
-   `bun scripts/devtools/act.ts key --key "enter" --modifiers "cmd" --allow-submit --session {session} --main > {receipts_dir}/030-open-agent-chat.json`
-4. Type the requested chat text with set-input:
-   `bun scripts/devtools/act.ts set-input --text "what's for lunch" --session {session} --main > {receipts_dir}/040-set-input.json`
-5. Submit the Agent Chat input:
-   `bash scripts/agentic/session.sh send {session} '{{"type":"simulateKey","requestId":"agy-fast-submit","key":"enter"}}' --await-parse > {receipts_dir}/050-submit-chat.json`
-6. Tail a compact event receipt:
-   `bun scripts/devtools/events.ts tail --session {session} --limit 40 > {receipts_dir}/900-events.json`
+Agent Chat inspection path:
+1. Inspect the explicitly supplied existing session without --start or --show.
+2. Query current semantic elements and exact target generations; never hardcode a row index or guess a semantic ID.
+3. Exercise provider-free failure/retry/Stop only through the owned evaluator's declared conversation fixture controls.
+4. Do not type or submit a live AI prompt, start a sidecar, or escalate to native input.
+5. Retain correlated terminal receipts and detach from borrowed sessions.
 """
     if inference.get("surface", {}).get("id") == "theme":
-        theme_fast_path = f"""
-Known minimal Theme Designer path for this repo:
-1. Start/show main and inspect once:
-   `bun scripts/devtools/inspect.ts --session {session} --start --show --bug "{prompt}" --surface Theme --main > {receipts_dir}/010-inspect-main.json`
-2. Open Theme Designer directly through the triggerBuiltin protocol route:
-   `bash scripts/agentic/session.sh send {session} '{{"type":"triggerBuiltin","builtinId":"builtin/choose-theme","requestId":"agy-fast-open-theme"}}' --await-parse > {receipts_dir}/020-trigger-theme-designer.json`
-3. Inspect Theme Designer before changing controls:
-   `bun scripts/devtools/inspect.ts --session {session} --bug "{prompt}" --surface ThemeChooser --main > {receipts_dir}/030-inspect-theme-designer.json`
-4. Set the typed accent color control to red:
-   `bun scripts/devtools/act.ts set-theme-control --control accent-color-hex --value "#ff0000" --surface ThemeChooser --session {session} --main > {receipts_dir}/040-set-accent-red.json`
-5. Inspect Theme Designer after the change:
-   `bun scripts/devtools/inspect.ts --session {session} --bug "{prompt}" --surface ThemeChooser --main > {receipts_dir}/050-inspect-theme-designer.json`
-6. Tail a compact event receipt:
-   `bun scripts/devtools/events.ts tail --session {session} --limit 40 > {receipts_dir}/900-events.json`
+        theme_fast_path = """
+Theme inspection path:
+1. Inspect the existing target without visible startup or native escalation.
+2. Use the owned design client's revision-bound theme preview/revert transaction for a requested change.
+3. Preserve locked glass/motion values and report the actual publication revision and completed frame.
 """
 
     text = f"""You are agy running in FAST Script Kit GPUI DevTools mode.
@@ -697,7 +689,7 @@ cmd_compact() {
 cmd_cleanup() {
   parse_common_args "$@"
   [[ -n "$SESSION_NAME" ]] || die "cleanup requires --session <name>"
-  bash scripts/agentic/devtools-session.sh cleanup --session "$SESSION_NAME" \
+  bash "${PROJECT_ROOT}/scripts/agentic/devtools-session.sh" cleanup --session "$SESSION_NAME" \
     --expected-pid "$EXPECTED_SESSION_PID" \
     --expected-generation "$EXPECTED_SESSION_GENERATION"
 }

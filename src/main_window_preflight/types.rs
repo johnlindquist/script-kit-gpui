@@ -20,6 +20,7 @@ pub(crate) enum MainWindowPreflightActionKind {
     AskAi,
     InspectIssues,
     PasteResumeCommand,
+    CopyCalculator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

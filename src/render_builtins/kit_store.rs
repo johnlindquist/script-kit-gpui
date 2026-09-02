@@ -914,6 +914,8 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         let generation = next_kit_store_browse_query_generation();
+        self.kit_store_browse_state = KitStoreBrowseState::Loading;
+        self.mark_main_data_changed();
         if let AppView::BrowseKitsView {
             query,
             selected_index,
@@ -934,11 +936,18 @@ impl ScriptListApp {
 
         let query_for_fetch = next_query.clone();
         let query_for_guard = next_query;
+        let owned_sources = self.main_services.owned_sources().cloned();
         cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move { Self::kit_store_search_results(&query_for_fetch) })
-                .await;
+            let (results, error) = if let Some(sources) = owned_sources {
+                cx.background_executor().timer(sources.file_delay).await;
+                let needle = query_for_fetch.to_lowercase();
+                let results = sources.kits.into_iter().filter(|kit| {
+                    kit.name.to_lowercase().contains(&needle) || kit.description.to_lowercase().contains(&needle)
+                }).collect();
+                (results, sources.kit_error)
+            } else {
+                (cx.background_executor().spawn(async move { Self::kit_store_search_results(&query_for_fetch) }).await, None)
+            };
             let _ = this.update(cx, |this, cx| {
                 if !kit_store_browse_query_generation_is_current(generation) {
                     return;
@@ -951,6 +960,8 @@ impl ScriptListApp {
                 {
                     if *query == query_for_guard {
                         *view_results = results;
+                        this.kit_store_browse_state = error.map(KitStoreBrowseState::Failed).unwrap_or(KitStoreBrowseState::Ready);
+                        this.mark_main_data_changed();
                         cx.notify();
                     }
                 }
@@ -1070,6 +1081,11 @@ impl ScriptListApp {
 
         let list: AnyElement = if results_for_list.is_empty() {
             let empty_state = KitStoreBrowseEmptyState::from_query(&query_owned);
+            let (title, message) = match &self.kit_store_browse_state {
+                KitStoreBrowseState::Ready => (empty_state.title(), empty_state.message().to_string()),
+                KitStoreBrowseState::Loading => ("Searching kits…", "Waiting for the kit catalogue".to_string()),
+                KitStoreBrowseState::Failed(error) => ("Kit catalogue unavailable", error.clone()),
+            };
             div()
                 .w_full()
                 .h_full()
@@ -1079,12 +1095,12 @@ impl ScriptListApp {
                 .justify_center()
                 .gap(px(8.0))
                 .text_color(text_muted)
-                .child(empty_state.title())
+                .child(title)
                 .child(
                     div()
                         .text_xs()
                         .text_color(text_hint)
-                        .child(empty_state.message()),
+                        .child(message),
                 )
                 .into_any_element()
         } else {

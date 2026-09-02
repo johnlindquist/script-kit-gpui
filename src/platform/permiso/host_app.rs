@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 pub fn host_app_bundle_url() -> anyhow::Result<PathBuf> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     #[cfg(target_os = "macos")]
     {
         if let Some(path) = main_bundle_path() {

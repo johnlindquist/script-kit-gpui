@@ -21,6 +21,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+if [[ "$SKIP_BINARY" == "0" ]]; then resolve_session_artifact; fi
 
 if [[ "$SKIP_BINARY" -eq 0 && ! -x "$DEVTOOLS_SESSION_BINARY" ]]; then
   echo "[preflight-isolated] fail: missing ${DEVTOOLS_SESSION_BINARY} (stage from target-agent or build first)" >&2
@@ -36,7 +37,7 @@ count="$(gpui_instance_count)"
 if [[ "$MODE" == "isolated" && "$count" -gt 1 ]]; then
   echo "[preflight-isolated] fail: ${count} script-kit-gpui instances (macOS single-instance). Stop orphans:" >&2
   pgrep -x -fl 'script-kit-gpui' 2>/dev/null | sed 's/^/  /' >&2 || true
-  echo "  pkill -x script-kit-gpui  # then start one session" >&2
+  echo "  Inspect the exact registered session owners; do not kill by executable name." >&2
   exit 12
 fi
 

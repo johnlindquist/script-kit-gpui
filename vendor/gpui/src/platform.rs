@@ -1,6 +1,8 @@
 mod app_menu;
 mod keyboard;
 mod keystroke;
+mod owned_hidden;
+pub use owned_hidden::*;
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 #[expect(missing_docs)]
@@ -114,6 +116,9 @@ pub fn guess_compositor() -> &'static str {
 
 #[expect(missing_docs)]
 pub trait Platform: 'static {
+    fn owned_hidden_guard(&self) -> Option<Arc<OwnedHiddenGuard>> {
+        None
+    }
     fn background_executor(&self) -> BackgroundExecutor;
     fn foreground_executor(&self) -> ForegroundExecutor;
     fn text_system(&self) -> Arc<dyn PlatformTextSystem>;
@@ -594,6 +599,9 @@ pub struct RequestFrameOptions {
 
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    fn owned_hidden_guard(&self) -> Option<Arc<OwnedHiddenGuard>> {
+        None
+    }
     fn bounds(&self) -> Bounds<Pixels>;
     fn is_maximized(&self) -> bool;
     fn window_bounds(&self) -> WindowBounds;
@@ -694,6 +702,16 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         None
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn arm_owned_readback_fault(&mut self, _fault: OwnedReadbackFault) -> Result<()> {
+        anyhow::bail!("owned_readback_fault_unavailable")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn clear_owned_readback_fault(&mut self) -> Result<()> {
+        anyhow::bail!("owned_readback_fault_unavailable")
     }
 
     /// Renders the given scene to a texture and returns the pixel data as an RGBA image.
@@ -2079,6 +2097,24 @@ impl Image {
 
     /// Convert the clipboard image to an `ImageData` object.
     pub fn to_image_data(&self, svg_renderer: SvgRenderer) -> Result<Arc<RenderImage>> {
+        if OwnedHiddenGuard::installed().is_some() {
+            let format = match self.format {
+                ImageFormat::Gif => image::ImageFormat::Gif,
+                ImageFormat::Png => image::ImageFormat::Png,
+                ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+                ImageFormat::Webp => image::ImageFormat::WebP,
+                ImageFormat::Bmp => image::ImageFormat::Bmp,
+                ImageFormat::Tiff => image::ImageFormat::Tiff,
+                ImageFormat::Ico => image::ImageFormat::Ico,
+                ImageFormat::Svg => {
+                    return svg_renderer.render_single_frame(&self.bytes, 1.0, false);
+                }
+            };
+            return Ok(Arc::new(RenderImage::new(decode_owned_image(
+                &self.bytes,
+                format,
+            )?)));
+        }
         fn frames_for_image(
             bytes: &[u8],
             format: image::ImageFormat,
@@ -2116,9 +2152,7 @@ impl Image {
             ImageFormat::Tiff => frames_for_image(&self.bytes, image::ImageFormat::Tiff)?,
             ImageFormat::Ico => frames_for_image(&self.bytes, image::ImageFormat::Ico)?,
             ImageFormat::Svg => {
-                return svg_renderer
-                    .render_single_frame(&self.bytes, 1.0, false)
-                    .map_err(Into::into);
+                return svg_renderer.render_single_frame(&self.bytes, 1.0, false);
             }
         };
 

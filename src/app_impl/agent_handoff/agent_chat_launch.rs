@@ -53,43 +53,6 @@ fn open_agent_chat_recovery_dialog_deferred(
     .detach();
 }
 
-struct StandardAgentChatMockFixtureConnection;
-
-impl crate::ai::agent_chat::runtime::AgentChatConnection
-    for StandardAgentChatMockFixtureConnection
-{
-    fn start_turn(
-        &self,
-        _request: crate::ai::agent_chat::runtime::AgentChatTurnRequest,
-    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
-    {
-        let (tx, rx) = async_channel::bounded(2);
-        let _ = tx.try_send(
-            crate::ai::agent_chat::events::AgentChatEvent::AgentMessageDelta(
-                "Fixture Agent Chat response.".to_string(),
-            ),
-        );
-        let _ = tx.try_send(crate::ai::agent_chat::events::AgentChatEvent::completed(
-            "fixture",
-        ));
-        Ok(rx)
-    }
-
-    fn cancel_turn(&self, _ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
-        Ok(())
-    }
-
-    fn prepare_session(
-        &self,
-        _ui_thread_id: String,
-        _cwd: std::path::PathBuf,
-    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
-    {
-        let (_tx, rx) = async_channel::bounded(1);
-        Ok(rx)
-    }
-}
-
 fn agent_chat_hot_prewarm_enabled_from(disabled: Option<&str>, enabled: Option<&str>) -> bool {
     let truthy = |value: Option<&str>| {
         value
@@ -103,46 +66,36 @@ fn agent_chat_hot_prewarm_enabled_from(disabled: Option<&str>, enabled: Option<&
 impl ScriptListApp {
     /// Open a deterministic, provider-free standard Agent Chat surface for
     /// DevTools and visual smoke tests. This intentionally bypasses Pi warm-up.
+
     pub(crate) fn open_standard_agent_chat_mock_fixture(&mut self, cx: &mut Context<Self>) {
+        let owned_hidden = matches!(&self.main_services, MainServices::OwnedFixtures(_));
         let source_view = self.current_view.clone();
         self.seed_agent_chat_return_origin_for_view(&source_view, cx);
 
-        let (_broker, permission_rx) = crate::ai::agent_chat::ui::AgentChatPermissionBroker::new();
-        let thread = cx.new(|cx| {
-            crate::ai::agent_chat::ui::AgentChatThread::new(
-                std::sync::Arc::new(StandardAgentChatMockFixtureConnection),
-                permission_rx,
-                crate::ai::agent_chat::ui::AgentChatThreadInit {
-                    ui_thread_id: "standard-agent-chat-mock-fixture".to_string(),
-                    cwd: std::env::temp_dir().join("script-kit-agent-chat-fixture"),
-                    initial_input: Some("Fixture follow-up".to_string()),
-                    initial_context_parts: Vec::new(),
-                    display_name: "Agent Chat".into(),
-                    profile_id: crate::ai::agent_chat::profiles::BUILTIN_GENERAL_PROFILE_ID
-                        .to_string(),
-                    profile_display_name: Some("Agent Chat".into()),
-                    profile_icon_name: None,
-                    selected_agent: None,
-                    available_agents: Vec::new(),
-                    launch_requirements:
-                        crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
-                    available_models: Vec::new(),
-                    selected_model_id: None,
-                    session_policy:
-                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
-                },
-                cx,
-            )
-        });
+        let (thread, control) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
+            "standard-agent-chat-mock-fixture",
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
+            cx,
+        );
+        if !owned_hidden {
+            let _ = control.queue_turn(vec![
+                crate::ai::agent_chat::events::AgentChatEvent::AgentMessageDelta(
+                    "Fixture Agent Chat response.".to_string(),
+                ),
+                crate::ai::agent_chat::events::AgentChatEvent::completed("fixture"),
+            ]);
+        }
         thread.update(cx, |thread, cx| {
             thread.mark_context_bootstrap_ready(cx);
-            let _ = thread.apply_test_fixture(
-                "assistantText",
-                Some("Can you summarize this fixture?".to_string()),
-                Some("This is a deterministic Agent Chat fixture response.".to_string()),
-                None,
-                cx,
-            );
+            if !owned_hidden {
+                let _ = thread.apply_test_fixture(
+                    "assistantText",
+                    Some("Can you summarize this fixture?".to_string()),
+                    Some("This is a deterministic Agent Chat fixture response.".to_string()),
+                    None,
+                    cx,
+                );
+            }
         });
 
         let view_entity = cx.new(|cx| {
@@ -156,8 +109,10 @@ impl ScriptListApp {
         self.tab_ai_harness_return_focus_target = Some(self.tab_ai_return_focus_target());
         self.enter_embedded_agent_chat_surface(view_entity, cx);
         self.request_focus(FocusTarget::ChatPrompt, cx);
-        script_kit_gpui::set_main_window_visible(true);
-        script_kit_gpui::mark_window_shown();
+        if !owned_hidden {
+            script_kit_gpui::set_main_window_visible(true);
+            script_kit_gpui::mark_window_shown();
+        }
         cx.notify();
     }
 
@@ -173,33 +128,17 @@ impl ScriptListApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<bool> {
-        let (_broker, permission_rx) = crate::ai::agent_chat::ui::AgentChatPermissionBroker::new();
-        let thread = cx.new(|cx| {
-            crate::ai::agent_chat::ui::AgentChatThread::new(
-                std::sync::Arc::new(StandardAgentChatMockFixtureConnection),
-                permission_rx,
-                crate::ai::agent_chat::ui::AgentChatThreadInit {
-                    ui_thread_id: "detached-agent-chat-mock-fixture".to_string(),
-                    cwd: std::env::temp_dir().join("script-kit-agent-chat-fixture"),
-                    initial_input: Some("Fixture follow-up".to_string()),
-                    initial_context_parts: Vec::new(),
-                    display_name: "Agent Chat".into(),
-                    profile_id: crate::ai::agent_chat::profiles::BUILTIN_GENERAL_PROFILE_ID
-                        .to_string(),
-                    profile_display_name: Some("Agent Chat".into()),
-                    profile_icon_name: None,
-                    selected_agent: None,
-                    available_agents: Vec::new(),
-                    launch_requirements:
-                        crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
-                    available_models: Vec::new(),
-                    selected_model_id: None,
-                    session_policy:
-                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
-                },
-                cx,
-            )
-        });
+        let (thread, control) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
+            "detached-agent-chat-mock-fixture",
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
+            cx,
+        );
+        let _ = control.queue_turn(vec![
+            crate::ai::agent_chat::events::AgentChatEvent::AgentMessageDelta(
+                "Fixture Agent Chat response.".to_string(),
+            ),
+            crate::ai::agent_chat::events::AgentChatEvent::completed("fixture"),
+        ]);
         thread.update(cx, |thread, cx| {
             thread.mark_context_bootstrap_ready(cx);
             let _ = thread.apply_test_fixture(

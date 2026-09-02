@@ -6,7 +6,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use super::{
     build_mdquery, detect_file_type, expand_path, looks_like_advanced_mdquery, FileResult,
@@ -21,8 +21,40 @@ const MDFIND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub enum SearchEvent {
     /// A new file result was found
     Result(FileResult),
-    /// Search completed (either finished or cancelled)
-    Done,
+    /// Exactly one terminal result follows streamed rows; failed batches are not committed.
+    Done(Result<(), SearchFailure>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SearchFailure {
+    Source(Arc<std::io::Error>),
+    Cancelled,
+    Disconnected,
+}
+
+impl From<std::io::Error> for SearchFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Source(Arc::new(error))
+    }
+}
+
+impl std::fmt::Display for SearchFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Cancelled => formatter.write_str("file search cancelled"),
+            Self::Disconnected => formatter.write_str("file search output worker disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for SearchFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 /// Cancel token for streaming searches
@@ -69,123 +101,27 @@ impl SearchFilesStreamingOptions {
 /// * `limit` - Maximum number of results to return
 ///
 /// # Returns
-/// Vector of FileResult structs containing file information
+/// Matching files, or the original source failure. Partial failed batches are discarded.
 #[instrument(skip_all, fields(query = %query, onlyin = ?onlyin, limit = limit))]
-pub fn search_files(query: &str, onlyin: Option<&str>, limit: usize) -> Vec<FileResult> {
-    debug!("Starting mdfind search");
-
-    if query.is_empty() {
-        debug!("Empty query, returning empty results");
-        return Vec::new();
-    }
-
-    // Convert user query to proper mdfind query (filename matching)
-    let mdquery = build_mdquery(query);
-    debug!(mdquery = %mdquery, "Built mdfind query");
-
-    let mut cmd = Command::new("mdfind");
-
-    // Add -onlyin if specified
-    if let Some(dir) = onlyin {
-        cmd.arg("-onlyin").arg(dir);
-    }
-
-    // Add the query
-    cmd.arg(&mdquery);
-
-    // Set up streaming: pipe stdout instead of buffering.
-    // Keep stderr detached so we cannot deadlock on an undrained stderr pipe.
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::null());
-
-    debug!(command = ?cmd, "Spawning mdfind");
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            warn!(error = %e, "Failed to spawn mdfind");
-            return Vec::new();
-        }
-    };
-
-    // Take stdout for streaming reads
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            warn!("Failed to capture mdfind stdout");
-            let _ = child.kill();
-            let _ = child.wait();
-            return Vec::new();
-        }
-    };
-
-    let (line_tx, line_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line_result in reader.lines() {
-            let _ = line_tx.send(line_result);
-        }
-    });
-
+pub fn search_files(
+    query: &str,
+    onlyin: Option<&str>,
+    limit: usize,
+) -> Result<Vec<FileResult>, SearchFailure> {
     let mut results = Vec::new();
-    let deadline = Instant::now() + MDFIND_TIMEOUT;
-
-    // Stream line-by-line, stopping after limit
-    while results.len() < limit {
-        if results.len() >= limit {
-            break;
-        }
-
-        let line_result = match line_rx.recv_timeout(MDFIND_POLL_INTERVAL) {
-            Ok(line_result) => line_result,
-            Err(RecvTimeoutError::Timeout) => {
-                if child.try_wait().ok().flatten().is_some() {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    warn!("mdfind search timed out; falling back if possible");
-                    let _ = child.kill();
-                    break;
-                }
-                continue;
+    stream_file_search(
+        query,
+        onlyin,
+        limit,
+        &new_cancel_token(),
+        SearchFilesStreamingOptions::dedicated_file_search(false),
+        &mut |event| {
+            if let SearchEvent::Result(file) = event {
+                results.push(file);
             }
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
-
-        let line = match line_result {
-            Ok(line) => line,
-            Err(e) => {
-                debug!(error = %e, "Error reading mdfind output line");
-                continue;
-            }
-        };
-
-        if let Some(result) = file_result_from_mdfind_line(line, false) {
-            results.push(result);
-        }
-    }
-
-    // Clean up the child process
-    // If we stopped early (hit limit), kill the process
-    if results.len() >= limit {
-        let _ = child.kill();
-    }
-    // Wait for process to fully exit (prevents zombies)
-    let _ = child.wait();
-
-    if results.is_empty() && !looks_like_advanced_mdquery(query) {
-        let fallback = search_files_filesystem_fallback(query, onlyin, limit);
-        if !fallback.is_empty() {
-            debug!(
-                result_count = fallback.len(),
-                "Search completed with filesystem fallback results"
-            );
-            return fallback;
-        }
-    }
-
-    debug!(result_count = results.len(), "Search completed");
-    results
+        },
+    )?;
+    Ok(results)
 }
 
 /// Streaming search: yields results as they arrive via callback.
@@ -258,117 +194,126 @@ pub fn search_files_streaming_with_options<F>(
 ) where
     F: FnMut(SearchEvent),
 {
-    if query.trim().is_empty() {
-        debug!("Empty query, returning Done immediately");
-        on_event(SearchEvent::Done);
-        return;
-    }
+    let result = stream_file_search(query, onlyin, limit, &cancel, options, &mut on_event);
+    on_event(SearchEvent::Done(result));
+}
 
-    // Convert user query to proper mdfind query
+fn stream_file_search<F: FnMut(SearchEvent)>(
+    query: &str,
+    onlyin: Option<&str>,
+    limit: usize,
+    cancel: &CancelToken,
+    options: SearchFilesStreamingOptions,
+    on_event: &mut F,
+) -> Result<(), SearchFailure> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(SearchFailure::Cancelled);
+    }
+    if query.trim().is_empty() || limit == 0 {
+        return Ok(());
+    }
     let mdquery = build_mdquery(query);
     debug!(mdquery = %mdquery, "Built mdfind query for streaming");
-
-    let mut cmd = Command::new("mdfind");
-    if let Some(dir) = onlyin {
-        cmd.arg("-onlyin").arg(dir);
+    let mut command = Command::new("mdfind");
+    if let Some(directory) = onlyin {
+        command.arg("-onlyin").arg(directory);
     }
-    cmd.arg(&mdquery);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-
-    let mut child: Child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            warn!(error = %e, "Failed to spawn mdfind");
-            on_event(SearchEvent::Done);
-            return;
-        }
-    };
-
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            warn!("Failed to capture mdfind stdout");
-            let _ = child.kill();
-            let _ = child.wait();
-            on_event(SearchEvent::Done);
-            return;
-        }
-    };
-
-    let (line_tx, line_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line_result in reader.lines() {
-            let _ = line_tx.send(line_result);
-        }
-    });
-
-    let mut count = 0usize;
-    let deadline = Instant::now() + MDFIND_TIMEOUT;
-
-    loop {
-        // Check cancellation token before processing each line
-        if cancel.load(Ordering::Relaxed) {
-            debug!("Search cancelled, killing mdfind");
-            let _ = child.kill();
-            break;
-        }
-
-        if count >= limit {
-            debug!("Hit limit {}, killing mdfind", limit);
-            let _ = child.kill();
-            break;
-        }
-
-        let line_result = match line_rx.recv_timeout(MDFIND_POLL_INTERVAL) {
-            Ok(line_result) => line_result,
-            Err(RecvTimeoutError::Timeout) => {
-                if child.try_wait().ok().flatten().is_some() {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    warn!("mdfind streaming search timed out; falling back if possible");
-                    let _ = child.kill();
-                    break;
-                }
-                continue;
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
-
-        let line = match line_result {
-            Ok(l) => l,
-            Err(e) => {
-                debug!(error = %e, "Error reading mdfind output line");
-                continue;
-            }
-        };
-
-        if let Some(result) = file_result_from_mdfind_line(line, options.skip_metadata) {
-            on_event(SearchEvent::Result(result));
-            count += 1;
-        }
-    }
-
-    // Clean up the child process
-    let _ = child.wait();
-
-    if options.allow_filesystem_fallback
-        && count == 0
-        && !cancel.load(Ordering::Relaxed)
-        && !looks_like_advanced_mdquery(query)
-    {
-        let fallback = search_files_filesystem_fallback(query, onlyin, limit);
-        for result in fallback {
+    let child = command
+        .arg(mdquery)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let count = stream_mdfind_child(
+        child,
+        limit,
+        cancel,
+        options.skip_metadata,
+        Instant::now() + MDFIND_TIMEOUT,
+        on_event,
+    )?;
+    if options.allow_filesystem_fallback && count == 0 && !looks_like_advanced_mdquery(query) {
+        for result in search_files_filesystem_fallback(query, onlyin, limit)? {
             if cancel.load(Ordering::Relaxed) {
-                break;
+                return Err(SearchFailure::Cancelled);
             }
             on_event(SearchEvent::Result(result));
         }
     }
+    if cancel.load(Ordering::Relaxed) {
+        Err(SearchFailure::Cancelled)
+    } else {
+        Ok(())
+    }
+}
 
-    debug!(result_count = count, "Streaming search completed");
-    on_event(SearchEvent::Done);
+fn stream_mdfind_child<F: FnMut(SearchEvent)>(
+    mut child: Child,
+    limit: usize,
+    cancel: &CancelToken,
+    skip_metadata: bool,
+    deadline: Instant,
+    on_event: &mut F,
+) -> Result<usize, SearchFailure> {
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other("mdfind stdout was not piped").into());
+    };
+    let (line_tx, line_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let failed = line.is_err();
+            if line_tx.send(line.map(Some)).is_err() || failed {
+                return;
+            }
+        }
+        // EOF is an explicit protocol value, not an inferred sender disconnect.
+        let _ = line_tx.send(Ok(None));
+    });
+    let mut count = 0usize;
+    let mut limited = false;
+    let outcome = loop {
+        if cancel.load(Ordering::Relaxed) {
+            break Err(SearchFailure::Cancelled);
+        }
+        if count >= limit {
+            limited = true;
+            break Ok(());
+        }
+        match line_rx.recv_timeout(MDFIND_POLL_INTERVAL) {
+            Ok(Ok(Some(line))) => {
+                if let Some(result) = file_result_from_mdfind_line(line, skip_metadata) {
+                    on_event(SearchEvent::Result(result));
+                    count += 1;
+                }
+            }
+            Ok(Ok(None)) => break Ok(()),
+            Ok(Err(error)) => break Err(error.into()),
+            Err(RecvTimeoutError::Disconnected) => break Err(SearchFailure::Disconnected),
+            Err(RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "mdfind exceeded its source deadline",
+                    )
+                    .into());
+                }
+            }
+        }
+    };
+    if limited || outcome.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait();
+    if reader.join().is_err() {
+        return Err(SearchFailure::Disconnected);
+    }
+    outcome?;
+    let status = status?;
+    if !limited && !status.success() {
+        return Err(std::io::Error::other(format!("mdfind exited with {status}")).into());
+    }
+    Ok(count)
 }
 
 fn file_result_from_mdfind_line(line: String, skip_metadata: bool) -> Option<FileResult> {
@@ -418,31 +363,51 @@ fn search_files_filesystem_fallback(
     query: &str,
     onlyin: Option<&str>,
     limit: usize,
-) -> Vec<FileResult> {
+) -> std::io::Result<Vec<FileResult>> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() || limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let roots = fallback_roots(onlyin);
+    let roots = if let Some(directory) = onlyin {
+        let expanded = expand_path(directory).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid file search scope",
+            )
+        })?;
+        vec![PathBuf::from(expanded).canonicalize()?]
+    } else {
+        fallback_roots()
+    };
     if roots.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut results = Vec::new();
     let mut visited = 0usize;
     let mut stack = roots;
+    let mut first_directory = true;
 
     while let Some(dir) = stack.pop() {
         if results.len() >= limit || visited >= FILESYSTEM_FALLBACK_MAX_VISITED {
             break;
         }
 
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let required = onlyin.is_some() && first_directory;
+        first_directory = false;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if required => return Err(error),
+            Err(_) => continue,
         };
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if required => return Err(error),
+                Err(_) => continue,
+            };
             if results.len() >= limit || visited >= FILESYSTEM_FALLBACK_MAX_VISITED {
                 break;
             }
@@ -491,18 +456,11 @@ fn search_files_filesystem_fallback(
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.path.cmp(&b.path))
     });
-    results
+    Ok(results)
 }
 
-fn fallback_roots(onlyin: Option<&str>) -> Vec<PathBuf> {
+fn fallback_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-
-    if let Some(dir) = onlyin {
-        if let Some(expanded) = expand_path(dir) {
-            push_fallback_root(&mut roots, PathBuf::from(expanded));
-        }
-        return roots;
-    }
 
     if let Some(home) = dirs::home_dir() {
         push_fallback_root(&mut roots, home.clone());
@@ -540,9 +498,9 @@ fn push_fallback_root(roots: &mut Vec<PathBuf>, path: PathBuf) {
 /// the same skip rules as the search fallback, sorted by mtime descending.
 /// Hidden files are skipped for this landing-state seed; typing a sub-query
 /// still finds them through the search fallback.
-pub fn recent_files_filesystem(root: &Path, limit: usize) -> Vec<FileResult> {
-    if limit == 0 || !root.is_dir() {
-        return Vec::new();
+pub fn recent_files_filesystem(root: &Path, limit: usize) -> std::io::Result<Vec<FileResult>> {
+    if limit == 0 {
+        return Ok(Vec::new());
     }
 
     let mut results = Vec::new();
@@ -554,11 +512,18 @@ pub fn recent_files_filesystem(root: &Path, limit: usize) -> Vec<FileResult> {
             break;
         }
 
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if dir == root => return Err(error),
+            Err(_) => continue,
         };
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if dir == root => return Err(error),
+                Err(_) => continue,
+            };
             if visited >= FILESYSTEM_FALLBACK_MAX_VISITED {
                 break;
             }
@@ -600,9 +565,9 @@ pub fn recent_files_filesystem(root: &Path, limit: usize) -> Vec<FileResult> {
         }
     }
 
-    results.sort_by(|a, b| b.modified.cmp(&a.modified));
+    results.sort_by_key(|a| std::cmp::Reverse(a.modified));
     results.truncate(limit);
-    results
+    Ok(results)
 }
 
 fn should_skip_fallback_dir(name: &str) -> bool {
@@ -647,7 +612,8 @@ mod tests {
         let wanted = temp.path().join("script-kit-search-target.txt");
         std::fs::write(&wanted, "fixture").expect("write fixture");
 
-        let results = search_files_filesystem_fallback("search-target", temp.path().to_str(), 10);
+        let results = search_files_filesystem_fallback("search-target", temp.path().to_str(), 10)
+            .expect("read search scope");
 
         // The walker canonicalizes its roots (macOS tempdirs live behind the
         // /var → /private/var symlink), so compare canonical paths.
@@ -670,7 +636,7 @@ mod tests {
         std::fs::create_dir(temp.path().join("src")).expect("mkdir");
         std::fs::write(temp.path().join("src/nested.rs"), "fixture").expect("write fixture");
 
-        let results = super::recent_files_filesystem(temp.path(), 10);
+        let results = super::recent_files_filesystem(temp.path(), 10).expect("read recent scope");
         let names: Vec<&str> = results.iter().map(|entry| entry.name.as_str()).collect();
 
         assert!(names.contains(&"visible.txt"), "top-level file: {names:?}");
@@ -696,8 +662,77 @@ mod tests {
             .expect("write fixture");
         }
 
-        let results = search_files_filesystem_fallback("limit-target", temp.path().to_str(), 2);
+        let results = search_files_filesystem_fallback("limit-target", temp.path().to_str(), 2)
+            .expect("read search scope");
 
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn filesystem_sources_do_not_turn_missing_scope_into_empty_success() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let missing = temp.path().join("missing");
+        assert_eq!(
+            search_files_filesystem_fallback("needle", missing.to_str(), 10)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            super::recent_files_filesystem(&missing, 10)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(super::recent_files_filesystem(&missing, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn native_partial_stdout_with_failed_exit_is_not_success() {
+        let child = super::Command::new("/bin/sh")
+            .args(["-c", "printf '/tmp/partial-row\\n'; exit 7"])
+            .stdout(super::Stdio::piped())
+            .spawn()
+            .expect("spawn source process");
+        let mut rows = Vec::new();
+        let outcome = super::stream_mdfind_child(
+            child,
+            10,
+            &super::new_cancel_token(),
+            true,
+            super::Instant::now() + super::MDFIND_TIMEOUT,
+            &mut |event| {
+                if let super::SearchEvent::Result(row) = event {
+                    rows.push(row);
+                }
+            },
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(outcome, Err(super::SearchFailure::Source(_))));
+    }
+
+    #[test]
+    fn source_io_error_kinds_are_not_control_outcomes() {
+        for kind in [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            assert!(
+                matches!(super::SearchFailure::from(std::io::Error::new(kind, "source IO")), super::SearchFailure::Source(error) if error.kind() == kind)
+            );
+        }
+        let cancel = super::new_cancel_token();
+        cancel.store(true, super::Ordering::Relaxed);
+        let mut events = Vec::new();
+        super::search_files_streaming("needle", None, 10, cancel, true, |event| events.push(event));
+        assert!(matches!(
+            events.as_slice(),
+            [super::SearchEvent::Done(Err(
+                super::SearchFailure::Cancelled
+            ))]
+        ));
     }
 }

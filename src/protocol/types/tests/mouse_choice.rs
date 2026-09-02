@@ -103,9 +103,11 @@ fn test_choice_semantic_id_prefers_key() {
 fn test_choice_semantic_id_falls_back_to_index() {
     let choice = Choice::new("Banana".to_string(), "banana".to_string()).with_semantic_id(3);
 
-    // Without key, semantic_id should use index
-    assert!(choice.semantic_id.as_ref().unwrap().contains("3"));
-    assert!(choice.semantic_id.as_ref().unwrap().contains("banana"));
+    // Index fallback keeps the private value out of the protocol-visible ID.
+    let semantic_id = choice.semantic_id.as_ref().unwrap();
+    assert!(semantic_id.starts_with("choice:3:sha256-"));
+    assert!(!semantic_id.contains("banana"));
+    assert_eq!(semantic_id, &choice.generate_id(3));
 }
 
 #[test]

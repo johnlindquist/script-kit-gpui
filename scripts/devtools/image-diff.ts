@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { readReceiptDocument, resolveReceiptDetails } from "./lib/receipt-artifact.ts";
 
 type Args = {
   red: string;
@@ -181,7 +182,7 @@ async function cropFromReceipt(path: string, imageWidth: number, referenceWidth:
   if (!Number.isFinite(referenceWidth) || referenceWidth == null || referenceWidth <= 0) {
     throw new Error(`--*-crop-from-receipt requires a positive --*-reference-width`);
   }
-  const receipt = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>;
+  const receipt = resolveReceiptDetails(readReceiptDocument(path), path);
   const root = asObject(receipt);
   const boundsCandidates = [
     asObject(asObject(asObject(root.visualEvidence).captureIdentity).crop),
@@ -212,7 +213,7 @@ async function cropFromReceipt(path: string, imageWidth: number, referenceWidth:
 
 async function osEvidenceFromReceipt(path: string) {
   if (!path) return null;
-  const receipt = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>;
+  const receipt = resolveReceiptDetails(readReceiptDocument(path), path);
   const visualEvidence = asObject(receipt.visualEvidence);
   const pixelAudit = asObject(visualEvidence.pixelAudit);
   const screenshotEvidence = asObject(receipt.screenshotEvidence);

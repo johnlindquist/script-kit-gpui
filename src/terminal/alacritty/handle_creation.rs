@@ -90,6 +90,7 @@ impl TerminalHandle {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
 
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
         // Always spawn an interactive shell - never use -c which exits after command.
         // If a command is provided, we'll write it to the PTY after creation.
         let mut pty = PtyManager::with_size(cols, rows).context("Failed to create PTY")?;
@@ -152,7 +153,8 @@ impl TerminalHandle {
         let mut handle = Self {
             state,
             event_proxy,
-            pty,
+            pty: Some(pty),
+            fixture_input: Vec::new(),
             exit_event_emitted: false,
             theme,
             cols,
@@ -181,6 +183,75 @@ impl TerminalHandle {
         Ok(handle)
     }
 
+    /// Construct the production VT parser/grid without a PTY, process or reader thread.
+    pub fn from_bytes(cols: u16, rows: u16, theme: &Theme, bytes: &[u8]) -> Result<Self> {
+        anyhow::ensure!(
+            cols > 0 && rows > 0 && cols <= 512 && rows <= 256,
+            "invalid_terminal_size"
+        );
+        anyhow::ensure!(
+            bytes.len() <= MAX_PROCESS_BYTES_PER_TICK,
+            "terminal_fixture_too_large"
+        );
+        let event_proxy = EventProxy::new();
+        let config = TermConfig {
+            scrolling_history: DEFAULT_SCROLLBACK_LINES,
+            kitty_keyboard: true,
+            ..TermConfig::default()
+        };
+        let mut state =
+            TerminalState::new(config, &TerminalSize::new(cols, rows), event_proxy.clone());
+        state.process_bytes(bytes);
+        let (_tx, pty_output_rx) = std::sync::mpsc::channel();
+        Ok(Self {
+            state: Arc::new(Mutex::new(state)),
+            event_proxy,
+            pty: None,
+            fixture_input: Vec::new(),
+            exit_event_emitted: false,
+            theme: ThemeAdapter::from_theme(theme),
+            cols,
+            rows,
+            pty_output_rx,
+            reader_stop_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reader_thread: None,
+        })
+    }
+
+    /// Feed the same parser used by PTY output. An interactive terminal cannot
+    /// accept this fixture-only source, so injected bytes cannot race live I/O.
+    pub fn feed_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(self.pty.is_none(), "terminal_source_is_interactive");
+        anyhow::ensure!(
+            bytes.len() <= MAX_PROCESS_BYTES_PER_TICK,
+            "terminal_fixture_too_large"
+        );
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .process_bytes(bytes);
+        Ok(())
+    }
+
+    pub fn finish_fixture(&mut self, exit_code: i32) -> Result<()> {
+        anyhow::ensure!(self.pty.is_none(), "terminal_source_is_interactive");
+        anyhow::ensure!(
+            !self.exit_event_emitted,
+            "terminal_fixture_already_finished"
+        );
+        self.event_proxy
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(TerminalEvent::Exit(exit_code));
+        self.exit_event_emitted = true;
+        Ok(())
+    }
+
+    pub fn fixture_input(&self) -> Option<&[u8]> {
+        self.pty.is_none().then_some(self.fixture_input.as_slice())
+    }
+
     /// Detects the default shell for the current platform.
     ///
     /// On Unix, uses `$SHELL` environment variable, falling back to `/bin/sh`.
@@ -194,5 +265,51 @@ impl TerminalHandle {
         {
             std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod injected_source_tests {
+    use super::*;
+
+    #[test]
+    fn injected_terminal_runs_real_parser_and_has_no_process() {
+        let mut terminal =
+            TerminalHandle::from_bytes(20, 5, &Theme::default(), b"\x1b[31mred\x1b[0m\r\nnext")
+                .unwrap();
+        assert!(!terminal.is_running());
+        assert!(terminal.reader_thread.is_none());
+        assert!(terminal.text_snapshot(10, 1024).text.contains("red\nnext"));
+        terminal.input(b"local-input").unwrap();
+        assert_eq!(terminal.fixture_input(), Some(b"local-input".as_slice()));
+        terminal.feed_bytes(b"\r\nmore").unwrap();
+        terminal.resize(25, 6).unwrap();
+        assert!(terminal.text_snapshot(10, 1024).text.contains("more"));
+        terminal.finish_fixture(7).unwrap();
+        assert!(terminal.finish_fixture(7).is_err());
+        let (_, events) = terminal.process();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, TerminalEvent::Exit(7)))
+                .count(),
+            1
+        );
+        assert!(terminal.process().1.iter().all(|event| !event.is_exit()));
+    }
+
+    #[test]
+    fn injected_terminal_bounds_precede_allocation() {
+        let theme = Theme::default();
+        assert!(TerminalHandle::from_bytes(0, 5, &theme, b"").is_err());
+        assert!(TerminalHandle::from_bytes(513, 5, &theme, b"").is_err());
+        assert!(TerminalHandle::from_bytes(20, 257, &theme, b"").is_err());
+        assert!(TerminalHandle::from_bytes(
+            20,
+            5,
+            &theme,
+            &vec![0; MAX_PROCESS_BYTES_PER_TICK + 1]
+        )
+        .is_err());
     }
 }

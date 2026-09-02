@@ -18,6 +18,7 @@ import {
 } from "./operator-safety.ts";
 import { classifyReceiptEvidence } from "./evidence-class.ts";
 import { classifyTransportError } from "./transport-errors.ts";
+import { verifyImmutableArtifact, type ArtifactReference } from "../../agentic/build-artifact.ts";
 
 export type JsonObject = Record<string, unknown>;
 
@@ -254,17 +255,10 @@ export interface BinaryFingerprint {
   modifiedAt: string;
   sourceCommit: string | null;
   pinned: boolean;
+  artifactReference?: ArtifactReference;
+  provenance?: Record<string, unknown>;
 }
 
-function currentGitCommit(): string | null {
-  const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  return result.exitCode === 0
-    ? new TextDecoder().decode(result.stdout).trim()
-    : null;
-}
 
 function receiptSafeBinaryPath(path: string): string {
   const repoRelative = relative(process.cwd(), path);
@@ -280,22 +274,25 @@ function receiptSafeBinaryPath(path: string): string {
  * stale one — the audit's stale-binary trap.
  */
 export function binaryFingerprint(session: string): BinaryFingerprint | null {
-  try {
-    const recorded = join(sessionDir(session), "binary");
-    if (!existsSync(recorded)) return null;
-    const path = readFileSync(recorded, "utf8").trim();
-    const stat = statSync(path);
-    return {
-      path: receiptSafeBinaryPath(path),
-      sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
-      sizeBytes: stat.size,
-      modifiedAt: new Date(stat.mtimeMs).toISOString(),
-      sourceCommit: currentGitCommit(),
-      pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY),
-    };
-  } catch {
-    return null;
+  const directory = sessionDir(session);
+  const recorded = join(directory, "binary");
+  if (!existsSync(recorded)) return null;
+  const path = readFileSync(recorded, "utf8").trim();
+  const referencePath = join(directory, "artifact-reference.json");
+  if (existsSync(referencePath)) {
+    const reference = JSON.parse(readFileSync(referencePath, "utf8")) as ArtifactReference;
+    const artifact = verifyImmutableArtifact(process.cwd(), reference, {
+      kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "recorded-content",
+    });
+    if (artifact.executablePath !== path) throw new Error("recorded_session_artifact_mismatch");
+    return { ...artifact.binary, artifactReference: artifact.reference } as unknown as BinaryFingerprint;
   }
+  try {
+    const stat = statSync(path);
+    return { path: receiptSafeBinaryPath(path), sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+      sizeBytes: stat.size, modifiedAt: new Date(stat.mtimeMs).toISOString(), sourceCommit: null,
+      pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY) };
+  } catch { return null; }
 }
 
 // --- receipt envelope ----------------------------------------------------------

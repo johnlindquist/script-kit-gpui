@@ -16,6 +16,8 @@ mod app_impl_state_sync_tests;
 mod attachment_portal;
 #[path = "automation_surface.rs"]
 mod automation_surface;
+#[path = "main_revision_observers.rs"]
+mod main_revision_observers;
 mod background_effects;
 #[path = "chat_actions.rs"]
 mod chat_actions;
@@ -31,6 +33,8 @@ mod filter_input_change;
 mod filter_input_core;
 #[path = "filter_input_updates.rs"]
 mod filter_input_updates;
+#[path = "../launch_filter_policy.rs"]
+mod launch_filter_policy;
 #[path = "filtering_cache.rs"]
 mod filtering_cache;
 #[path = "lifecycle_reset.rs"]
@@ -87,6 +91,11 @@ mod simulate_key_dispatch;
 // Core ScriptListApp implementation: startup, event handling, UI wiring, and state management.
 #[path = "startup.rs"]
 mod startup;
+#[path = "startup_data.rs"]
+mod startup_data;
+pub(crate) use startup_data::{MainInitialData, MainServices};
+#[cfg(any(test, feature = "owned-ui-evaluation"))]
+pub(crate) use startup_data::OwnedMainSources;
 #[path = "submit_diagnostics.rs"]
 mod submit_diagnostics;
 #[path = "theme_focus.rs"]

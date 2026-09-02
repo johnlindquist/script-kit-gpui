@@ -47,6 +47,7 @@ mod script_issue_catalog_tests {
             &mut grouped,
             &mut results,
             &report_for_retained(ValidationSeverity::Fatal),
+            None,
         );
 
         let SearchResult::ScriptIssue(issue) = &results[0] else {
@@ -67,6 +68,7 @@ mod script_issue_catalog_tests {
             &mut grouped,
             &mut results,
             &report_for_retained(ValidationSeverity::Warning),
+            None,
         );
 
         let SearchResult::ScriptIssue(issue) = &results[0] else {
@@ -84,7 +86,7 @@ mod advanced_query_tests {
     use super::*;
     use crate::file_search::{FileResult, FileType};
     use crate::menu_syntax::{parse, AdvancedQuery, MenuSyntaxParse};
-    use crate::scripts::types::{BuiltInMatch, MatchIndices};
+    use crate::scripts::types::BuiltInMatch;
 
     fn issue_row() -> SearchResult {
         SearchResult::ScriptIssue(ScriptIssueMatch {
@@ -197,53 +199,6 @@ mod advanced_query_tests {
     }
 
     #[test]
-    fn _compile_time_signature_and_marker() {
-        // Compile-time witness that the new entry points exist and accept Option<&AdvancedQuery>.
-        // Exercising them at runtime requires fuzzy-search fixtures that pull in heavy state;
-        // that surface is covered by the existing scripts::grouping chunked tests.
-        let _: fn(
-            &[Arc<Script>],
-            &[Arc<Scriptlet>],
-            &[BuiltInEntry],
-            &[AppInfo],
-            &[Arc<PluginSkill>],
-            &[crate::flows::model::FlowDescriptor],
-            Option<&grouped_view::FlowDiscoveryNote>,
-            &FrecencyStore,
-            &str,
-            &SuggestedConfig,
-            &[MenuBarItem],
-            Option<&str>,
-            Option<&crate::input_history::InputHistory>,
-            Option<&AdvancedQuery>,
-            Option<&crate::context_snapshot::launcher_context::LauncherContextSnapshot>,
-        ) -> (Vec<GroupedListItem>, Vec<SearchResult>) =
-            get_grouped_results_with_input_history_and_query;
-
-        let _: fn(
-            &[Arc<Script>],
-            &[Arc<Scriptlet>],
-            &[BuiltInEntry],
-            &[AppInfo],
-            &[Arc<PluginSkill>],
-            &[crate::flows::model::FlowDescriptor],
-            Option<&grouped_view::FlowDiscoveryNote>,
-            &FrecencyStore,
-            &str,
-            &SuggestedConfig,
-            &[MenuBarItem],
-            Option<&str>,
-            Option<&crate::input_history::InputHistory>,
-            Option<&ValidationReport>,
-            Option<&AdvancedQuery>,
-        ) -> (Vec<GroupedListItem>, Vec<SearchResult>) =
-            get_grouped_results_with_validation_and_query;
-
-        let m = MatchIndices::default();
-        let _ = m.clone();
-    }
-
-    #[test]
     fn pin_alias_match_first_moves_existing_result_to_top() {
         let mut flat = vec![
             builtin_result("Other Command"),
@@ -260,6 +215,7 @@ mod advanced_query_tests {
             &mut flat,
             &|result| matches!(result, SearchResult::BuiltIn(bm) if bm.entry.id == "builtin/aliased-command"),
             &|| builtin_result("Aliased Command"),
+            None,
         );
 
         assert!(
@@ -290,6 +246,7 @@ mod advanced_query_tests {
             &mut flat,
             &|result| matches!(result, SearchResult::BuiltIn(bm) if bm.entry.id == "builtin/aliased-command"),
             &|| builtin_result("Aliased Command"),
+            None,
         );
 
         assert!(matches!(
@@ -312,6 +269,7 @@ mod advanced_query_tests {
             &mut flat,
             &|result| matches!(result, SearchResult::BuiltIn(bm) if bm.entry.id == "builtin/aliased-command"),
             &|| builtin_result("Aliased Command"),
+            None,
         );
 
         assert_eq!(flat.len(), 2, "fallback result must be appended");
@@ -341,6 +299,7 @@ mod advanced_query_tests {
             &mut flat,
             &|result| matches!(result, SearchResult::BuiltIn(bm) if bm.entry.id == "builtin/aliased-command"),
             &|| builtin_result("Aliased Command"),
+            None,
         );
 
         assert!(matches!(grouped.first(), Some(GroupedListItem::Item(1))));
@@ -510,6 +469,60 @@ mod advanced_query_tests {
     }
 
     #[test]
+    fn provider_ranking_receipt_preserves_scores_order_and_actual_budget() {
+        let mut first = root_browser_tab_hit("tab/z", "Zebra");
+        first.score = 91.5;
+        let mut second = root_browser_tab_hit("tab/a", "Alpha");
+        second.score = 7.25;
+        let hits = [first, second];
+        for (remaining_total, domain_intent, expected_count) in [(1, false, 1), (0, true, 2)] {
+            let mut grouped = Vec::new();
+            let mut results = Vec::new();
+            let mut evidence = MainMenuRankingEvidenceMap::new();
+            let mut budget = RootPassiveResultBudget {
+                remaining_total,
+                max_per_source: 2,
+            };
+            append_root_browser_tabs_section(
+                &mut grouped,
+                &mut results,
+                "example.com",
+                None,
+                &hits,
+                crate::browser_tabs::RootBrowserTabsSectionOptions {
+                    enabled: true,
+                    max_results: 2,
+                    ..Default::default()
+                },
+                &mut budget,
+                false,
+                domain_intent,
+                Some(&mut evidence),
+            );
+            assert_eq!(results.len(), expected_count);
+            assert_eq!(
+                results[0].name(),
+                "Zebra",
+                "provider order must not become alphabetical"
+            );
+            let first = &evidence["tab/z"];
+            assert_eq!(first.provider_rank, Some(0));
+            assert_eq!(first.provider_score, Some(91.5));
+            assert_eq!(first.score, None, "rank-as-score is not relevance evidence");
+            assert_eq!(first.budget_limit, Some(expected_count));
+            assert_eq!(first.admitted_count, Some(expected_count));
+            assert_eq!(
+                first.pin_reason,
+                domain_intent.then_some("bare-domain-tabs")
+            );
+            if domain_intent {
+                assert_eq!(evidence["tab/a"].provider_rank, Some(1));
+                assert_eq!(evidence["tab/a"].provider_score, Some(7.25));
+            }
+        }
+    }
+
+    #[test]
     fn bare_domain_hoists_browser_tabs_ahead_of_every_group() {
         let hits = vec![root_browser_tab_hit("tab/x", "X")];
         let options = crate::browser_tabs::RootBrowserTabsSectionOptions {
@@ -536,6 +549,7 @@ mod advanced_query_tests {
             &mut exhausted_budget,
             false,
             true,
+            None,
         );
 
         assert!(matches!(
@@ -566,6 +580,7 @@ mod advanced_query_tests {
             &mut RootPassiveResultBudget::unbounded(),
             false,
             false,
+            None,
         );
         assert!(matches!(
             ordinary_grouped.first(),
@@ -983,6 +998,7 @@ mod advanced_query_tests {
                 max_total_results_when_primary_visible: 12,
                 max_results_per_source_when_primary_visible: 5,
             },
+            None,
         );
 
         let roles = grouped_result_roles(&grouped, &flat);
@@ -1154,6 +1170,7 @@ mod advanced_query_tests {
                 max_total_results_when_primary_visible: 12,
                 max_results_per_source_when_primary_visible: 5,
             },
+            None,
         );
 
         let roles = grouped_result_roles(&grouped, &flat);
@@ -1292,6 +1309,7 @@ mod advanced_query_tests {
                     max_total_results_when_primary_visible: 12,
                     max_results_per_source_when_primary_visible: 5,
                 },
+                None,
             )
         };
 
@@ -1475,6 +1493,7 @@ mod advanced_query_tests {
                     },
                     &crate::config::UnifiedSearchPassiveSource::DEFAULT_ORDER,
                     crate::config::UnifiedSearchPassiveResultLimitsConfig::default(),
+                    None,
                 );
 
             let section_labels = grouped
@@ -1611,6 +1630,7 @@ mod advanced_query_tests {
                 max_total_results_when_primary_visible: 4,
                 max_results_per_source_when_primary_visible: 1,
             },
+            None,
         );
 
         let roles = grouped_result_roles(&grouped, &flat);
@@ -1736,6 +1756,7 @@ mod advanced_query_tests {
                 max_total_results_when_primary_visible: 1,
                 max_results_per_source_when_primary_visible: 1,
             },
+            None,
         );
 
         assert_eq!(passive_result_count(&flat), 5);
@@ -1847,6 +1868,7 @@ mod advanced_query_tests {
                     max_total_results_when_primary_visible: 0,
                     max_results_per_source_when_primary_visible: 1,
                 },
+                None,
             );
 
         assert!(flat.iter().any(is_primary_launcher_result));
@@ -1885,6 +1907,7 @@ mod advanced_query_tests {
             crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions::default(),
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
 
         assert!(
@@ -1914,6 +1937,7 @@ mod advanced_query_tests {
             crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions::default(),
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -1928,6 +1952,7 @@ mod advanced_query_tests {
             crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions::default(),
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -1951,6 +1976,7 @@ mod advanced_query_tests {
             },
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
 
         assert!(grouped.is_empty());
@@ -1991,6 +2017,7 @@ mod advanced_query_tests {
             },
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         append_root_agent_chat_history_section(
             &mut grouped,
@@ -2001,6 +2028,7 @@ mod advanced_query_tests {
             crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions::default(),
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
 
         assert!(
@@ -2058,6 +2086,7 @@ mod advanced_query_tests {
             },
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         append_root_clipboard_history_section(
             &mut grouped,
@@ -2071,6 +2100,7 @@ mod advanced_query_tests {
             },
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         append_root_agent_chat_history_section(
             &mut grouped,
@@ -2081,6 +2111,7 @@ mod advanced_query_tests {
             crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions::default(),
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
 
         assert!(
@@ -2121,6 +2152,7 @@ mod advanced_query_tests {
             enabled_options,
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2134,6 +2166,7 @@ mod advanced_query_tests {
             enabled_options,
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2150,6 +2183,7 @@ mod advanced_query_tests {
             },
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2164,6 +2198,7 @@ mod advanced_query_tests {
             enabled_options,
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2192,6 +2227,7 @@ mod advanced_query_tests {
             enabled_options,
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2205,6 +2241,7 @@ mod advanced_query_tests {
             enabled_options,
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2221,6 +2258,7 @@ mod advanced_query_tests {
             },
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2235,6 +2273,7 @@ mod advanced_query_tests {
             enabled_options,
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
         assert!(grouped.is_empty());
         assert!(flat.is_empty());
@@ -2278,6 +2317,7 @@ mod advanced_query_tests {
             crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions::default(),
             &mut RootPassiveResultBudget::unbounded(),
             false,
+            None,
         );
 
         assert!(
@@ -3750,6 +3790,7 @@ mod advanced_query_tests {
                 },
                 &crate::config::UnifiedSearchPassiveSource::DEFAULT_ORDER,
                 crate::config::UnifiedSearchPassiveResultLimitsConfig::default(),
+                None,
             );
 
         let file_count = flat
@@ -3792,6 +3833,7 @@ mod advanced_query_tests {
             "",
             None,
             crate::file_search::RootFileSectionOptions::default(),
+            None,
         );
 
         assert!(
@@ -4260,13 +4302,22 @@ mod conversations_section_tests {
             &[inbox],
             RootBrainInboxSectionOptions::default(),
             2,
+            None,
         );
         let records = vec![
             flow_record(1, 100),
             agent_chat_record("a", 300),
             quick_ai_record(9, 200),
         ];
-        prepend_root_conversations_section(&mut grouped, &mut flat, "", &records, &[flow()], NOW);
+        prepend_root_conversations_section(
+            &mut grouped,
+            &mut flat,
+            "",
+            &records,
+            &[flow()],
+            NOW,
+            None,
+        );
 
         // Exactly ONE Conversations header, at the very top.
         let headers: Vec<&String> = grouped
@@ -4316,6 +4367,7 @@ mod conversations_section_tests {
             &[older_running, newer_idle],
             &[flow()],
             NOW,
+            None,
         );
         assert!(
             matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(2)),
@@ -4334,7 +4386,15 @@ mod conversations_section_tests {
         let records = vec![agent_chat_record("a", 300), flow_record(1, 200), failed];
         let mut grouped = vec![];
         let mut flat = vec![];
-        prepend_root_conversations_section(&mut grouped, &mut flat, "", &records, &[flow()], NOW);
+        prepend_root_conversations_section(
+            &mut grouped,
+            &mut flat,
+            "",
+            &records,
+            &[flow()],
+            NOW,
+            None,
+        );
         let subtitle = |index: usize| match &flat[index] {
             SearchResult::Flow(row) => row.subtitle.clone(),
             other => panic!("expected conversation row, got {other:?}"),
@@ -4354,7 +4414,7 @@ mod conversations_section_tests {
     fn empty_store_renders_no_header() {
         let mut grouped = vec![];
         let mut flat = vec![];
-        prepend_root_conversations_section(&mut grouped, &mut flat, "", &[], &[flow()], NOW);
+        prepend_root_conversations_section(&mut grouped, &mut flat, "", &[], &[flow()], NOW, None);
         assert!(grouped.is_empty(), "no Conversations header when empty");
         assert!(flat.is_empty());
     }
@@ -4376,6 +4436,7 @@ mod conversations_section_tests {
             &[older.clone(), newer.clone()],
             &[flow()],
             NOW,
+            None,
         );
         assert!(matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(2)));
 
@@ -4392,6 +4453,7 @@ mod conversations_section_tests {
             &[touched_older, newer],
             &[flow()],
             NOW,
+            None,
         );
         assert!(
             matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(1)),
@@ -4414,6 +4476,7 @@ mod conversations_section_tests {
                 records,
                 &[flow()],
                 NOW,
+                None,
             );
             stable_keys(&flat)
         };
@@ -4431,7 +4494,15 @@ mod conversations_section_tests {
         let b = flow_record(2, 500);
         let mut grouped = vec![];
         let mut flat = vec![];
-        prepend_root_conversations_section(&mut grouped, &mut flat, "", &[a, b], &[flow()], NOW);
+        prepend_root_conversations_section(
+            &mut grouped,
+            &mut flat,
+            "",
+            &[a, b],
+            &[flow()],
+            NOW,
+            None,
+        );
         assert!(matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(2)));
         assert!(matches!(&flat[1], SearchResult::Flow(row) if row.flow_session_id() == Some(1)));
     }
@@ -4450,6 +4521,7 @@ mod conversations_section_tests {
             &[flow_record(7, 100)],
             &[], // no descriptors on disk
             NOW,
+            None,
         );
         assert!(
             matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(7) && row.flow.is_none())
@@ -4467,6 +4539,7 @@ mod conversations_section_tests {
             &[flow_record(1, 100), agent_chat_record("a", 200)],
             &[flow()],
             NOW,
+            None,
         );
         assert_eq!(flat.len(), 1, "only the Working row matches");
         assert!(
@@ -4551,6 +4624,7 @@ mod brain_inbox_section_tests {
             &items,
             RootBrainInboxSectionOptions::default(),
             NOW,
+            None,
         );
 
         assert!(
@@ -4607,6 +4681,7 @@ mod brain_inbox_section_tests {
                 max_results: 3,
             },
             NOW,
+            None,
         );
         let inbox_rows = flat
             .iter()
@@ -4628,6 +4703,7 @@ mod brain_inbox_section_tests {
             &items,
             RootBrainInboxSectionOptions::default(),
             NOW,
+            None,
         );
         assert_unpinned(&grouped, &flat, "non-empty query");
 
@@ -4643,6 +4719,7 @@ mod brain_inbox_section_tests {
                 max_results: 3,
             },
             NOW,
+            None,
         );
         assert_unpinned(&grouped, &flat, "disabled section");
 
@@ -4658,6 +4735,7 @@ mod brain_inbox_section_tests {
                 max_results: 0,
             },
             NOW,
+            None,
         );
         assert_unpinned(&grouped, &flat, "max_results=0");
 
@@ -4670,6 +4748,7 @@ mod brain_inbox_section_tests {
             &[],
             RootBrainInboxSectionOptions::default(),
             NOW,
+            None,
         );
         assert_unpinned(&grouped, &flat, "empty items");
     }
@@ -4685,6 +4764,7 @@ mod brain_inbox_section_tests {
             &items,
             RootBrainInboxSectionOptions::default(),
             NOW,
+            None,
         );
         assert!(
             matches!(

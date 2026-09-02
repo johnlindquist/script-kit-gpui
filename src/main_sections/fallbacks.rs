@@ -34,6 +34,26 @@ fn execute_fallback_action(
     // Execute the fallback and get the result
     match fallback.execute(input) {
         Ok(result) => {
+            let external_effect = match &result {
+                FallbackResult::RunTerminal { .. } => {
+                    Some(crate::runtime_policy::ExternalEffect::Process)
+                }
+                FallbackResult::OpenUrl { .. } | FallbackResult::OpenFile { .. } => {
+                    Some(crate::runtime_policy::ExternalEffect::OpenExternal)
+                }
+                FallbackResult::AddNote { .. }
+                | FallbackResult::Copy { .. }
+                | FallbackResult::Calculate { .. }
+                | FallbackResult::SearchFiles { .. }
+                | FallbackResult::ExecuteBuiltin { .. }
+                | FallbackResult::SendToAiHarness { .. } => None,
+            };
+            if let Some(effect) = external_effect {
+                if let Err(refusal) = crate::runtime_policy::check(effect) {
+                    app.show_error_toast(refusal.to_string(), cx);
+                    return;
+                }
+            }
             match result {
                 FallbackResult::RunTerminal { command } => {
                     logging::log("FALLBACK", &format!("RunTerminal: {}", command));
@@ -67,15 +87,26 @@ fn execute_fallback_action(
 
                 FallbackResult::AddNote { content } => {
                     logging::log("FALLBACK", &format!("AddNote: {}", content));
-                    // First copy content to clipboard so user can paste it
-                    let item = gpui::ClipboardItem::new_string(content.clone());
-                    cx.write_to_clipboard(item);
-                    // Then open Notes window - user can paste with Cmd+V
+                    let receipt = match crate::platform::copy_text(&content) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            app.show_error_toast(error, cx);
+                            return;
+                        }
+                    };
                     if let Err(e) = notes::open_notes_window(cx) {
                         logging::log("FALLBACK", &format!("Failed to open Notes: {}", e));
                     } else {
                         hud_manager::show_hud(
-                            "Text copied - paste into Notes".to_string(),
+                            match receipt.destination() {
+                                crate::runtime_policy::CopyDestination::SystemClipboard => {
+                                    "Text copied - paste into Notes".to_string()
+                                }
+                                crate::runtime_policy::CopyDestination::OwnedProcessLocal => {
+                                    "Text stored in process-local copy sink; Notes opened"
+                                        .to_string()
+                                }
+                            },
                             Some(HUD_MEDIUM_MS),
                             cx,
                         );
@@ -84,10 +115,12 @@ fn execute_fallback_action(
 
                 FallbackResult::Copy { text } => {
                     logging::log("FALLBACK", &format!("Copy: {} chars", text.len()));
-                    // Copy to clipboard using GPUI
-                    let item = gpui::ClipboardItem::new_string(text);
-                    cx.write_to_clipboard(item);
-                    logging::log("FALLBACK", "Text copied to clipboard");
+                    match crate::platform::copy_text(&text) {
+                        Ok(receipt) => {
+                            logging::log("FALLBACK", &receipt.feedback("Text copied".into()))
+                        }
+                        Err(error) => app.show_error_toast(error, cx),
+                    }
                 }
 
                 FallbackResult::OpenUrl { url } => {
@@ -107,11 +140,18 @@ fn execute_fallback_action(
                         Ok(result) => {
                             let result_str = result.to_string();
                             logging::log("FALLBACK", &format!("Result: {}", result_str));
-                            // Copy result to clipboard
-                            let item = gpui::ClipboardItem::new_string(result_str.clone());
-                            cx.write_to_clipboard(item);
-                            // Show HUD with result
-                            hud_manager::show_hud(format!("= {}", result_str), Some(HUD_MEDIUM_MS), cx);
+                            let receipt = match crate::platform::copy_text(&result_str) {
+                                Ok(receipt) => receipt,
+                                Err(error) => {
+                                    app.show_error_toast(error, cx);
+                                    return;
+                                }
+                            };
+                            hud_manager::show_hud(
+                                receipt.feedback(format!("= {}", result_str)),
+                                Some(HUD_MEDIUM_MS),
+                                cx,
+                            );
                         }
                         Err(e) => {
                             logging::log("FALLBACK", &format!("Calculation error: {}", e));
@@ -160,7 +200,7 @@ fn execute_fallback_action(
                         return;
                     };
 
-                    app.execute_builtin_with_query(&entry, Some(input), cx);
+                    let _outcome = app.execute_builtin_with_query(&entry, Some(input), cx);
                 }
 
                 FallbackResult::SendToAiHarness { query } => {

@@ -18,6 +18,24 @@ pub fn headless() -> gpui::Application {
     gpui::Application::with_platform(current_platform(true))
 }
 
+/// Construct a guarded native context before pasteboards, keyboard state or global input initialize.
+#[cfg(all(feature = "test-support", target_os = "macos"))]
+pub fn owned_hidden_context(
+    assets: std::sync::Arc<dyn gpui::AssetSource>,
+    validate_resource_path: std::sync::Arc<
+        dyn Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync,
+    >,
+) -> anyhow::Result<gpui::VisualTestAppContext> {
+    let guard = gpui::OwnedHiddenGuard::install(validate_resource_path)?;
+    let dispatcher = gpui::TestDispatcher::new(0);
+    dispatcher.set_num_cpus(2);
+    let platform = Rc::new(gpui_macos::MacPlatform::new_owned_hidden(
+        dispatcher.clone(),
+        guard,
+    ));
+    gpui::VisualTestAppContext::with_owned_hidden_platform(platform, dispatcher, assets)
+}
+
 /// Unlike `application`, this function returns a single-threaded web application.
 #[cfg(target_family = "wasm")]
 pub fn single_threaded_web() -> gpui::Application {

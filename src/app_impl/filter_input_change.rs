@@ -192,15 +192,19 @@ impl ScriptListApp {
         if matches!(&self.current_view, AppView::CurrentAppCommandsView { .. }) {
             let previous_filter = self.filter_text.clone();
             self.filter_text = new_text.clone();
-            if let Err(error) = self.refresh_current_app_commands_session_if_needed(&new_text, cx) {
-                let safe_error = logging::log_private_user_value(&error.to_string());
-                tracing::warn!(
-                    error_bytes = safe_error.raw_bytes,
-                    error_sha256 = %safe_error.sha256,
-                    query_bytes = new_text_safe.raw_bytes,
-                    query_sha256 = %new_text_safe.sha256,
-                    "current_app_commands.refresh_failed_on_filter_change"
-                );
+            if self.main_services.is_production() {
+                if let Err(error) =
+                    self.refresh_current_app_commands_session_if_needed(&new_text, cx)
+                {
+                    let safe_error = logging::log_private_user_value(&error.to_string());
+                    tracing::warn!(
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
+                        query_bytes = new_text_safe.raw_bytes,
+                        query_sha256 = %new_text_safe.sha256,
+                        "current_app_commands.refresh_failed_on_filter_change"
+                    );
+                }
             }
             if let AppView::CurrentAppCommandsView {
                 filter,
@@ -690,7 +694,6 @@ impl ScriptListApp {
                         } else {
                             // Same directory - just filter existing results (instant!)
                             self.file_search_frozen_filter = None;
-                            self.file_search_loading = false;
                             self.recompute_file_search_display_indices();
                             Self::resize_file_search_window_after_results_change(
                                 presentation,
@@ -747,7 +750,6 @@ impl ScriptListApp {
         // tracking from GPUI selection events will come in a later step.
         if self.spine_enabled {
             self.set_spine_parse_from_filter_and_cursor(&new_text, new_text.len());
-            self.maybe_start_spine_file_subsearch_for_current_projection(cx);
         }
 
         // Iter 019 D1 / iter 020 D2a — run the pure picker state machine on
@@ -899,11 +901,15 @@ impl ScriptListApp {
                 self.invalidate_grouped_cache();
             }
         }
+        let root_intent_changed = self.accept_root_search_input_intent(&new_text);
         if crate::menu_syntax::active_filter_head_owns_main_list(&new_text) {
             self.main_menu_fallback_state.clear();
         }
 
-        if new_text == self.filter_text {
+        if new_text == self.filter_text && !root_intent_changed {
+            if self.main_menu_has_pending_source_publication() {
+                self.flush_pending_main_menu_query(cx);
+            }
             return;
         }
 
@@ -916,14 +922,6 @@ impl ScriptListApp {
 
         // Reset input history navigation when user types (they're no longer navigating history)
         self.input_history.reset_navigation();
-
-        let new_calc = crate::calculator::try_build(&new_text);
-        if self.inline_calculator != new_calc {
-            self.inline_calculator = new_calc;
-            self.invalidate_grouped_cache();
-            self.list_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
-        }
 
         // FIX: Don't reset selected_index here - do it in queue_filter_compute() callback
         // AFTER computed_filter_text is updated. This prevents a race condition where:
@@ -988,6 +986,37 @@ struct FileSearchStreamBatchState {
 }
 
 impl ScriptListApp {
+    #[cfg(any(test, feature = "owned-ui-evaluation"))]
+    pub(crate) fn owned_file_search_stream_state(
+        &self,
+    ) -> Option<crate::design_evaluation::search_fixtures::FileSearchStreamSnapshot<'_>> {
+        if !crate::runtime_policy::is_owned_evaluation()
+            || self.main_services.search_gate().is_none()
+        {
+            return None;
+        }
+        let AppView::FileSearchView { query, .. } = &self.current_view else {
+            return None;
+        };
+        let state = self.file_search_stream_state.as_ref()?;
+        if state.generation != self.file_search_gen {
+            return None;
+        }
+        Some(
+            crate::design_evaluation::search_fixtures::FileSearchStreamSnapshot {
+                generation: state.generation,
+                query,
+                directory: state.directory.as_deref(),
+                show_hidden: state.show_hidden,
+                phase: state.phase,
+                loading: self.file_search_loading,
+                result_count: self.cached_file_results.len(),
+                visible_count: self.file_search_display_indices.len(),
+                failure: state.failure.as_ref().map(ToString::to_string),
+            },
+        )
+    }
+
     fn reset_file_search_selection_mode(&mut self) {
         self.file_search_selection_mode = FileSearchSelectionMode::AutoFirst;
     }
@@ -1074,20 +1103,115 @@ impl ScriptListApp {
         policy: FileSearchStreamPolicy,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(any(test, feature = "owned-ui-evaluation"))]
+        let owned_search_stream = crate::runtime_policy::is_owned_evaluation()
+            && self.main_services.search_gate().is_some();
+        #[cfg(not(any(test, feature = "owned-ui-evaluation")))]
+        let owned_search_stream = false;
+        #[cfg(any(test, feature = "owned-ui-evaluation"))]
+        {
+            use crate::design_evaluation::search_fixtures::{
+                FileSearchStreamPhase, FileSearchStreamState,
+            };
+            self.file_search_stream_state = owned_search_stream.then(|| {
+                let (directory, show_hidden) = match &source {
+                    FileSearchStreamSource::Directory { dir, show_hidden } => {
+                        (Some(dir.clone()), *show_hidden)
+                    }
+                    FileSearchStreamSource::Spotlight { .. } => (None, false),
+                };
+                FileSearchStreamState {
+                    generation: gen,
+                    directory,
+                    show_hidden,
+                    phase: FileSearchStreamPhase::Accepted,
+                    failure: None,
+                }
+            });
+        }
         let cancel = crate::file_search::new_cancel_token();
         self.file_search_cancel = Some(cancel.clone());
+        if let Some(sources) = self
+            .main_services
+            .owned_sources()
+            .filter(|_| !owned_search_stream)
+        {
+            let results = sources.files.clone();
+            let delay = sources.file_delay;
+            self.file_search_debounce_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |app, cx| {
+                    app.apply_file_search_stream_batch(
+                        gen,
+                        presentation,
+                        &policy,
+                        results,
+                        FileSearchStreamBatchState {
+                            is_done: true,
+                            is_first_batch: true,
+                        },
+                        cx,
+                    );
+                });
+            }));
+            return;
+        }
+        let last_good_results =
+            (!policy.defer_batches_until_done).then(|| self.cached_file_results.clone());
+        let last_good_selected_path = self.current_file_search_selected_path();
 
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(policy.debounce_ms))
                 .await;
 
+            #[cfg(any(test, feature = "owned-ui-evaluation"))]
+            if owned_search_stream {
+                let admitted = this.update(cx, |app, cx| {
+                    if app.file_search_gen != gen || !matches!(app.current_view, AppView::FileSearchView { .. }) {
+                        return false;
+                    }
+                    if let Some(expected) = policy.query_guard.as_deref() {
+                        if !matches!(&app.current_view, AppView::FileSearchView { query, .. } if query == expected) {
+                            return false;
+                        }
+                    }
+                    let Some(state) = app.file_search_stream_state.as_mut().filter(|state| state.generation == gen) else {
+                        return false;
+                    };
+                    state.phase = crate::design_evaluation::search_fixtures::FileSearchStreamPhase::Running;
+                    cx.notify();
+                    true
+                }).unwrap_or(false);
+                if !admitted {
+                    return;
+                }
+            }
+
             let (tx, rx) = std::sync::mpsc::channel();
 
             std::thread::spawn({
                 let cancel = cancel.clone();
                 let source = source.clone();
-                move || match source {
+                move || {
+                    #[cfg(any(test, feature = "owned-ui-evaluation"))]
+                    if owned_search_stream {
+                        match source {
+                            FileSearchStreamSource::Directory { dir, show_hidden } => {
+                                crate::design_evaluation::search_fixtures::file_view_directory_stream(
+                                    &dir, cancel, show_hidden, |event| { let _ = tx.send(event); },
+                                );
+                            }
+                            FileSearchStreamSource::Spotlight { .. } => {
+                                let _ = tx.send(crate::file_search::SearchEvent::Done(Err(std::io::Error::new(
+                                    std::io::ErrorKind::Unsupported,
+                                    "owned_file_search_spotlight_unavailable",
+                                ).into())));
+                            }
+                        }
+                        return;
+                    }
+                    match source {
                     FileSearchStreamSource::Directory { dir, show_hidden } => {
                         crate::file_search::list_directory_streaming_with_options(
                             &dir,
@@ -1112,11 +1236,13 @@ impl ScriptListApp {
                         );
                     }
                 }
+                }
             });
 
             let mut pending: Vec<crate::file_search::FileResult> = Vec::new();
             let mut done = false;
             let mut first_batch = true;
+            let mut failure = None;
             let defer_batches_until_done = policy.defer_batches_until_done;
 
             while !done {
@@ -1124,16 +1250,47 @@ impl ScriptListApp {
                     .timer(std::time::Duration::from_millis(16))
                     .await;
 
-                while let Ok(event) = rx.try_recv() {
-                    match event {
-                        crate::file_search::SearchEvent::Result(result) => {
-                            pending.push(result);
-                        }
-                        crate::file_search::SearchEvent::Done => {
+                loop {
+                    match rx.try_recv() {
+                        Ok(crate::file_search::SearchEvent::Result(result)) => pending.push(result),
+                        Ok(crate::file_search::SearchEvent::Done(result)) => { failure = result.err(); done = true; break; }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            failure = Some(if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                crate::file_search::SearchFailure::Cancelled
+                            } else { crate::file_search::SearchFailure::Disconnected });
                             done = true;
                             break;
                         }
                     }
+                }
+
+                if let Some(error) = failure.take() {
+                    let _ = this.update(cx, |app, cx| {
+                        if app.file_search_gen != gen || !matches!(app.current_view, AppView::FileSearchView { .. }) { return; }
+                        if let Some(expected) = policy.query_guard.as_deref() {
+                            if !matches!(&app.current_view, AppView::FileSearchView { query, .. } if query == expected) { return; }
+                        }
+                        #[cfg(any(test, feature = "owned-ui-evaluation"))]
+                        if let Some(state) = app.file_search_stream_state.as_mut().filter(|state| state.generation == gen) {
+                            state.finish(Err(error.clone()));
+                        }
+                        if let Some(results) = last_good_results {
+                            app.cached_file_results = results;
+                            app.recompute_file_search_display_indices();
+                            app.restore_file_search_selection_after_results_change(last_good_selected_path.as_deref());
+                        }
+                        app.file_search_loading = false;
+                        app.file_search_cancel = None;
+                        app.file_search_current_dir = None;
+                        app.file_search_current_dir_show_hidden = false;
+                        app.file_search_frozen_filter = None;
+                        app.mark_main_data_changed();
+                        Self::resize_file_search_window_after_results_change(presentation, app.file_search_display_indices.len(), false, true);
+                        if matches!(error, crate::file_search::SearchFailure::Cancelled) { cx.notify(); }
+                        else { app.show_error_toast(format!("File search failed: {error}"), cx); }
+                    });
+                    return;
                 }
 
                 if defer_batches_until_done && !done {
@@ -1178,7 +1335,9 @@ impl ScriptListApp {
         batch_state: FileSearchStreamBatchState,
         cx: &mut Context<Self>,
     ) {
-        if self.file_search_gen != gen {
+        if self.file_search_gen != gen
+            || !matches!(self.current_view, AppView::FileSearchView { .. })
+        {
             return;
         }
 
@@ -1191,6 +1350,7 @@ impl ScriptListApp {
             }
         }
 
+        self.mark_main_data_changed();
         // Capture selected path before mutating results so we can restore it.
         let preferred_selected_path = self.current_file_search_selected_path();
 
@@ -1230,7 +1390,16 @@ impl ScriptListApp {
 
         if batch_state.is_done {
             self.file_search_loading = false;
+            self.file_search_cancel = None;
             self.file_search_frozen_filter = None;
+            #[cfg(any(test, feature = "owned-ui-evaluation"))]
+            if let Some(state) = self
+                .file_search_stream_state
+                .as_mut()
+                .filter(|state| state.generation == gen)
+            {
+                state.finish(Ok(()));
+            }
 
             // Always reapply the session sort mode when the active query
             // resolves to a directory, even if a caller passes

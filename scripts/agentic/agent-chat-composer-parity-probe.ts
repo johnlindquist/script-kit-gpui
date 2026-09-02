@@ -233,11 +233,7 @@ try {
     env: { SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1" },
   });
 
-  await driver
-    .request(
-      { type: "show" },
-      { expect: "externalCommandResult", timeoutMs: 10_000 },
-    )
+  await driver.request({ type: "show" }, { expect: "windowVisibilityAck", timeoutMs: 10_000 })
     .catch(() => driver?.send({ type: "show" }));
   await waitForSurface(driver, "ScriptList");
   const mainLayout = await driver.getLayoutInfo({}, { timeoutMs: 10_000 });

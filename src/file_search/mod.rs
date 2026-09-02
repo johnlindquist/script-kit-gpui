@@ -257,6 +257,21 @@ pub enum RootFileSectionMode {
     DirectoryBrowse,
 }
 
+/// A matching displayed request is not an accepted snapshot. While an older
+/// worker drains, the display can already describe a request with no cache key.
+pub fn reusable_root_file_cache_entry<'a>(
+    cache: &'a std::collections::VecDeque<(String, Vec<FileResult>)>,
+    key: &str,
+    scope_matches: bool,
+) -> Option<(&'a str, &'a [FileResult])> {
+    if !scope_matches {
+        return None;
+    }
+    cache.iter().find_map(|(cached_key, rows)| {
+        (cached_key == key).then_some((cached_key.as_str(), rows.as_slice()))
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RootFileQueryIntent {
     #[default]
@@ -585,6 +600,8 @@ mod mdfind;
 mod os_open;
 
 pub use crate::scripts::input_detection::is_directory_path;
+#[cfg(any(test, feature = "owned-ui-evaluation"))]
+pub use directory::list_directory_streaming_with_path_guard;
 #[allow(unused_imports)]
 pub use directory::{
     ensure_trailing_slash, expand_path, list_directory, list_directory_filtered,
@@ -594,7 +611,8 @@ pub use directory::{
 };
 pub use mdfind::{
     new_cancel_token, recent_files_filesystem, search_files, search_files_streaming,
-    search_files_streaming_with_options, CancelToken, SearchEvent, SearchFilesStreamingOptions,
+    search_files_streaming_with_options, CancelToken, SearchEvent, SearchFailure,
+    SearchFilesStreamingOptions,
 };
 pub use os_open::{
     duplicate_path, move_path, move_to_trash, open_file, open_with, prompt_move_destination_dir,

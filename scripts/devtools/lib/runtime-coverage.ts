@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { CoverageBindingRecord } from "../surfaces.ts";
 import { validateReceipt } from "./receipt-schema.ts";
 import type { JsonObject } from "./privacy.ts";
+import { readReceiptDocument, resolveReceiptDetails } from "./receipt-artifact.ts";
 
 export type RuntimeProofReceipt = {
   path: string;
@@ -93,7 +94,9 @@ export function buildRuntimeCoverageScorecard(
   let totalRuntimeDurationMs = 0;
 
   for (const candidate of receipts) {
-    const receipt = candidate.receipt;
+    let receipt: JsonObject;
+    try { receipt = resolveReceiptDetails(candidate.receipt); }
+    catch (error) { rejectedReceipts.push({ path: candidate.path, reason: error instanceof Error ? error.message : String(error) }); continue; }
     const transaction = record(receipt.transaction);
     const privacy = record(receipt.privacy);
     const privacyScan = record(privacy.recursiveCanaryScan);
@@ -177,7 +180,7 @@ export function buildRuntimeCoverageScorecard(
       continue;
     }
 
-    usableReceipts.push(candidate);
+    usableReceipts.push({ path: candidate.path, receipt });
     if (typeof receipt.durationMs === "number" && receipt.durationMs >= 0) {
       totalRuntimeDurationMs += receipt.durationMs;
     }
@@ -302,8 +305,8 @@ export function discoverRuntimeCoverageReceipts(root: string): RuntimeProofRecei
       }
       if (!entry.endsWith(".json") || entry === "task.json") continue;
       try {
-        const value = JSON.parse(readFileSync(path, "utf8"));
-        const receipt = record(value);
+        const receipt = readReceiptDocument(path);
+        resolveReceiptDetails(receipt, path);
         if (
           typeof receipt.primitiveId === "string" &&
           typeof receipt.disposition === "string"

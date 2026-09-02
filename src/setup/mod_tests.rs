@@ -4,8 +4,8 @@ mod tests {
     use tempfile::TempDir;
 
     /// Run a test body while holding the shared SK_PATH lock.
-    /// Automatically sets SK_PATH to `kit_root` and removes it on exit.
-    fn with_sk_path<F: FnOnce(&std::path::Path)>(f: F) {
+    /// Automatically sets SK_PATH to `kit_root` and restores it on exit.
+    pub(super) fn with_sk_path<F: FnOnce(&std::path::Path)>(f: F) {
         let lock = crate::test_utils::SK_PATH_TEST_LOCK
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
@@ -13,11 +13,22 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let kit_root = temp_dir.path().to_path_buf();
+        struct RestoreSkPath(Option<std::ffi::OsString>);
+        impl Drop for RestoreSkPath {
+            fn drop(&mut self) {
+                if let Some(previous) = &self.0 {
+                    std::env::set_var(SK_PATH_ENV, previous);
+                } else {
+                    std::env::remove_var(SK_PATH_ENV);
+                }
+            }
+        }
+        let restore = RestoreSkPath(std::env::var_os(SK_PATH_ENV));
         std::env::set_var(SK_PATH_ENV, kit_root.to_str().unwrap());
 
         f(&kit_root);
 
-        std::env::remove_var(SK_PATH_ENV);
+        drop(restore);
         drop(lock);
     }
 
@@ -696,22 +707,20 @@ mod asset_destination_tests {
     /// Verify that `ensure_kit_setup` writes bundled skills under the Script Kit plugin.
     #[test]
     fn setup_creates_skills_under_scriptkit_plugin() {
-        let source = include_str!("mod.rs");
-        assert!(
-            source.contains(r#".join("scriptkit").join("skills")"#),
-            "ensure_kit_setup must create bundled skills under plugins/scriptkit/skills"
-        );
-        assert!(
-            source.contains(r#".join("skills").join("update-config")"#),
-            "ensure_kit_setup must create the update-config skill under the Script Kit plugin"
-        );
-        // Verify skills are NOT nested under kit/ in the non-test portion of the file.
-        // We search only the first 900 lines (the setup logic) to avoid matching test code.
-        let setup_portion: String = source.lines().take(900).collect::<Vec<_>>().join("\n");
-        let bad_pattern = [".join(\"kit\")", ".join(\"skills\")"].concat();
-        assert!(
-            !setup_portion.contains(&bad_pattern),
-            "skills must not be nested under kit/ — they belong at the workspace root"
-        );
+        super::tests::with_sk_path(|kit_root| {
+            let result = super::ensure_kit_setup();
+            assert_eq!(result.kit_path, kit_root, "setup must stay inside the fixture root");
+            let skills = kit_root.join("plugins/scriptkit/skills");
+            assert_eq!(
+                std::fs::read_to_string(skills.join("README.md")).expect("installed skills library"),
+                super::EMBEDDED_SKILLS_README
+            );
+            assert_eq!(
+                std::fs::read_to_string(skills.join("update-config/SKILL.md"))
+                    .expect("installed update-config skill"),
+                super::EMBEDDED_SKILL_UPDATE_CONFIG
+            );
+            assert!(!kit_root.join("kit/skills").exists(), "skills must not be nested under kit/");
+        });
     }
 }

@@ -455,6 +455,191 @@ export default {{
     )
 }
 
+/// Prepare a preference mutation without executing config.ts or touching disk.
+/// The caller may commit this together with another file in a recoverable
+/// transaction. Ordinary config writes retain their existing validation path.
+pub(crate) fn prepare_config_property(
+    content: &str,
+    property: &ConfigProperty,
+) -> Result<String, ConfigWriteError> {
+    let prepared = if content.trim().is_empty() {
+        generate_fresh_config(property)
+    } else {
+        match add_property(content, property) {
+            EditResult::Modified(prepared) => prepared,
+            EditResult::AlreadySet => content.to_owned(),
+            EditResult::Failed(reason) => return Err(ConfigWriteError::EditFailed(reason)),
+        }
+    };
+    validate_structure(&prepared).map_err(ConfigWriteError::ValidationFailed)?;
+    Ok(prepared)
+}
+
+/// Decode a fixture config without evaluating JavaScript, imports or getters.
+/// Only a literal default-export object and inert import/type syntax is accepted.
+pub(crate) fn parse_static_config(content: &str) -> Result<serde_json::Value, String> {
+    if content.len() > 1_048_576 {
+        return Err("static config exceeds size limit".into());
+    }
+    let tree = parse_typescript(content)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err("static config contains syntax errors".into());
+    }
+    let mut exports = 0;
+    for index in 0..root.named_child_count() {
+        let child = root.named_child(index).ok_or("missing syntax node")?;
+        match child.kind() {
+            "import_statement" | "comment" | "type_alias_declaration" | "interface_declaration" => {
+            }
+            "export_statement" => exports += 1,
+            _ => return Err(format!("nonliteral config statement: {}", child.kind())),
+        }
+    }
+    if exports != 1 {
+        return Err("static config requires one default export".into());
+    }
+    let export = find_export_statement(root).ok_or("missing default export")?;
+    if !(0..export.child_count())
+        .filter_map(|i| export.child(i))
+        .any(|node| node.kind() == "default")
+    {
+        return Err("static config requires a default export".into());
+    }
+    let object =
+        find_object_in_export(export, content).ok_or("config export must be a literal object")?;
+    decode_static_config_value(object, content, 0)
+}
+
+fn decode_static_config_string(text: &str) -> Result<String, String> {
+    if text.starts_with('"') {
+        return serde_json::from_str(text)
+            .map_err(|error| format!("invalid static string: {error}"));
+    }
+    if !text.starts_with('\'') || !text.ends_with('\'') {
+        return Err("unsupported static string".into());
+    }
+    let mut json = String::with_capacity(text.len() + 2);
+    json.push('"');
+    let mut chars = text[1..text.len() - 1].chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => json.push_str("\\\""),
+            '\\' => match chars.next().ok_or("unterminated string escape")? {
+                '\'' => json.push('\''),
+                escaped => {
+                    json.push('\\');
+                    json.push(escaped);
+                }
+            },
+            other => json.push(other),
+        }
+    }
+    json.push('"');
+    serde_json::from_str(&json).map_err(|error| format!("invalid static string: {error}"))
+}
+
+fn decode_static_config_value(
+    node: tree_sitter::Node,
+    content: &str,
+    depth: usize,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    if depth > 64 {
+        return Err("static config exceeds nesting limit".into());
+    }
+    let text = node
+        .utf8_text(content.as_bytes())
+        .map_err(|error| error.to_string())?;
+    match node.kind() {
+        "object" => {
+            let mut object = serde_json::Map::new();
+            let mut keys = std::collections::BTreeSet::new();
+            for index in 0..node.named_child_count() {
+                let pair = node.named_child(index).ok_or("missing object member")?;
+                if pair.kind() == "comment" {
+                    continue;
+                }
+                if pair.kind() != "pair" {
+                    return Err(format!("nonliteral object member: {}", pair.kind()));
+                }
+                let key = pair
+                    .child_by_field_name("key")
+                    .ok_or("missing object key")?;
+                let key_text = key
+                    .utf8_text(content.as_bytes())
+                    .map_err(|error| error.to_string())?;
+                let key = match key.kind() {
+                    "property_identifier" => key_text.to_string(),
+                    "string" => decode_static_config_string(key_text)?,
+                    _ => return Err("nonliteral object key".into()),
+                };
+                let value = pair
+                    .child_by_field_name("value")
+                    .ok_or("missing object value")?;
+                if !keys.insert(key.clone()) {
+                    return Err("duplicate static config property".into());
+                }
+                if matches!(value.kind(), "identifier" | "undefined")
+                    && value
+                        .utf8_text(content.as_bytes())
+                        .map_err(|error| error.to_string())?
+                        == "undefined"
+                {
+                    continue; // Same object omission semantics as JSON.stringify.
+                }
+                let value = decode_static_config_value(value, content, depth + 1)?;
+                object.insert(key, value);
+            }
+            Ok(Value::Object(object))
+        }
+        "array" => {
+            let mut values = Vec::new();
+            let mut needs_value = true;
+            for index in 0..node.child_count() {
+                let child = node.child(index).ok_or("missing array member")?;
+                match child.kind() {
+                    "[" | "]" | "comment" => {}
+                    "," if needs_value => {
+                        return Err("array holes are not static JSON values".into())
+                    }
+                    "," => needs_value = true,
+                    _ => {
+                        values.push(decode_static_config_value(child, content, depth + 1)?);
+                        needs_value = false;
+                    }
+                }
+            }
+            Ok(Value::Array(values))
+        }
+        "string" => decode_static_config_string(text).map(Value::String),
+        "number" | "true" | "false" | "null" => {
+            serde_json::from_str(text).map_err(|error| error.to_string())
+        }
+        "unary_expression" => {
+            let argument = node
+                .child_by_field_name("argument")
+                .ok_or("missing unary argument")?;
+            let operator = node
+                .child_by_field_name("operator")
+                .ok_or("missing unary operator")?;
+            if argument.kind() != "number"
+                || operator
+                    .utf8_text(content.as_bytes())
+                    .map_err(|error| error.to_string())?
+                    != "-"
+            {
+                return Err("only negative numeric literals are allowed".into());
+            }
+            let number = argument
+                .utf8_text(content.as_bytes())
+                .map_err(|error| error.to_string())?;
+            serde_json::from_str(&format!("-{number}")).map_err(|error| error.to_string())
+        }
+        other => Err(format!("nonliteral static config value: {other}")),
+    }
+}
+
 fn atomic_write_with_secure_tempfile(
     config_path: &Path,
     content: &str,

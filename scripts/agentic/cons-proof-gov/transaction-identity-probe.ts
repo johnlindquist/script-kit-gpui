@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -11,10 +12,7 @@ import {
   targetIdentity,
 } from "../../devtools/lib/target-identity.ts";
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY
-    ?? "target-agent/artifacts/cons-proof-c03/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const artifactPath = resolve(
   process.env.CONSISTENCY_RECEIPT_PATH
     ?? ".artifacts/consistency/PF-002/transaction-identity.json",
@@ -258,18 +256,16 @@ let proof: Obj = {};
 const binarySha256 = sha256(binary);
 
 try {
-  driver = await Driver.launch({
-    binary,
-    sessionName: `cons-proof-pf002-${process.pid}`,
-    sandboxHome: true,
-    sharedModels: false,
-    defaultTimeoutMs: 10_000,
-    env: {
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+  sessionName: `cons-proof-pf002-${process.pid}`,
+  sandboxHome: true,
+  sharedModels: false,
+  defaultTimeoutMs: 10_000,
+  env: {
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  }, });
   const pid = driver.pid;
   assert(typeof pid === "number", "driver did not expose its process id");
   const runId = `pf002-${pid}`;

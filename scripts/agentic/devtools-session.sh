@@ -294,7 +294,7 @@ cmd_start() {
 
   if ! should_skip_build "$MODE"; then
     if [[ "$BUILD_POLICY" == "always" ]] || [[ "$BUILD_POLICY" == "auto" ]]; then
-      progress build "building and staging isolated binary (timeout 120s)"
+      progress build "publishing isolated artifact under the shared build lease (timeout 120s)"
       set +e
       build_json="$(
         DEVTOOLS_SESSION_JSON=1 \
@@ -312,15 +312,23 @@ cmd_start() {
           *) json_error build build_failed "build failed (exit ${build_status})" ""; exit 31 ;;
         esac
       fi
-      binary_path="$(
-        BUILD_JSON="$build_json" python3 - <<'PY'
-import json
-import os
-
-data = json.loads(os.environ["BUILD_JSON"])
-print(data["binaryPath"])
+      local reference_path
+      reference_path="$(BUILD_JSON="$build_json" python3 - <<'PY'
+import json, os, tempfile
+data = json.loads(os.environ['BUILD_JSON'])
+reference = data.get('artifact')
+if not isinstance(reference, dict) or not reference.get('manifestSha256'):
+    raise SystemExit('build did not return a finalized immutable artifact reference')
+fd, path = tempfile.mkstemp(prefix='sk-isolated-reference-', suffix='.json', dir=os.path.realpath(tempfile.gettempdir()))
+with os.fdopen(fd, 'w') as output:
+    json.dump(reference, output)
+print(path)
 PY
       )"
+      # Only this invocation's freshly created reference is removed on exit.
+      trap "rm -f -- $(printf '%q' "$reference_path")" EXIT
+      export SCRIPT_KIT_ARTIFACT_REFERENCE="$reference_path"
+      binary_path="$(bun "${SCRIPT_DIR}/build-artifact.ts" verify-reference "$DEVTOOLS_SESSION_REPO_ROOT" "$reference_path")"
       if [[ "$binary_path" != /* ]]; then
         binary_path="${DEVTOOLS_SESSION_REPO_ROOT}/${binary_path}"
       fi
@@ -340,7 +348,7 @@ PY
       fi
     fi
   else
-    progress build "skipping cargo build (policy=${BUILD_POLICY}, rust unchanged or never)"
+    progress build "skipping compilation by explicit policy; launch checks any supplied artifact reference"
   fi
 
   progress start "starting isolated session (internal ready timeout 5s)"

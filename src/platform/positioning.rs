@@ -181,6 +181,7 @@ pub fn trace_main_window_native_geometry(
     target_bounds: Option<&Bounds<Pixels>>,
     note: Option<&str>,
 ) {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) { return; }
     if !main_window_geometry_trace_enabled() {
         return;
     }
@@ -303,6 +304,7 @@ pub fn trace_main_window_native_geometry(
 /// at its bottom-left corner. Secondary displays have their own position in this space.
 #[cfg(target_os = "macos")]
 pub fn move_first_window_to(x: f64, y: f64, width: f64, height: f64) {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("move_first_window_to") {
         return;
     }
@@ -428,6 +430,7 @@ pub fn move_window_by_view(
     width: f64,
     height: f64,
 ) {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("move_window_by_view") {
         return;
     }

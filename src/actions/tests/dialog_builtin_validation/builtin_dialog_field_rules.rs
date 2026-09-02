@@ -944,7 +944,7 @@ mod from_dialog_builtin_action_validation_tests_11 {
             has_response: false,
         };
         let actions = get_chat_context_actions(&info);
-        assert_eq!(actions.len(), 3);
+        crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         assert_eq!(actions[0].id, "chat:change_model");
     }
 
@@ -5823,7 +5823,7 @@ mod from_dialog_builtin_action_validation_tests_14 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 3);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert_eq!(actions[0].id, "chat:change_model");
         }
 
@@ -5852,7 +5852,7 @@ mod from_dialog_builtin_action_validation_tests_14 {
         }
 
         #[test]
-        fn cat07_chat_both_flags_true_gives_max_actions() {
+        fn cat07_chat_both_flags_true_includes_copy_and_clear() {
             let info = ChatPromptInfo {
                 current_model: Some("Claude".into()),
                 available_models: vec![ChatModelInfo {
@@ -5864,8 +5864,7 @@ mod from_dialog_builtin_action_validation_tests_14 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            // 1 model + continue + copy_response + clear + capture = 5
-            assert_eq!(actions.len(), 5);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         #[test]
@@ -7531,8 +7530,7 @@ mod from_dialog_builtin_action_validation_tests_15 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            // continue_in_chat + capture_screen_area
-            assert_eq!(actions.len(), 3);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert_eq!(actions[0].id, "chat:change_model");
         }
 
@@ -7545,8 +7543,7 @@ mod from_dialog_builtin_action_validation_tests_15 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            // continue_in_chat + copy_response + clear_conversation + capture = 4
-            assert_eq!(actions.len(), 5);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         #[test]
@@ -13029,7 +13026,7 @@ mod from_dialog_builtin_action_validation_tests_18 {
         // =========================================================================
 
         #[test]
-        fn cat05_both_flags_false_zero_models_only_continue() {
+        fn cat05_both_flags_false_zero_models_has_base_actions() {
             let info = ChatPromptInfo {
                 current_model: None,
                 available_models: vec![],
@@ -13037,7 +13034,7 @@ mod from_dialog_builtin_action_validation_tests_18 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 3);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert_eq!(actions[0].id, "chat:change_model");
         }
 
@@ -13050,7 +13047,7 @@ mod from_dialog_builtin_action_validation_tests_18 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 5);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert!(actions.iter().any(|a| a.id == "chat:continue_in_chat"));
             assert!(actions.iter().any(|a| a.id == "chat:copy_response"));
             assert!(actions.iter().any(|a| a.id == "chat:clear_conversation"));
@@ -13065,8 +13062,7 @@ mod from_dialog_builtin_action_validation_tests_18 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            // change_model + continue_in_chat + copy_response + capture_screen_area = 4
-            assert_eq!(actions.len(), 4);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert!(actions.iter().any(|a| a.id == "chat:copy_response"));
             assert!(!actions.iter().any(|a| a.id == "chat:clear_conversation"));
         }
@@ -13080,8 +13076,7 @@ mod from_dialog_builtin_action_validation_tests_18 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            // change_model + continue_in_chat + clear_conversation + capture_screen_area = 4
-            assert_eq!(actions.len(), 4);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert!(actions.iter().any(|a| a.id == "chat:clear_conversation"));
             assert!(!actions.iter().any(|a| a.id == "chat:copy_response"));
         }
@@ -14575,12 +14570,12 @@ mod from_dialog_builtin_action_validation_tests_19 {
         // =========================================================================
 
         // =========================================================================
-        // Category 05: Chat context action count boundary states
-        // Validates exact action count under different ChatPromptInfo combos.
+        // Category 05: Chat context action availability boundary states
+        // Validates semantic action membership under different ChatPromptInfo combos.
         // =========================================================================
 
         #[test]
-        fn cat05_chat_zero_models_no_flags_one_action() {
+        fn cat05_chat_zero_models_no_flags_has_base_actions() {
             let info = ChatPromptInfo {
                 current_model: None,
                 available_models: vec![],
@@ -14588,12 +14583,12 @@ mod from_dialog_builtin_action_validation_tests_19 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 3); // continue_in_chat + capture
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
             assert_eq!(actions[0].id, "chat:change_model");
         }
 
         #[test]
-        fn cat05_chat_zero_models_both_flags_three_actions() {
+        fn cat05_chat_zero_models_both_flags_has_transcript_actions() {
             let info = ChatPromptInfo {
                 current_model: None,
                 available_models: vec![],
@@ -14601,11 +14596,11 @@ mod from_dialog_builtin_action_validation_tests_19 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 5);
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         #[test]
-        fn cat05_chat_two_models_no_flags_three_actions() {
+        fn cat05_chat_two_models_no_flags_has_base_actions() {
             let info = ChatPromptInfo {
                 current_model: Some("GPT-4".to_string()),
                 available_models: vec![
@@ -14624,11 +14619,11 @@ mod from_dialog_builtin_action_validation_tests_19 {
                 has_response: false,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 3); // 2 models + continue_in_chat + capture
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         #[test]
-        fn cat05_chat_two_models_both_flags_five_actions() {
+        fn cat05_chat_two_models_both_flags_has_transcript_actions() {
             let info = ChatPromptInfo {
                 current_model: Some("GPT-4".to_string()),
                 available_models: vec![
@@ -14647,7 +14642,7 @@ mod from_dialog_builtin_action_validation_tests_19 {
                 has_response: true,
             };
             let actions = get_chat_context_actions(&info);
-            assert_eq!(actions.len(), 5); // 2 models + continue + copy + clear + capture
+            crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
         }
 
         // =========================================================================

@@ -16,8 +16,9 @@
  *   3 = parse error detected preemptively (stdin_parse_failed for this requestId)
  */
 
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join } from "path";
+import { PROTOCOL_VERSION, MAX_PROTOCOL_RESPONSE_BYTES, normalizeProtocolResponse, type Json } from "../devtools/driver.ts";
 
 const SCHEMA_VERSION = 1;
 const SESSION_DIR =
@@ -56,6 +57,7 @@ interface ProtocolBusEnvelope {
   kind?: string;
   requestId?: string;
   responseType?: string;
+  protocolVersion?: number;
   response?: unknown;
 }
 
@@ -180,6 +182,13 @@ function parseJsonResponseLine(trimmed: string): unknown | null {
   }
 }
 
+function readBoundedSlice(path: string, offset: number, size: number): Buffer {
+  const buffer = Buffer.alloc(Math.min(size - offset, MAX_PROTOCOL_RESPONSE_BYTES + 1));
+  const fd = openSync(path, "r");
+  try { return buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, offset)); }
+  finally { closeSync(fd); }
+}
+
 function scanProtocolBus(
   responsesPath: string,
   requestId: string,
@@ -204,8 +213,7 @@ function scanProtocolBus(
     return [null, null, startOffset];
   }
 
-  const buf = readFileSync(responsesPath);
-  const newBytes = buf.subarray(startOffset);
+  const newBytes = readBoundedSlice(responsesPath, startOffset, size);
   const lastNewline = newBytes.lastIndexOf(0x0a);
   if (lastNewline < 0) {
     return [null, null, startOffset];
@@ -224,9 +232,11 @@ function scanProtocolBus(
     if (parsed.requestId !== requestId) continue;
 
     const responseType = parsed.responseType ?? null;
-    if (expect && responseType !== expect) continue;
-
-    const response = parsed.response ?? parsed;
+    const response = normalizeProtocolResponse(parsed.response as Json) as Record<string, unknown> | null;
+    if (!expect || responseType !== expect || !response || typeof response !== "object" || Array.isArray(response) ||
+        response.requestId !== requestId || response.type !== responseType ||
+        parsed.protocolVersion !== PROTOCOL_VERSION || response.protocolVersion !== parsed.protocolVersion) continue;
+    if (response.type === "simulateGpuiEventResult" && response.dispatchScheduled === true && response.dispatchCompleted !== true) continue;
     return [response, responseType, newOffset];
   }
 
@@ -252,8 +262,7 @@ function scanLog(
 
   if (size <= startOffset) return [null, null, startOffset];
 
-  const buf = readFileSync(logPath);
-  const newBytes = buf.subarray(startOffset);
+  const newBytes = readBoundedSlice(logPath, startOffset, size);
   const lastNewline = newBytes.lastIndexOf(0x0a);
 
   if (lastNewline < 0) {
@@ -270,13 +279,14 @@ function scanLog(
 
     const parsed = parseJsonResponseLine(trimmed);
     if (parsed == null || typeof parsed !== "object") continue;
-    const response = parsed as { requestId?: string; type?: string; responseType?: string };
-    if (response.requestId !== requestId) continue;
+    if ((parsed as Json).requestId !== requestId) continue;
+    const response = normalizeProtocolResponse(parsed as Json) as { requestId?: string; type?: string; protocolVersion?: number; dispatchScheduled?: boolean; dispatchCompleted?: boolean };
+    if (response.requestId !== requestId || response.protocolVersion !== PROTOCOL_VERSION) continue;
+    const responseType = response.type ?? null;
+    if (!expect || responseType !== expect) continue;
+    if (responseType === "simulateGpuiEventResult" && response.dispatchScheduled === true && response.dispatchCompleted !== true) continue;
 
-    const responseType = response.type ?? response.responseType ?? null;
-    if (expect && responseType !== expect) continue;
-
-    return [parsed, responseType, newOffset];
+    return [response, responseType, newOffset];
   }
 
   return [null, null, newOffset];
@@ -352,6 +362,11 @@ const timeout = parseNonNegativeInt(getArg("--timeout"), DEFAULT_TIMEOUT);
 const startOffset = parseNonNegativeInt(getArg("--start-offset"), 0);
 const responsesPathArg = getArg("--responses-path");
 
+
+if (!expect) {
+  await printResult(errorResult(sessionName, requestId ?? "", "expected_response_type_required", "--expect must name the actual terminal protocol response"));
+  process.exit(PARSE_ERROR_EXIT_CODE);
+}
 if (!requestId) {
   const result = errorResult(
     sessionName,

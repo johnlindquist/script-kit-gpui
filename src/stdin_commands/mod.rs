@@ -278,12 +278,12 @@ fn first_symlink_component(path: &Path) -> std::io::Result<Option<PathBuf>> {
     }
     Ok(None)
 }
-enum StdinLineRead {
+pub(crate) enum StdinLineRead {
     Eof,
     Line(String),
     TooLong { raw: String, raw_len: usize },
 }
-fn read_stdin_line_bounded<R: BufRead>(
+pub(crate) fn read_stdin_line_bounded<R: BufRead>(
     reader: &mut R,
     byte_buffer: &mut Vec<u8>,
     max_line_bytes: usize,
@@ -1084,25 +1084,7 @@ impl StdinCommand {
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::External(command) => command.request_id().map(AsRef::as_ref),
-            Self::Protocol(message) => match message.as_ref() {
-                crate::protocol::Message::GetState { request_id, .. }
-                | crate::protocol::Message::GetElements { request_id, .. }
-                | crate::protocol::Message::GetAgentChatState { request_id, .. }
-                | crate::protocol::Message::GetAiReliabilityState { request_id, .. }
-                | crate::protocol::Message::SetAiReliabilityTestFixture { request_id, .. }
-                | crate::protocol::Message::PerformAgentChatSetupAction { request_id, .. }
-                | crate::protocol::Message::ResetAgentChatTestProbe { request_id, .. }
-                | crate::protocol::Message::GetAgentChatTestProbe { request_id, .. }
-                | crate::protocol::Message::GetLayoutInfo { request_id, .. }
-                | crate::protocol::Message::InspectAutomationWindow { request_id, .. }
-                | crate::protocol::Message::WaitFor { request_id, .. }
-                | crate::protocol::Message::Batch { request_id, .. }
-                | crate::protocol::Message::ListAutomationWindows { request_id, .. }
-                | crate::protocol::Message::SimulateGpuiEvent { request_id, .. } => {
-                    Some(request_id.as_str())
-                }
-                _ => message.id(),
-            },
+            Self::Protocol(message) => message.id(),
         }
     }
 }

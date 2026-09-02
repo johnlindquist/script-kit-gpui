@@ -71,3 +71,6 @@ mod tests;
 
 #[cfg(test)]
 mod runner_integration_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "owned-ui-evaluation"))]
+mod owned_effect_tests;

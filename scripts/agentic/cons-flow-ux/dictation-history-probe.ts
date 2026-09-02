@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -17,7 +18,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 assertNoninteractiveVisualProbe("dictation-history.system-clipboard");
 
 const ROOT = resolve(import.meta.dir, "../../..");
-const BINARY = resolve(process.env.PROBE_BINARY ?? join(ROOT, "target-agent/artifacts/cons-flow-c14/script-kit-gpui"));
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_DIR = join(ROOT, ".test-output", "cons-flow-c14");
 const OUT_PATH = join(OUT_DIR, "dictation-history-receipt.json");
 const MAIN_TARGET: Json = { type: "kind", kind: "main", index: 0 };
@@ -131,15 +132,13 @@ function clipboardWrite(bytes: Uint8Array): void {
 async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Promise<void>, extraEnv: Record<string, string> = {}): Promise<Scenario> {
   const failures: string[] = []; const facts: Obj = {}; let cleanup: Obj = {}; let driver: Driver | null = null;
   try {
-    driver = await Driver.launch({
-      binary: BINARY, sessionName: `cons-flow-c14-${id}`, sandboxHome: true, sharedModels: false,
-      seedAgentAuth: true, readyTimeoutMs: 30_000, defaultTimeoutMs: 15_000,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1", SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-        SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1", SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1", ...extraEnv,
-      },
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY, sessionName: `cons-flow-c14-${id}`, sandboxHome: true, sharedModels: false,
+    seedAgentAuth: true, readyTimeoutMs: 30_000, defaultTimeoutMs: 15_000,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1", SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1", SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1", ...extraEnv,
+    }, });
     await driver.waitForSettle(); await body(driver, facts);
     targetObservations.set(
       id,

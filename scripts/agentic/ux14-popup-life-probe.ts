@@ -99,7 +99,7 @@ async function requireAgentComposer(
   await Bun.sleep(25);
   const state = await driver.request(
     { type: "getAgentChatState", target: parentTarget },
-    { expect: "agentChatStateResult", timeoutMs: 10_000 },
+    { expect: "agent_chatStateResult", timeoutMs: 10_000 },
   );
   if (state.inputText !== inputText || state.cursorIndex !== cursorIndex) {
     throw new Error(`Composer focus/text was not restored: ${JSON.stringify(state)}`);

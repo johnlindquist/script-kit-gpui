@@ -726,7 +726,7 @@ pub(crate) fn execute_root_unified_result_action(
             RootUnifiedActionSubject::File(file),
         ) => app.execute_root_file_action(action_id, file, window, cx),
         (RootUnifiedResultAction::NoteOpen, RootUnifiedActionSubject::Note { id, .. }) => {
-            app.execute_root_note_open(*id, cx);
+            let _ = app.execute_root_note_open(*id, cx);
             true
         }
         (RootUnifiedResultAction::NoteCopyTitle, RootUnifiedActionSubject::Note { title, .. }) => {
@@ -1045,7 +1045,7 @@ pub(crate) fn execute_root_unified_result_action(
             RootUnifiedActionSubject::Window(window_info),
         ) => copy(format!("{} — {}", window_info.app, window_info.title), cx),
         (RootUnifiedResultAction::CommandRun, RootUnifiedActionSubject::BuiltIn(entry)) => {
-            app.execute_builtin(entry, cx);
+            let _outcome = app.execute_builtin(entry, cx);
             true
         }
         (RootUnifiedResultAction::CommandCopyId, RootUnifiedActionSubject::BuiltIn(entry)) => {

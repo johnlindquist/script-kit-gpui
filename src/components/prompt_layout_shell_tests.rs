@@ -816,11 +816,15 @@ mod prompt_layout_shell_tests {
     }
 
     #[test]
-    fn arg_prompt_uses_shared_minimal_list_prompt_shell() {
+    fn arg_prompt_uses_shared_main_view_chrome() {
         let source = include_str!("../render_prompts/arg/render.rs");
+        let source = source.split("#[cfg(test)]").next().expect("arg render source");
         assert!(
-            source.contains("render_minimal_list_prompt_shell_with_footer("),
-            "arg prompt should use the footer-aware shared minimal list prompt shell"
+            source.contains("render_main_view_shell()")
+                && source.contains("MainViewHeaderChrome::canonical(")
+                && source.contains("render_main_view_chrome_footer_flush(")
+                && source.contains("MainViewChrome {"),
+            "arg prompt should use the canonical header and footer-aware main-view shell"
         );
         assert!(
             source.contains("main_window_footer_slot("),
@@ -1065,8 +1069,30 @@ mod prompt_layout_shell_tests {
 
         assert!(
             render_code.contains("render_simple_hint_strip(")
-                && render_code.contains("universal_prompt_hints()"),
+                && render_code.contains("universal_prompt_hints_with_primary_key_label("),
             "mini chat should use the shared universal hint strip"
+        );
+        let hints = render_code
+            .split("fn conversation_footer_hints(")
+            .nth(1)
+            .and_then(|body| body.split("fn render_mini_hint_strip(").next())
+            .expect("chat footer hints must have a shared conversation-command owner");
+        assert!(
+            hints.contains("self.conversation_command_bindings()")
+                && hints.contains("ChatPromptConversationCommand::Send | ChatPromptConversationCommand::Stop")
+                && hints.contains("primary.descriptor.shortcut")
+                && hints.contains("primary.descriptor.label"),
+            "mini chat hints must advertise the active Send/Stop command's actual shortcut and label"
+        );
+        let mini = render_code
+            .split("fn render_mini_hint_strip(")
+            .nth(1)
+            .and_then(|body| body.split("fn render_gpui_footer(").next())
+            .expect("mini chat hint-strip renderer must exist");
+        assert!(
+            mini.contains("self.conversation_footer_hints()")
+                && mini.contains("render_simple_hint_strip(hints, None)"),
+            "mini chat must render the shared conversation hints, not a separate static footer"
         );
         assert!(
             render_code.contains("emit_prompt_hint_audit(\"prompts::chat::mini\""),

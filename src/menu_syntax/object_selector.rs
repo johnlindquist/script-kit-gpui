@@ -272,7 +272,9 @@ pub fn object_selector_row_to_main_list_row(row: &ObjectSelectorRow) -> crate::s
         score: if row.enabled { 0 } else { i32::MIN },
         is_selectable: row.enabled,
         action_label: Some(gpui::SharedString::from("Insert")),
-        action: crate::spine::SpineListAction::Noop,
+        action: crate::spine::SpineListAction::AcceptMenuSyntaxObject {
+            row_id: row.id.clone().into(),
+        },
     }
 }
 
@@ -435,6 +437,23 @@ mod tests {
         assert_ne!(snap.rows[0].id, snap.rows[1].id);
         assert_eq!(snap.rows[0].token.as_deref(), Some("@snippet:@gma"));
         assert_eq!(snap.rows[1].token.as_deref(), Some("@snippet:@gma"));
+        for row in &snap.rows {
+            let projected = object_selector_row_to_main_list_row(row);
+            assert_eq!(
+                projected.id.as_ref(),
+                format!("menu-syntax-object:{}", row.id)
+            );
+            assert_eq!(
+                projected.action,
+                crate::spine::SpineListAction::AcceptMenuSyntaxObject {
+                    row_id: row.id.clone().into()
+                }
+            );
+            assert!(crate::scripts::SearchResult::SpineProjection(projected)
+                .command_descriptor()
+                .unwrap()
+                .can_execute());
+        }
     }
 
     #[test]

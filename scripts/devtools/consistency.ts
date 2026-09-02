@@ -40,6 +40,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { ArtifactVerificationError, verifyImmutableArtifact, type ArtifactReference } from "../agentic/build-artifact.ts";
 import {
   RECEIPT_REGISTRY_VERSION,
   RECEIPT_SCHEMA_VERSION,
@@ -50,7 +51,8 @@ import {
   validateReceipt,
   type ReceiptDisposition,
 } from "./lib/receipt-schema.ts";
-import type { JsonObject } from "./lib/privacy.ts";
+import { sanitizeReceipt, type JsonObject } from "./lib/privacy.ts";
+import { readReceiptDocument, resolveReceiptDetails } from "./lib/receipt-artifact.ts";
 import { classifyReceiptEvidence } from "./lib/evidence-class.ts";
 import {
   TASK_PROOF_POLICIES,
@@ -144,8 +146,8 @@ export const FAMILY_IDS = [
   "native-secondary-window",
 ] as const;
 
-/** Exported conflict count authorized for GOV-005 (decision rule: never force it). */
-export const AUTHORIZED_CONFLICT_COUNT = 34;
+/** Current generated GOV-005 lifecycle inventory; never force obsolete conflicts back into the exporter. */
+export const AUTHORIZED_CONFLICT_COUNT = 29;
 
 const ARCHIVED_DIRECTORY_NAMES = new Set([
   "attempts",
@@ -537,7 +539,7 @@ export function discoverReceipts(taskDir: string): {
     if (basename(file.path) === "task.json") continue; // our own aggregate output
     let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(file.path, "utf8"));
+      parsed = resolveReceiptDetails(readReceiptDocument(file.path), file.path);
     } catch {
       unreadablePaths.push(file.path);
       continue;
@@ -596,57 +598,34 @@ function asObject(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
 }
 
-function equivalentReviewedCompilerTree(
-  builtCommit: unknown,
-  currentCommit: string | null,
-  expectedFingerprint: unknown,
-): boolean {
-  if (
-    typeof builtCommit !== "string" || !/^[a-f0-9]{40}$/.test(builtCommit) ||
-    currentCommit === null || !/^[a-f0-9]{40}$/.test(currentCommit) ||
-    typeof expectedFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(expectedFingerprint)
-  ) {
-    return false;
+function artifactBinaryStaleReason(binary: JsonObject): StaleReason | null {
+  if (binary.artifactReference === undefined) {
+    return { code: "stale-binary-provenance-missing" };
   }
-  if (builtCommit === currentCommit) return true;
-  let paths: string[];
   try {
-    paths = readFileSync("scripts/agentic/compiler-input-paths.txt", "utf8")
-      .split(/\r?\n/)
-      .filter(Boolean);
-  } catch {
-    return false;
-  }
-  if (
-    paths.length === 0 || new Set(paths).size !== paths.length ||
-    paths.some((path) => path.startsWith("/") || path.split("/").includes(".."))
-  ) {
-    return false;
-  }
-  const ancestor = Bun.spawnSync([
-    "git", "-C", process.cwd(), "merge-base", "--is-ancestor", builtCommit, currentCommit,
-  ], { stdout: "pipe", stderr: "pipe" });
-  if (ancestor.exitCode !== 0) return false;
-  for (const commit of [builtCommit, currentCommit]) {
-    const tree = Bun.spawnSync([
-      "git", "-C", process.cwd(), "ls-tree", "-r", commit, "--", ...paths,
-    ], { stdout: "pipe", stderr: "pipe" });
-    if (
-      tree.exitCode !== 0 || tree.stdout.byteLength === 0 ||
-      sha256(tree.stdout) !== expectedFingerprint
-    ) {
-      return false;
+    const artifact = verifyImmutableArtifact(process.cwd(), binary.artifactReference as ArtifactReference, {
+      kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content",
+    });
+    for (const [key, value] of Object.entries(artifact.binary)) {
+      if (binary[key] !== value) {
+        return { code: "stale-binary-provenance-identity", detail: `observed_${key}_mismatch` };
+      }
     }
+    return null;
+  } catch (error) {
+    // References and verifier exceptions may contain private input; publish only typed codes.
+    return {
+      code: "stale-binary-provenance",
+      detail: error instanceof ArtifactVerificationError ? error.code : "manifest_invalid",
+    };
   }
-  const clean = Bun.spawnSync([
-    "git", "-C", process.cwd(), "status", "--porcelain", "--untracked-files=all", "--", ...paths,
-  ], { stdout: "pipe", stderr: "pipe" });
-  return clean.exitCode === 0 && clean.stdout.byteLength === 0;
 }
 
 export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentIdentity): StaleReason[] {
   const reasons: StaleReason[] = [];
-  const receipt = entry.receipt;
+  let receipt: JsonObject;
+  try { receipt = resolveReceiptDetails(entry.receipt); }
+  catch (error) { return [{ code: "invalid-receipt-reference", detail: error instanceof Error ? error.message : String(error) }]; }
   const producerValidation = asObject(receipt.producerValidation);
   if (
     producerValidation.registryVersion !== undefined &&
@@ -743,7 +722,8 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
     }
   }
   const binary = asObject(receipt.binary);
-  if (typeof binary.path === "string" && typeof binary.sha256 === "string") {
+  const artifactBacked = binary.artifactReference !== undefined || !!(receipt.runtimeTaskProof || receipt.workflowTaskProof);
+  if (!artifactBacked && typeof binary.path === "string" && typeof binary.sha256 === "string") {
     const currentSha = current.fileSha256(binary.path);
     if (currentSha === null) {
       reasons.push({ code: "stale-binary-missing", detail: binary.path });
@@ -751,56 +731,12 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
       reasons.push({ code: "stale-binary", detail: binary.path });
     }
   }
-  if (typeof binary.sourceCommit === "string" && current.headCommit && binary.sourceCommit !== current.headCommit) {
+  if (!artifactBacked && typeof binary.sourceCommit === "string" && current.headCommit && binary.sourceCommit !== current.headCommit) {
     reasons.push({ code: "stale-binary-source-commit", detail: `${binary.sourceCommit} != HEAD (${entry.path})` });
   }
-  if (receipt.runtimeTaskProof || receipt.workflowTaskProof) {
-    const provenance = asObject(binary.provenance);
-    const binaryPath = typeof binary.path === "string" ? binary.path : "";
-    const manifestPath = typeof provenance.path === "string" ? provenance.path : "";
-    const approvedBinary =
-      binaryPath.startsWith("target-agent/artifacts/") ||
-      binaryPath.startsWith("target-agent/runtime/");
-    const allowedManifestPaths = [
-      `${binaryPath}.provenance.json`,
-      join(dirname(binaryPath), "manifest.json"),
-    ];
-    if (
-      !approvedBinary || binaryPath.split("/").includes("..") ||
-      !allowedManifestPaths.includes(manifestPath) ||
-      typeof provenance.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(provenance.sha256)
-    ) {
-      reasons.push({ code: "stale-binary-provenance-missing", detail: entry.path });
-    } else {
-      const manifestSha = current.fileSha256(manifestPath);
-      if (manifestSha === null || manifestSha !== provenance.sha256) {
-        reasons.push({ code: "stale-binary-provenance", detail: manifestPath });
-      }
-      try {
-        const manifest = asObject(JSON.parse(readFileSync(manifestPath, "utf8")));
-        if (
-          manifest.schemaVersion !== 2 ||
-          manifest.binaryPath !== binaryPath ||
-          manifest.binarySha256 !== binary.sha256 ||
-          manifest.rustDirty !== false ||
-          manifest.gitHead !== provenance.builtGitHead ||
-          manifest.compilerInputSha256 !== provenance.compilerInputSha256 ||
-          manifest.profile !== provenance.profile ||
-          manifest.requiresExactGitHead !== provenance.requiresExactGitHead ||
-          (manifest.profile === "release" || manifest.requiresExactGitHead === true) &&
-            manifest.gitHead !== current.headCommit ||
-          !equivalentReviewedCompilerTree(
-            manifest.gitHead,
-            current.headCommit,
-            manifest.compilerInputSha256,
-          )
-        ) {
-          reasons.push({ code: "stale-binary-provenance-identity", detail: manifestPath });
-        }
-      } catch {
-        reasons.push({ code: "stale-binary-provenance-unreadable", detail: manifestPath });
-      }
-    }
+  if (artifactBacked) {
+    const stale = artifactBinaryStaleReason(binary);
+    if (stale) reasons.push(stale);
   }
   const fixture = asObject(receipt.fixture);
   if (typeof fixture.path === "string" && typeof fixture.sha256 === "string") {
@@ -862,6 +798,12 @@ export function stalenessReasons(task: JsonObject, current: CurrentIdentity): St
   }
   for (const binary of Array.isArray(identities.binaries) ? identities.binaries : []) {
     const record = asObject(binary);
+    if (record.artifactReference !== undefined ||
+      typeof task.taskId === "string" && (task.taskId in RUNTIME_TASK_PROOF_SPECS || task.taskId in WORKFLOW_TASK_PROOF_SPECS)) {
+      const stale = artifactBinaryStaleReason(record);
+      if (stale) reasons.push(stale);
+      continue;
+    }
     if (typeof record.path === "string" && typeof record.sha256 === "string") {
       if (current.fileSha256(record.path) !== record.sha256) {
         reasons.push({ code: "stale-binary", detail: String(record.path) });
@@ -1268,7 +1210,11 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
       producerSourceFingerprints[receipt.tool] = repository.producerSourceFingerprint;
     }
     const binary = asObject(receipt.binary);
-    if (typeof binary.sha256 === "string") binaries.push({ ...binary });
+    if (typeof binary.sha256 === "string") {
+      binaries.push(binary.artifactReference !== undefined || receipt.runtimeTaskProof || receipt.workflowTaskProof
+        ? asObject(sanitizeReceipt(binary).sanitized)
+        : { ...binary });
+    }
     const fixture = asObject(receipt.fixture);
     if (typeof fixture.path === "string" && typeof fixture.sha256 === "string") {
       fixtureHashes[fixture.path] = fixture.sha256;
@@ -1545,7 +1491,7 @@ export function verifyFamily(input: VerifyFamilyInput): { receipt: JsonObject; e
           }
           let member: JsonObject;
           try {
-            member = asObject(JSON.parse(readFileSync(memberPath, "utf8")));
+            member = resolveReceiptDetails(readReceiptDocument(memberPath), memberPath);
           } catch {
             errors.push({
               code: "missing-or-unreadable-family-member-receipt",
@@ -1860,7 +1806,7 @@ export interface VerifyAllInput {
 
 function readJson(path: string): JsonObject | null {
   try {
-    return asObject(JSON.parse(readFileSync(path, "utf8")));
+    return resolveReceiptDetails(readReceiptDocument(path), path);
   } catch {
     return null;
   }

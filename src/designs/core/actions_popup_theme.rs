@@ -29,7 +29,6 @@ pub struct ActionsPopupSearchTokens {
     pub padding_y_extra: f32,
     pub font_size: f32,
     pub cursor_width: f32,
-    pub cursor_height: f32,
     pub prefix_gap: f32,
 }
 
@@ -92,7 +91,6 @@ pub fn base_actions_popup_theme() -> ActionsPopupThemeDef {
             // main-list names (14) for readability.
             font_size: 14.0,
             cursor_width: 2.0,
-            cursor_height: 14.0,
             prefix_gap: 6.0,
         },
         list: ActionsPopupListTokens {
@@ -134,13 +132,7 @@ pub fn base_actions_popup_theme() -> ActionsPopupThemeDef {
 }
 
 impl ActionsPopupSearchTokens {
-    /// The cursor height production actually paints: it is DERIVED from the
-    /// search font size (`current_actions_popup_theme` overwrites the
-    /// authored `cursor_height` with `font_size`), and the GEO-008 audit
-    /// found no live consumer of an independently writable cursor height.
-    /// The `cursor_height` field itself survives only as a
-    /// compatibility-read for the design-contract exporter
-    /// (INT-DESIGN-CONTRACT-GEO008-GOV003 marks it non-writable).
+    /// Renderer-derived cursor height; not an independently writable token.
     pub fn resolved_cursor_height(self) -> f32 {
         self.font_size
     }
@@ -169,26 +161,22 @@ impl ActionsPopupRowTokens {
 }
 
 pub fn current_actions_popup_theme() -> ActionsPopupThemeDef {
-    let mut def = base_actions_popup_theme();
-    def.search.cursor_height = def.search.font_size;
-    def
+    base_actions_popup_theme()
 }
 
 #[cfg(test)]
 mod actions_popup_theme_tests {
     use super::*;
 
-    /// The derived relation production paints: cursor height == font size,
-    /// both through the legacy field overwrite and the typed accessor.
+    /// The derived relation production paints: cursor height == font size.
     #[test]
     fn cursor_height_is_derived_from_the_search_font_size() {
         let current = current_actions_popup_theme();
-        assert_eq!(current.search.cursor_height, current.search.font_size);
         assert_eq!(
             current.search.resolved_cursor_height(),
             current.search.font_size
         );
-        // The accessor derives even when the legacy field drifts.
+        // Changing the source font updates the derived metric.
         let mut base = base_actions_popup_theme();
         base.search.font_size = 16.0;
         assert_eq!(base.search.resolved_cursor_height(), 16.0);
@@ -220,7 +208,7 @@ mod actions_popup_theme_tests {
         let def = base_actions_popup_theme();
         assert_eq!(def.search.font_size, 14.0);
         assert_eq!(def.search.cursor_width, 2.0);
-        assert_eq!(def.search.cursor_height, 14.0);
+        assert_eq!(def.search.resolved_cursor_height(), 14.0);
         assert_eq!(def.list.padding_bottom, 6.0);
         assert_eq!(def.list.overdraw_px, 100.0);
         assert_eq!(

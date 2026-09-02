@@ -4538,18 +4538,11 @@ fn theme_coral_reef() -> Theme {
 // --- merged from part_04.rs ---
 /// Write a theme to the user's theme.json file
 pub fn write_theme_to_disk(theme: &Theme) -> Result<(), std::io::Error> {
-    let theme_path = crate::setup::theme_json_path();
+    super::persistence::write_theme_to_disk(theme).map_err(std::io::Error::other)
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = theme_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let json = serde_json::to_string_pretty(theme).map_err(std::io::Error::other)?;
-
-    std::fs::write(&theme_path, json)?;
-    tracing::debug!(path = %theme_path.display(), "Theme written to disk");
-    Ok(())
+pub(super) fn recover_theme_save() -> anyhow::Result<()> {
+    super::persistence::recover_theme_save()
 }
 
 #[cfg(test)]

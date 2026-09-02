@@ -21,10 +21,12 @@ pub struct ProviderGenerationFence {
 
 impl ProviderGenerationFence {
     pub fn begin(&mut self, source: CommandSource, query: impl Into<String>) -> ProviderRequest {
-        let generation = self
-            .active
-            .get(&source)
-            .map_or(1, |request| request.generation.wrapping_add(1));
+        let generation = self.active.get(&source).map_or(1, |request| {
+            request
+                .generation
+                .checked_add(1)
+                .expect("provider_request_generation_exhausted")
+        });
         let request = ProviderRequest {
             source,
             generation,
@@ -43,10 +45,12 @@ impl ProviderGenerationFence {
     }
 
     pub fn invalidate(&mut self, source: CommandSource) {
-        let next = self
-            .active
-            .get(&source)
-            .map_or(1, |request| request.generation.wrapping_add(1));
+        let next = self.active.get(&source).map_or(1, |request| {
+            request
+                .generation
+                .checked_add(1)
+                .expect("provider_request_generation_exhausted")
+        });
         self.active.insert(
             source,
             ProviderRequest {
@@ -81,7 +85,7 @@ impl RootOwnedProviderRefreshLifecycle {
         if cache_is_fresh || self.in_flight.is_some() {
             return None;
         }
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        self.next_generation = self.next_generation.checked_add(1)?;
         let refresh = RootOwnedProviderRefresh {
             source,
             generation: self.next_generation,
@@ -260,6 +264,36 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "provider_request_generation_exhausted")]
+    fn provider_request_exhaustion_refuses_generation_reuse() {
+        let mut fence = ProviderGenerationFence::default();
+        fence.active.insert(
+            CommandSource::BrowserTab,
+            ProviderRequest {
+                source: CommandSource::BrowserTab,
+                generation: u64::MAX,
+                query: "docs".into(),
+            },
+        );
+        fence.begin(CommandSource::BrowserTab, "docs");
+    }
+
+    #[test]
+    #[should_panic(expected = "provider_request_generation_exhausted")]
+    fn provider_request_invalidation_exhaustion_refuses_generation_reuse() {
+        let mut fence = ProviderGenerationFence::default();
+        fence.active.insert(
+            CommandSource::BrowserHistory,
+            ProviderRequest {
+                source: CommandSource::BrowserHistory,
+                generation: u64::MAX,
+                query: "docs".into(),
+            },
+        );
+        fence.invalidate(CommandSource::BrowserHistory);
+    }
+
+    #[test]
     fn owned_provider_worker_rejects_duplicate_fresh_or_cross_source_completion() {
         let mut lifecycle = RootOwnedProviderRefreshLifecycle::default();
         assert!(lifecycle.begin(CommandSource::Clipboard, true).is_none());
@@ -295,6 +329,24 @@ mod tests {
         assert!(!lifecycle.finish(stale));
         assert_eq!(lifecycle.in_flight, Some(current));
         assert!(lifecycle.finish(current));
+    }
+
+    #[test]
+    fn owned_provider_generation_exhaustion_never_reuses_a_retired_ticket() {
+        let mut lifecycle = RootOwnedProviderRefreshLifecycle {
+            next_generation: u64::MAX - 1,
+            in_flight: None,
+        };
+        let last = lifecycle.begin(CommandSource::Conversation, false).unwrap();
+        assert_eq!(last.generation, u64::MAX);
+        assert!(lifecycle.finish(last));
+        assert!(
+            lifecycle
+                .begin(CommandSource::Conversation, false)
+                .is_none()
+        );
+        assert!(lifecycle.in_flight.is_none());
+        assert!(!lifecycle.finish(last));
     }
 
     #[test]

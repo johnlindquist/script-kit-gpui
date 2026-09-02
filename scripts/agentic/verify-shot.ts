@@ -65,7 +65,7 @@
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
-import { inflateSync } from "node:zlib";
+import { auditRgbaPng } from "../devtools/lib/png-rgba.ts";
 import {
   assertNoninteractiveSubprocess,
   NoninteractiveSafetyError,
@@ -1374,157 +1374,9 @@ async function getImageDimensions(
   }
 }
 
-function paethPredictor(a: number, b: number, c: number): number {
-  const p = a + b - c;
-  const pa = Math.abs(p - a);
-  const pb = Math.abs(p - b);
-  const pc = Math.abs(p - c);
-  if (pa <= pb && pa <= pc) return a;
-  if (pb <= pc) return b;
-  return c;
-}
 
 function auditPngContent(filePath: string): ScreenshotContentAudit {
-  const bytes = new Uint8Array(readFileSync(filePath));
-  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-  if (!signature.every((value, index) => bytes[index] === value)) {
-    throw new Error("Screenshot is not a PNG file");
-  }
-
-  let offset = 8;
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  const idatParts: Uint8Array[] = [];
-
-  while (offset + 12 <= bytes.length) {
-    const view = new DataView(bytes.buffer, bytes.byteOffset + offset);
-    const length = view.getUint32(0);
-    const type = String.fromCharCode(
-      bytes[offset + 4],
-      bytes[offset + 5],
-      bytes[offset + 6],
-      bytes[offset + 7]
-    );
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + length;
-    if (dataEnd + 4 > bytes.length) {
-      throw new Error(`Invalid PNG chunk ${type}`);
-    }
-
-    const chunk = bytes.subarray(dataStart, dataEnd);
-    if (type === "IHDR") {
-      const ihdr = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-      width = ihdr.getUint32(0);
-      height = ihdr.getUint32(4);
-      bitDepth = chunk[8];
-      colorType = chunk[9];
-    } else if (type === "IDAT") {
-      idatParts.push(chunk);
-    } else if (type === "IEND") {
-      break;
-    }
-
-    offset = dataEnd + 4;
-  }
-
-  if (width <= 0 || height <= 0) {
-    throw new Error("PNG missing dimensions");
-  }
-  if (bitDepth !== 8 || (colorType !== 6 && colorType !== 2)) {
-    throw new Error(`Unsupported PNG format for audit: bitDepth=${bitDepth} colorType=${colorType}`);
-  }
-
-  const bytesPerPixel = colorType === 6 ? 4 : 3;
-  const rowBytes = width * bytesPerPixel;
-  const compressed = new Uint8Array(idatParts.reduce((sum, part) => sum + part.length, 0));
-  let writeOffset = 0;
-  for (const part of idatParts) {
-    compressed.set(part, writeOffset);
-    writeOffset += part.length;
-  }
-
-  const inflated = new Uint8Array(inflateSync(compressed));
-  const expected = height * (rowBytes + 1);
-  if (inflated.length < expected) {
-    throw new Error(`PNG pixel data too short: ${inflated.length} < ${expected}`);
-  }
-
-  const previous = new Uint8Array(rowBytes);
-  const current = new Uint8Array(rowBytes);
-  let readOffset = 0;
-  let sampledPixels = 0;
-  let nonBlackPixels = 0;
-  let nonTransparentPixels = 0;
-  let lumaSum = 0;
-  let maxLuma = 0;
-  const buckets = new Set<string>();
-
-  for (let y = 0; y < height; y++) {
-    const filter = inflated[readOffset++];
-    current.fill(0);
-    for (let x = 0; x < rowBytes; x++) {
-      const raw = inflated[readOffset++];
-      const left = x >= bytesPerPixel ? current[x - bytesPerPixel] : 0;
-      const up = previous[x] ?? 0;
-      const upLeft = x >= bytesPerPixel ? previous[x - bytesPerPixel] : 0;
-      let value: number;
-      if (filter === 0) value = raw;
-      else if (filter === 1) value = raw + left;
-      else if (filter === 2) value = raw + up;
-      else if (filter === 3) value = raw + Math.floor((left + up) / 2);
-      else if (filter === 4) value = raw + paethPredictor(left, up, upLeft);
-      else throw new Error(`Unsupported PNG filter ${filter}`);
-      current[x] = value & 0xff;
-    }
-
-    for (let x = 0; x < rowBytes; x += bytesPerPixel) {
-      const r = current[x];
-      const g = current[x + 1];
-      const b = current[x + 2];
-      const a = colorType === 6 ? current[x + 3] : 255;
-      sampledPixels += 1;
-      if (a > 0) nonTransparentPixels += 1;
-      if (a > 0 && (r > 8 || g > 8 || b > 8)) nonBlackPixels += 1;
-      const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      lumaSum += luma;
-      maxLuma = Math.max(maxLuma, luma);
-      buckets.add(`${r >> 5}:${g >> 5}:${b >> 5}:${a === 0 ? 0 : 1}`);
-    }
-
-    previous.set(current);
-  }
-
-  const meanLuma = sampledPixels > 0 ? lumaSum / sampledPixels : 0;
-  const uniqueBucketCount = buckets.size;
-  const nonBlackRatio =
-    sampledPixels > 0 ? nonBlackPixels / sampledPixels : 0;
-  const solidLike = uniqueBucketCount <= 1;
-  const sparseDarkCaptureLike =
-    meanLuma < 5.0 &&
-    nonBlackRatio < 0.001;
-  const darkEmptyLike =
-    (uniqueBucketCount <= 2 || sparseDarkCaptureLike) &&
-    meanLuma < 5.0 &&
-    nonBlackRatio < 0.001 &&
-    (maxLuma < 16.0 || sparseDarkCaptureLike);
-  const blank =
-    sampledPixels === 0 ||
-    nonTransparentPixels === 0 ||
-    solidLike ||
-    darkEmptyLike;
-
-  return {
-    sampledPixels,
-    nonBlackPixels,
-    nonTransparentPixels,
-    uniqueBucketCount,
-    meanLuma,
-    maxLuma,
-    nonBlackRatio,
-    blank,
-  };
+  return auditRgbaPng(readFileSync(filePath));
 }
 
 async function captureScreenshot(

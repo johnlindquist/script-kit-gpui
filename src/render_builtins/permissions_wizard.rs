@@ -10,14 +10,21 @@
 /// immediately, fall back to the Permiso assistant (Accessibility / Screen
 /// Recording) or the matching System Settings pane, and let the poll flip the
 /// card to Granted when the user returns.
-fn permissions_wizard_rows() -> Vec<(
-    crate::permissions_wizard::PermissionKind,
-    crate::platform::permiso_detect::PermissionStatus,
-)> {
-    crate::permissions_wizard::PermissionKind::all()
-        .iter()
-        .map(|&kind| (kind, crate::permissions_wizard::detect_permission(kind)))
-        .collect()
+impl ScriptListApp {
+    fn permissions_wizard_rows(
+        &self,
+    ) -> Vec<(
+        crate::permissions_wizard::PermissionKind,
+        crate::platform::permiso_detect::PermissionStatus,
+    )> {
+        match self.main_services.owned_sources() {
+            Some(sources) => sources.permissions.clone(),
+            None => crate::permissions_wizard::PermissionKind::all()
+                .iter()
+                .map(|&kind| (kind, crate::permissions_wizard::detect_permission(kind)))
+                .collect(),
+        }
+    }
 }
 
 fn permissions_wizard_requirement_label(
@@ -89,6 +96,7 @@ impl ScriptListApp {
     pub(crate) fn open_permissions_wizard(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.current_view, AppView::PermissionsWizardView { .. }) {
             self.current_view = AppView::PermissionsWizardView { selected_index: 0 };
+            self.note_main_route_changed();
             self.spawn_permissions_wizard_poll(cx);
         }
         cx.notify();
@@ -99,6 +107,9 @@ impl ScriptListApp {
     /// The loop exits as soon as the view changes, so reopening the wizard
     /// (which spawns a fresh loop) never accumulates pollers.
     fn spawn_permissions_wizard_poll(&mut self, cx: &mut Context<Self>) {
+        if !self.main_services.is_production() {
+            return;
+        }
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(2))
@@ -127,6 +138,12 @@ impl ScriptListApp {
         kind: crate::permissions_wizard::PermissionKind,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+        {
+            self.show_error_toast(error.to_string(), cx);
+            return;
+        }
         use crate::platform::permiso_detect::PermissionStatus;
 
         if crate::permissions_wizard::detect_permission(kind) == PermissionStatus::Authorized {
@@ -227,7 +244,7 @@ impl ScriptListApp {
         let info_palette = crate::components::info_palette(&self.theme);
         let success_color = gpui::rgb(self.theme.colors.ui.success);
 
-        let rows = permissions_wizard_rows();
+        let rows = self.permissions_wizard_rows();
         let granted_count = rows
             .iter()
             .filter(|(_, status)| {
@@ -235,8 +252,10 @@ impl ScriptListApp {
             })
             .count();
         let row_count = rows.len();
-        let all_required_granted =
-            crate::permissions_wizard::PermissionSnapshot::current().all_required_granted();
+        let all_required_granted = rows.iter().all(|(kind, status)| {
+            kind.requirement() != crate::permissions_wizard::PermissionRequirement::Required
+                || *status == crate::platform::permiso_detect::PermissionStatus::Authorized
+        });
         let list_colors = ListItemColors::from_theme(&self.theme);
 
         let handle_key = cx.listener(

@@ -25,6 +25,7 @@ import {
   verifyRuntimeBinaryProvenance,
   type RuntimeTargetObservation,
 } from "./runtime-task-proof.ts";
+import type { ArtifactReference } from "../../agentic/build-artifact.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -189,16 +190,12 @@ export function prepareWorkflowTaskProof(
   if (
     typeof binary.path !== "string" ||
     typeof binary.sha256 !== "string" ||
-    binary.sourceCommit !== head ||
+    typeof binary.sourceCommit !== "string" ||
     fingerprintFile(binary.path) !== binary.sha256
   ) {
     throw new Error(`${taskId} requires independently verified current-source binary bytes`);
   }
-  try {
-    verifyRuntimeBinaryProvenance(binary.path as string, binary);
-  } catch (error) {
-    throw new Error(`${taskId} requires verified build provenance: ${String(error)}`);
-  }
+  verifyRuntimeBinaryProvenance(binary.artifactReference as ArtifactReference, binary);
   if (options.segments.some((segment) => object(segment.binary).sha256 !== binary.sha256)) {
     throw new Error(`${taskId} workflow segments cannot mix executable identities`);
   }

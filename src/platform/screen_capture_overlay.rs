@@ -27,6 +27,7 @@ pub struct ScreenAreaCapture {
 #[cfg(target_os = "macos")]
 pub fn capture_screen_area(
 ) -> Result<Option<ScreenAreaCapture>, Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     use std::process::Command;
 
     tracing::info!(action = "screen_area_capture_start", "Starting interactive screen area selection");

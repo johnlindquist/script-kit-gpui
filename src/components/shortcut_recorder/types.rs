@@ -13,6 +13,28 @@ pub enum ShortcutRecorderFocusedAction {
 }
 
 impl ShortcutRecorderFocusedAction {
+    pub(super) fn semantic_id(self) -> &'static str {
+        match self {
+            Self::Save => "shortcut-save-button",
+            Self::Clear => "shortcut-clear-button",
+            Self::Cancel => "shortcut-cancel-button",
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Save => "Save",
+            Self::Clear => "Clear",
+            Self::Cancel => "Cancel",
+        }
+    }
+
+    pub(super) fn from_semantic_id(id: &str) -> Option<Self> {
+        [Self::Save, Self::Clear, Self::Cancel]
+            .into_iter()
+            .find(|action| action.semantic_id() == id)
+    }
+
     pub fn eligible(save_enabled: bool, clear_enabled: bool) -> Vec<Self> {
         let mut actions = Vec::with_capacity(3);
         if save_enabled {

@@ -146,7 +146,7 @@ fn render_svg_to_rgba(svg: &str, width: u32, height: u32) -> Result<Vec<u8>> {
 
     // Validate: check that at least some pixels have non-zero alpha
     // This catches "failed silently" scenarios where nothing was rendered
-    let has_visible_content = rgba.chunks_exact(4).any(|px| px[3] != 0);
+    let has_visible_content = rgba.as_chunks::<4>().0.iter().any(|px| px[3] != 0);
     if !has_visible_content {
         bail!(
             "SVG rendered to fully transparent image ({}x{}) - likely a rendering failure",

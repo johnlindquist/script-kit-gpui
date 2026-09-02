@@ -11,10 +11,8 @@
 #   2. On abnormal death, prints a LOUD banner including the matching
 #      macOS DiagnosticReports .ips file and its faulting symbol.
 #   3. Auto-relaunches the session so the hotkey keeps working.
-#   4. Escalates on repeat crashes of the SAME binary (mtime-keyed):
-#      crash #2 wipes target/debug/incremental and touches src/main.rs to
-#      force a clean-crate rebuild through cargo-watch; crash #4 stops
-#      auto-relaunching and tells the user this is a real bug, not cache rot.
+#   4. Stops after repeated crashes of the same binary. Cache/source mutation
+#      is never a crash-recovery shortcut; investigate retained exit receipts.
 #
 # Usage: dev-crash-watchdog.sh <session-name>
 # Env:
@@ -23,6 +21,10 @@
 #   SCRIPT_KIT_WATCHDOG_MAX_RELAUNCH  — same-binary crashes before giving up (default 3)
 
 set -uo pipefail
+
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]]; then
+    echo "[watchdog] REFUSED: human opt-in dev recovery only" >&2; exit 78
+fi
 
 SESSION_NAME="${1:-${SCRIPT_KIT_DEV_SESSION_NAME:-dev-watch}}"
 SESSION_DIR="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}/${SESSION_NAME}"
@@ -194,23 +196,13 @@ while true; do
     if [ "$crash_count" -ge "$((MAX_RELAUNCH + 1))" ]; then
         gave_up=1
         lines+=("crash #${crash_count} of the same binary — NOT relaunching again.")
-        lines+=("This is a real bug (a clean rebuild already crashed): investigate the report above.")
+        lines+=("Repeated crash: investigate the retained exit receipt and report above.")
         lines+=("ACTION: fix the crash, then save a file to rebuild + relaunch.")
         banner "${lines[@]}"
         watched_pid=""
         continue
     fi
 
-    if [ "$crash_count" -eq 2 ]; then
-        lines+=("second crash of this exact binary — wiping target/debug/incremental and forcing a rebuild")
-        lines+=("(rules out rustc incremental-cache corruption; if it crashes again it is a real bug)")
-        banner "${lines[@]}"
-        rm -rf target/debug/incremental 2>/dev/null || true
-        touch src/main.rs 2>/dev/null || true
-        # cargo-watch will pick up the touch, rebuild, and relaunch.
-        watched_pid=""
-        continue
-    fi
 
     lines+=("auto-relaunching so the global hotkey keeps working…")
     banner "${lines[@]}"

@@ -21,24 +21,16 @@
   fresh HOME shows 11 (settingsHub.census.baseCount). Empty filter
   ("Settings" section label), row 0 "Theme Designer" selected.
 
-  The first "Settings" separator paints the LEGACY first-section path: 26px
-  slot / 6px top padding (render_section_header → default_main_menu()), NOT
-  the themed 28/4 — conflict settingsSection.firstSlotLegacyVsThemed.
-
-  Rows are ICONLESS by painted truth: get_settings_items_for authors lucide
-  hints (palette, mic, eraser, …) but IconKind::from_icon_hint only accepts
-  names known to icon_name_from_str, which matches none of them, and
-  ListItem does not mount the icon slot when icon is None — names start at
-  the 18px origin. Recorded as the
-  settingsRows.authoredIconHintsVsResolvedNone contract conflict (present
-  tense: a parser fix must update this mockup).
+  The Settings separator uses the active main-menu section metrics.
+  Rows are structurally ICONLESS by SettingsRowIconPolicy::Iconless;
+  SettingsItem has no icon field. This is not an icon-parser fallback.
 
   Context zone content is FIXTURE-VARIABLE capture state (the capture's
   model pill read "Brain · GPT-5.6 SOL"), not a design token.
 
   Footer: the GPUI layout reserves the 32px footer RAIL; the 36px native
-  AppKit host (Run ↵ / Actions ⌘K per source — activeFooter receipt pending;
-  conflict settingsFooter.nativeRunVsGpuiOpenHint) is a separate overlay
+  AppKit host (the selected SettingsActionDescriptor supplies its primary
+  label and availability) is a separate overlay
   window, drawn here as a bottom-anchored overlay so it never steals list
   viewport height from the GPUI-only comparison.
 

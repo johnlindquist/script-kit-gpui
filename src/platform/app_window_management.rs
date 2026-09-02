@@ -127,6 +127,7 @@ pub fn configure_as_accessory_app() {
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 pub fn set_regular_app_mode() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("set_regular_app_mode") {
         return;
     }
@@ -162,6 +163,7 @@ pub fn set_regular_app_mode() {
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 pub fn set_accessory_app_mode() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("set_accessory_app_mode") {
         return;
     }
@@ -201,6 +203,7 @@ pub fn set_accessory_app_mode() {
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 pub fn send_ai_window_to_back() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) { return; }
     if require_main_thread("send_ai_window_to_back") {
         return;
     }

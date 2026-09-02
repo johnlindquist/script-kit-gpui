@@ -598,7 +598,7 @@ fn read_claude_vault_hits() -> Result<Vec<AiVaultHit>> {
     let root = home_dir().join(".claude").join("projects");
     let mut files = Vec::new();
     collect_jsonl_files(&root, &mut files);
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|a| std::cmp::Reverse(a.1));
     files.truncate(300);
 
     let mut hits = Vec::new();

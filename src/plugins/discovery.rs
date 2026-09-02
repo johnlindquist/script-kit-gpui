@@ -39,7 +39,12 @@ pub fn plugin_agents_dir(plugin_id: &str) -> PathBuf {
 pub fn discover_plugins_in(container: &Path) -> Result<PluginIndex> {
     let mut plugins = Vec::new();
 
-    if !container.exists() {
+    if !container.try_exists().with_context(|| {
+        format!(
+            "Failed to inspect plugin container: {}",
+            container.display()
+        )
+    })? {
         return Ok(PluginIndex { plugins });
     }
 
@@ -47,12 +52,17 @@ pub fn discover_plugins_in(container: &Path) -> Result<PluginIndex> {
         .with_context(|| format!("Failed to read plugin container: {}", container.display()))?;
 
     for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+        let entry = entry.with_context(|| {
+            format!(
+                "Failed to enumerate plugin container: {}",
+                container.display()
+            )
+        })?;
         let path = entry.path();
-        if !path.is_dir() {
+        if !fs::metadata(&path)
+            .with_context(|| format!("Failed to inspect plugin root: {}", path.display()))?
+            .is_dir()
+        {
             continue;
         }
 

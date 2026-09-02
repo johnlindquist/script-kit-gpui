@@ -202,8 +202,24 @@ describe("catalog-bound offline consistency task proofs", () => {
       ).exitCode,
     ).toBe(0);
     const alpha = observedProof("GOV-003");
-    expect(alpha.productionSources).toContain("src/theme/alpha.rs");
-    expect(alpha.sourceFingerprints["src/theme/alpha.rs"]).toMatch(/^[a-f0-9]{64}$/);
+    for (const path of [
+      "src/theme/alpha.rs",
+      "src/theme/types.rs",
+      "scripts/agentic/agent-cargo.sh",
+      "scripts/agentic/build-artifact.ts",
+      "rust-toolchain.toml",
+    ]) {
+      expect(alpha.productionSources).toContain(path);
+      expect(alpha.sourceFingerprints[path]).toMatch(/^[a-f0-9]{64}$/);
+      for (const forged of [
+        { ...alpha, productionSources: alpha.productionSources.filter((owner) => owner !== path) },
+        { ...alpha, sourceFingerprints: { ...alpha.sourceFingerprints, [path]: "0".repeat(64) } },
+      ]) {
+        expect(
+          prepareValidatedReceipt("devtools.consistency.safe-task-proof", forged).exitCode,
+        ).not.toBe(0);
+      }
+    }
     expect(
       prepareValidatedReceipt("devtools.consistency.safe-task-proof", alpha).exitCode,
     ).toBe(0);
@@ -277,6 +293,29 @@ describe("catalog-bound offline consistency task proofs", () => {
         },
       },
     ]) {
+      expect(
+        prepareValidatedReceipt("devtools.consistency.safe-task-proof", forged).exitCode,
+      ).not.toBe(0);
+    }
+  });
+
+  test("compiler and workflow owner exceptions cannot be borrowed by other tasks", () => {
+    const alpha = observedProof("GOV-003");
+    const workflow = observedProof("GOV-006");
+    for (const [candidate, foreign, path] of [
+      [alpha, workflow, "scripts/agentic/compiler-input-paths.txt"],
+      [workflow, alpha, "scripts/agentic/agent-cargo.sh"],
+      [workflow, alpha, "scripts/agentic/build-artifact.ts"],
+      [workflow, alpha, "rust-toolchain.toml"],
+    ] as const) {
+      const forged = {
+        ...candidate,
+        productionSources: [...candidate.productionSources, path],
+        sourceFingerprints: {
+          ...candidate.sourceFingerprints,
+          [path]: foreign.sourceFingerprints[path],
+        },
+      };
       expect(
         prepareValidatedReceipt("devtools.consistency.safe-task-proof", forged).exitCode,
       ).not.toBe(0);

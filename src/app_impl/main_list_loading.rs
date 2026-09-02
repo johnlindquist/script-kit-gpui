@@ -93,12 +93,14 @@ impl ScriptListApp {
         if self.main_list_loading_kind().is_none() {
             return;
         }
+        if self.main_list_loading_started_at.is_none() { self.mark_main_presentation_changed(); }
         self.main_list_loading_started_at
             .get_or_insert_with(std::time::Instant::now);
         self.main_list_loading_ticker_epoch = self.main_list_loading_ticker_epoch.wrapping_add(1);
         let epoch = self.main_list_loading_ticker_epoch;
+        let owned = self.main_services.host_policy().is_hidden();
         self._main_list_loading_ticker = Some(cx.spawn(async move |this, cx| loop {
-            let interval_ms = if crate::is_main_window_visible() {
+            let interval_ms = if crate::is_main_window_visible() || owned {
                 33
             } else {
                 250
@@ -112,12 +114,13 @@ impl ScriptListApp {
                         return true;
                     }
                     if app.main_list_loading_kind().is_some() {
-                        if crate::is_main_window_visible() {
+                        if crate::is_main_window_visible() || owned {
                             cx.notify();
                         }
                         false
                     } else {
                         app.main_list_loading_started_at = None;
+                        app.mark_main_presentation_changed();
                         cx.notify();
                         true
                     }

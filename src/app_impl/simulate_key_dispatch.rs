@@ -1,4 +1,5 @@
 use super::*;
+use crate::action_helpers::DispatchOutcome;
 use crate::protocol::AutomationWindowTarget;
 use crate::stdin_commands::KeyModifier;
 use gpui::{Context, ScrollStrategy, Window};
@@ -15,7 +16,7 @@ impl ScriptListApp {
         window: &mut Window,
         ctx: &mut Context<Self>,
         input: SimulatedKeyInput<'_>,
-    ) {
+    ) -> DispatchOutcome {
         let view = self;
         let key = input.key;
         let modifiers = input.modifiers;
@@ -65,7 +66,7 @@ impl ScriptListApp {
                 &format!("SimulateKey: {key} - confirm popup handled={handled}"),
             );
             if handled {
-                return;
+                return DispatchOutcome::success();
             }
         }
         let simulate_key_target_is_notes = target.map_or_else(
@@ -97,7 +98,7 @@ impl ScriptListApp {
                         "STDIN",
                         &format!("SimulateKey: Cmd+{key_lower} - Notes popup toggle {result}"),
                     );
-                    return;
+                    return DispatchOutcome::success();
                 }
                 Err(error) => {
                     logging::log(
@@ -131,7 +132,7 @@ impl ScriptListApp {
                 &format!("SimulateKey: {key} - Notes confirm popup handled={handled}"),
             );
             if handled {
-                return;
+                return DispatchOutcome::success();
             }
         }
         if !has_cmd
@@ -155,7 +156,7 @@ impl ScriptListApp {
                         &format!("SimulateKey: {key} - Notes ghost autocomplete {result}"),
                     );
                     if handled {
-                        return;
+                        return DispatchOutcome::success();
                     }
                 }
                 Err(error) => {
@@ -182,7 +183,7 @@ impl ScriptListApp {
                         &format!("SimulateKey: {key} - Notes editor key {result}"),
                     );
                     if handled {
-                        return;
+                        return DispatchOutcome::success();
                     }
                 }
                 Err(error) => {
@@ -277,7 +278,7 @@ impl ScriptListApp {
                     "STDIN",
                     "SimulateKey: Tab suppressed while modal owns keyboard",
                 );
-                return;
+                return DispatchOutcome::success();
             }
 
             let sessionless_mini = view.current_script_pid.is_none()
@@ -332,7 +333,10 @@ impl ScriptListApp {
                             "STDIN",
                             "SimulateKey: Enter suppressed by return-to-ScriptList guard",
                         );
-                        return;
+                        return DispatchOutcome::success();
+                    }
+                    if key_lower == "enter" {
+                        view.flush_pending_main_menu_query(ctx);
                     }
 
                     // Main script list key handling
@@ -501,14 +505,10 @@ impl ScriptListApp {
                                 }
                             }
                             "up" | "arrowup" => {
-                                if view.main_menu_fallback_state.move_up() {
-                                    ctx.notify();
-                                }
+                                view.main_menu_arrow_key_with_history(true, window, ctx);
                             }
                             "down" | "arrowdown" => {
-                                if view.main_menu_fallback_state.move_down() {
-                                    ctx.notify();
-                                }
+                                view.main_menu_arrow_key_with_history(false, window, ctx);
                             }
                             "enter" => {
                                 if view.try_handle_spine_enter(window, ctx) {
@@ -516,10 +516,25 @@ impl ScriptListApp {
                                         "STDIN",
                                         "SimulateKey: Enter - spine consumed (fallback)",
                                     );
-                                    return;
+                                    return DispatchOutcome::success();
                                 }
-                                logging::log("STDIN", "SimulateKey: Enter - execute fallback");
-                                view.execute_selected_fallback(ctx);
+                                logging::log(
+                                    "STDIN",
+                                    "SimulateKey: Enter - execute selected grouped result",
+                                );
+                                return match view.execute_selected(ctx) {
+                                    Ok(crate::MainMenuDispatchResult::Dispatched) => {
+                                        DispatchOutcome::success()
+                                    }
+                                    Ok(crate::MainMenuDispatchResult::PendingConfirmation) => {
+                                        DispatchOutcome::not_handled()
+                                            .with_detail("confirmation_pending")
+                                    }
+                                    Err(error) => DispatchOutcome::error(
+                                        "main_menu_dispatch_refused",
+                                        error.to_string(),
+                                    ),
+                                };
                             }
                             "escape" => {
                                 logging::log(
@@ -656,7 +671,7 @@ impl ScriptListApp {
                                         "STDIN",
                                         "SimulateKey: Enter - accept menu-syntax object selector",
                                     );
-                                    return;
+                                    return DispatchOutcome::success();
                                 }
                                 if view.menu_syntax_trigger_picker_owns_main_keyboard()
                                     && view.apply_menu_syntax_trigger_picker_intent(
@@ -669,11 +684,11 @@ impl ScriptListApp {
                                         "STDIN",
                                         "SimulateKey: Enter - accept menu-syntax picker",
                                     );
-                                    return;
+                                    return DispatchOutcome::success();
                                 }
                                 if view.try_handle_spine_enter(window, ctx) {
                                     logging::log("STDIN", "SimulateKey: Enter - spine consumed");
-                                    return;
+                                    return DispatchOutcome::success();
                                 }
                                 if view.should_consume_menu_syntax_filter_accept_enter(
                                     "simulate_key_enter",
@@ -682,10 +697,22 @@ impl ScriptListApp {
                                         "STDIN",
                                         "SimulateKey: Enter - accepted menu-syntax filter hint consumed",
                                     );
-                                    return;
+                                    return DispatchOutcome::success();
                                 }
                                 logging::log("STDIN", "SimulateKey: Enter - execute selected");
-                                view.execute_selected(ctx);
+                                return match view.execute_selected(ctx) {
+                                    Ok(crate::MainMenuDispatchResult::Dispatched) => {
+                                        DispatchOutcome::success()
+                                    }
+                                    Ok(crate::MainMenuDispatchResult::PendingConfirmation) => {
+                                        DispatchOutcome::not_handled()
+                                            .with_detail("confirmation_pending")
+                                    }
+                                    Err(error) => DispatchOutcome::error(
+                                        "main_menu_dispatch_refused",
+                                        error.to_string(),
+                                    ),
+                                };
                             }
                             "escape" => {
                                 logging::log(
@@ -829,7 +856,7 @@ impl ScriptListApp {
                                                 "STDIN",
                                                 &format!(
                                                     "SimulateKey: Enter (cwd-pick) - set cwd to {}",
-                                                    &file.path
+                                                    file.path
                                                 ),
                                             );
                                             view.spine_cwd =
@@ -854,7 +881,7 @@ impl ScriptListApp {
                                                 "SimulateKey: Enter (cwd-pick) - selection is a file, ignoring",
                                             );
                                         }
-                                        return;
+                                        return DispatchOutcome::success();
                                     }
                                     // Portal mode parity with the GPUI handler at
                                     // src/render_builtins/file_search.rs: attach the
@@ -882,13 +909,13 @@ impl ScriptListApp {
                                                 next_presentation,
                                                 ctx,
                                             );
-                                            return;
+                                            return DispatchOutcome::success();
                                         }
                                         logging::log(
                                             "STDIN",
                                             &format!(
                                                 "SimulateKey: Enter (portal) - attach file {}",
-                                                &file.path
+                                                file.path
                                             ),
                                         );
                                         let part =
@@ -900,11 +927,11 @@ impl ScriptListApp {
                                                     .unwrap_or_else(|| file.path.clone()),
                                             };
                                         view.close_attachment_portal_with_part(part, ctx);
-                                        return;
+                                        return DispatchOutcome::success();
                                     }
                                     logging::log(
                                         "STDIN",
-                                        &format!("SimulateKey: Enter - open file {}", &file.path),
+                                        &format!("SimulateKey: Enter - open file {}", file.path),
                                     );
                                     let _ = crate::file_search::open_file(&file.path);
                                     view.close_and_reset_window(ctx);
@@ -935,7 +962,7 @@ impl ScriptListApp {
                                         "SimulateKey: Escape (portal) - cancel attachment portal",
                                     );
                                     view.close_attachment_portal_cancel(ctx);
-                                    return;
+                                    return DispatchOutcome::success();
                                 }
                                 // Mirror the live FileSearch escape ladder
                                 // (render_builtins/file_search.rs): clear the
@@ -1024,7 +1051,7 @@ impl ScriptListApp {
                             };
 
                             let Some((filter, old_index)) = view_state else {
-                                return;
+                                return DispatchOutcome::success();
                             };
 
                             let filtered_len =
@@ -1256,7 +1283,7 @@ impl ScriptListApp {
                         match key_lower.as_str() {
                             "up" | "arrowup" => {
                                 if view.arg_selected_index > 0 {
-                                    view.arg_selected_index -= 1;
+                                    view.set_arg_selected_index(view.arg_selected_index - 1);
                                     view.arg_list_scroll_handle.scroll_to_item(
                                         view.arg_selected_index,
                                         ScrollStrategy::Nearest,
@@ -1273,7 +1300,7 @@ impl ScriptListApp {
                             "down" | "arrowdown" => {
                                 let filtered = view.filtered_arg_choices();
                                 if view.arg_selected_index < filtered.len().saturating_sub(1) {
-                                    view.arg_selected_index += 1;
+                                    view.set_arg_selected_index(view.arg_selected_index + 1);
                                     view.arg_list_scroll_handle.scroll_to_item(
                                         view.arg_selected_index,
                                         ScrollStrategy::Nearest,
@@ -1570,7 +1597,7 @@ impl ScriptListApp {
                                         ),
                                     );
                                     entity_clone.update(ctx, |prompt, cx| {
-                                        prompt.handle_char(ch, cx);
+                                        prompt.handle_text(&key_lower, cx);
                                     });
                                 }
                             }
@@ -1834,7 +1861,7 @@ impl ScriptListApp {
                             );
                             view.go_back_or_close(window, ctx);
                         }
-                        return;
+                        return DispatchOutcome::success();
                     }
                     let filter_clone = filter.clone();
                     let cat = *selected_category;
@@ -1842,7 +1869,7 @@ impl ScriptListApp {
                     let ordered = crate::emoji::filtered_ordered_emojis(&filter_clone, cat);
                     let filtered_len = ordered.len();
                     if filtered_len == 0 {
-                        return;
+                        return DispatchOutcome::success();
                     }
                     let cols = crate::emoji::GRID_COLS;
                     let new_idx = match key_lower.as_str() {
@@ -1859,7 +1886,7 @@ impl ScriptListApp {
                                 ));
                                 view.close_and_reset_window(ctx);
                             }
-                            return;
+                            return DispatchOutcome::success();
                         }
                         _ => {
                             logging::log(
@@ -1869,7 +1896,7 @@ impl ScriptListApp {
                                     key_lower
                                 ),
                             );
-                            return;
+                            return DispatchOutcome::success();
                         }
                     };
                     // Apply new index
@@ -2334,5 +2361,6 @@ impl ScriptListApp {
                 }
             }
         } // end if !actions_popup_consumed_key
+        DispatchOutcome::success()
     }
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the automation window targeting contract.
-pub const AUTOMATION_WINDOW_SCHEMA_VERSION: u32 = 2;
+pub const AUTOMATION_WINDOW_SCHEMA_VERSION: u32 = 3;
 
 /// Specifies which automation window a command should target.
 ///
@@ -30,7 +30,7 @@ pub enum AutomationWindowTarget {
 }
 
 /// Well-known window kinds that the automation registry tracks.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, strum::EnumIter)]
 #[serde(rename_all = "camelCase")]
 pub enum AutomationWindowKind {
     Main,
@@ -41,6 +41,8 @@ pub enum AutomationWindowKind {
     PromptPopup,
     /// Transient HUD notification pill (floating, focusless, auto-dismissing).
     Hud,
+    /// Production snap target overlay, independent of a launcher parent.
+    SnapOverlay,
 }
 
 impl AutomationWindowKind {
@@ -57,6 +59,7 @@ impl AutomationWindowKind {
             AutomationWindowKind::ActionsDialog => "actionsDialog",
             AutomationWindowKind::PromptPopup => "promptPopup",
             AutomationWindowKind::Hud => "hud",
+            AutomationWindowKind::SnapOverlay => "snapOverlay",
         }
     }
 }
@@ -98,6 +101,9 @@ pub struct AutomationWindowInfo {
     /// For attached popups: the automation ID of the parent window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_window_id: Option<String>,
+    /// Exact parent lifetime; reopening the same stable ID does not reparent a popup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_window_generation: Option<u64>,
     /// For attached popups: the kind of the parent window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_kind: Option<AutomationWindowKind>,

@@ -20,6 +20,9 @@ import {
   WORKFLOW_TASK_PRIMITIVE_ID,
   workflowTaskProofErrors,
 } from "./workflow-task-contract.ts";
+import { productionStoryReceiptIssues } from "./story-contract.ts";
+import { familyCampaignIssues } from "./fixture-contract.ts";
+import { isReferenceReceipt, readReceiptDocument, resolveReceiptDetails, OWNED_RECEIPT_FORMAT, OWNED_RECEIPT_VERSION, MAX_RECEIPT_DETAIL_BYTES, MAX_COMPACT_RECEIPT_BYTES } from "./receipt-artifact.ts";
 
 export const RECEIPT_SCHEMA_VERSION = 2;
 export const RECEIPT_REGISTRY_VERSION = 1;
@@ -28,6 +31,7 @@ export const receiptDispositions = [
   "EVALUABLE_PASS",
   "EVALUABLE_FAIL",
   "BLOCKED_MISSING_PRIMITIVE",
+  "BLOCKED_RESOURCE_BUDGET",
   "BLOCKED_TARGET_AMBIGUITY",
   "BLOCKED_STALE_GENERATION",
   "BLOCKED_PERMISSION",
@@ -184,6 +188,49 @@ function schema(
 }
 
 export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
+  schema({
+    primitiveId: "devtools.design.run", tool: "script-kit-devtools.design",
+    commands: ["design.discover", "design.inspect", "design.query", "design.act", "design.wait", "design.diagnose", "design.loop", "design.run", "design.watch"],
+    requiredPaths: ["artifactReference", "observation", "assertions", "cleanup"], identityPolicy: "none",
+    predicates: [{ id: "owned-operation-completion", validate: (receipt, disposition) => {
+      if (disposition !== "EVALUABLE_PASS") return [];
+      const cleanup = asObject(receipt.cleanup);
+      const assertions = objectArray(receipt.assertions);
+      const issues = cleanup.closed === true && cleanup.referencesFinalized === true && assertions.length > 0 && assertions.every(value => value.pass === true)
+        ? [] : ["owned design operation requires nonempty observed assertions and complete cleanup"];
+      // Discovery also returns `fixtures`, but those are catalogue descriptors,
+      // not a claim that every family was mounted and exercised.
+      const observation = asObject(receipt.observation);
+      const familyCampaign = observation.scenario === "production-family-matrix" || "fixtures" in observation || "catalogue" in observation;
+      return [...issues, ...(receipt.command === "design.run" && familyCampaign ? familyCampaignIssues(observation) : [])];
+    } }], description: "Owned production roots and explicitly labeled native negative controls; frame proof excludes AppKit compositor output.",
+  }),
+  schema({
+    primitiveId: "devtools.stories.run", tool: "script-kit-devtools.stories", commands: ["stories.run"],
+    requiredPaths: ["lane", "library", "journeys", "cleanup"], identityPolicy: "none",
+    predicates: [{ id: "exact-library-and-runtime-stories", validate: (receipt, disposition) =>
+      disposition === "EVALUABLE_PASS" ? productionStoryReceiptIssues(receipt) : [] }],
+    description: "Exact nonzero library selection and optional complete production runtime journeys; no workflow/native promotion.",
+  }),
+  schema({
+    primitiveId: "devtools.build-ops", tool: "script-kit-devtools.build-ops",
+    commands: ["build-ops.discover", "build-ops.inspect", "build-ops.query", "build-ops.act", "build-ops.wait", "build-ops.diagnose"],
+    requiredPaths: ["buildOps", "safety", "cleanup"], identityPolicy: "none", privacyPolicy: "metadata-only",
+    predicates: [{ id: "owned-build-operation", validate: (receipt, disposition) => {
+      const operation = asObject(receipt.buildOps); const identity = asObject(operation.identity);
+      const issues: string[] = [];
+      if (operation.schemaVersion !== 1 || typeof operation.snapshotId !== "string" || typeof identity.id !== "string" ||
+          typeof identity.generation !== "string" || !Number.isSafeInteger(identity.revision)) issues.push("invalid build task identity");
+      if (disposition === "EVALUABLE_PASS" && asObject(receipt.cleanup).closed !== true) issues.push("build cleanup not proved");
+      const result = asObject(operation.result), resources = asObject(result.resources);
+      if (disposition === "BLOCKED_RESOURCE_BUDGET" && String(result.failureCode ?? "").startsWith("resource_")) {
+        const refusal = asObject(resources.refusal);
+        if (resources.scope !== "target-agent" || resources.measurement !== "allocated-blocks" || resources.hardQuota !== false || resources.automaticEviction !== false) issues.push("resource refusal policy not proved");
+        if (refusal.withinLimits !== false || typeof refusal.phase !== "string" || !Array.isArray(refusal.failureCodes) || !refusal.failureCodes.includes(result.failureCode)) issues.push("resource refusal observation not proved");
+      }
+      return issues;
+    } }], description: "Thin wrapper-owned build/task operations and passive inspection; not application runtime proof.",
+  }),
   schema({
     primitiveId: "devtools.targets.list",
     tool: "script-kit-devtools.targets",
@@ -934,6 +981,10 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
               path.startsWith("scripts/devtools/") ||
               path.startsWith("crates/sk-protocol/src/") ||
               path.startsWith("design/mockups/generated/") ||
+              (taskId === "GOV-003" &&
+                (path === "scripts/agentic/agent-cargo.sh" ||
+                  path === "scripts/agentic/build-artifact.ts" ||
+                  path === "rust-toolchain.toml")) ||
               (taskId === "GOV-006" &&
                 (path === reviewedWorkflowOwner || path === "scripts/agentic/compiler-input-paths.txt"))
             ) ||
@@ -965,7 +1016,13 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
                 "scripts/devtools/facade-migrations.test.ts",
               )
             )) ||
-          (taskId === "GOV-003" && !productionSources.includes("src/theme/alpha.rs")) ||
+          (taskId === "GOV-003" && [
+            "src/theme/alpha.rs",
+            "src/theme/types.rs",
+            "scripts/agentic/agent-cargo.sh",
+            "scripts/agentic/build-artifact.ts",
+            "rust-toolchain.toml",
+          ].some((path) => !productionSources.includes(path))) ||
           (taskId === "GOV-005" &&
             !productionSources.includes("design/mockups/generated/tokens.json")) ||
           (taskId === "GOV-006" && (
@@ -1603,6 +1660,7 @@ function dispositionForClassification(classification: unknown): ReceiptDispositi
   if (value === "reproduced") return "EVALUABLE_FAIL";
   if (value.includes("target-ambiguity")) return "BLOCKED_TARGET_AMBIGUITY";
   if (value.includes("stale-generation")) return "BLOCKED_STALE_GENERATION";
+  if (value.includes("resource-budget")) return "BLOCKED_RESOURCE_BUDGET";
   if (value.includes("permission")) return "BLOCKED_PERMISSION";
   if (value.includes("real-data") || value.includes("unsafe")) return "BLOCKED_REAL_DATA_RISK";
   if (value.includes("timeout") || value.includes("queue") || value.includes("parse-error")) return "BLOCKED_TIMEOUT";
@@ -1666,6 +1724,9 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
     "targetGeneration",
     "surfaceGeneration",
     "dataGeneration",
+    "presentationRevision",
+    "themeRevision",
+    "frameGeneration",
   ]) {
     if (
       transaction[field] != null &&
@@ -1700,6 +1761,9 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
     "surfaceKind",
     "semanticSurface",
     "appViewVariant",
+    "presentationRevision",
+    "themeRevision",
+    "frameGeneration",
   ] as const;
   const candidates: Array<[string, JsonObject]> = [
     ["target", asObject(receipt.target)],
@@ -1728,6 +1792,13 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
       asObject(asObject(asObject(receipt.resolvedTarget).surfaceContract).targetIdentity),
     ],
   ];
+  const transition = asObject(receipt.identityTransition);
+  const before = asObject(transition.before);
+  const after = asObject(transition.after);
+  const mutableFields = ["targetGeneration", "surfaceGeneration", "dataGeneration", "presentationRevision", "themeRevision", "frameGeneration", "surfaceKind", "semanticSurface", "appViewVariant"];
+  const declared = stringArray(transition.changedFields);
+  if (declared.some(field => !mutableFields.includes(field)) || new Set(declared).size !== declared.length)
+    errors.push("invalid declared identity transition fields");
   for (const [location, candidate] of candidates) {
     if (
       candidate.windowId != null &&
@@ -1748,6 +1819,15 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
       );
     }
     for (const field of targetFields) {
+      if (location === "targetAfter" && declared.includes(field)) {
+        const observedBefore = asObject(receipt.targetBefore)[field];
+        if (before[field] !== observedBefore || after[field] !== candidate[field] ||
+            (transaction[field] != null && transaction[field] !== before[field]) ||
+            ((field.endsWith("Generation") || field.endsWith("Revision")) &&
+              (!Number.isSafeInteger(before[field]) || !Number.isSafeInteger(after[field]) || Number(after[field]) < Number(before[field]))))
+          errors.push(`invalid declared transition tuple: ${field}`);
+        continue;
+      }
       if (
         candidate[field] != null &&
         transaction[field] != null &&
@@ -1766,7 +1846,7 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
   const selector = Object.keys(requestedSelector).length > 0
     ? requestedSelector
     : requestedTarget;
-  if (selector.type === "id") {
+  if (selector.type === "id" || selector.type === "instance") {
     if (typeof selector.id !== "string" || selector.id.length === 0) {
       errors.push("proof transaction identity disagrees with empty requested target selector id");
     } else if (
@@ -1775,6 +1855,8 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
     ) {
       errors.push("proof transaction identity disagrees with requestedTarget.selector.id");
     }
+    if (selector.type === "instance" && selector.generation !== transaction.windowGeneration)
+      errors.push("proof transaction generation disagrees with requested instance");
   } else if (
     selector.type === "main" &&
     transaction.automationId != null &&
@@ -1840,6 +1922,10 @@ export function validateReceipt(
   primitiveId: string,
   receipt: JsonObject,
 ): ReceiptValidationResult {
+  try { receipt = resolveReceiptDetails(receipt); }
+  catch (error) {
+    return { primitiveId, valid: false, disposition: "INVALID_SCHEMA", errors: [error instanceof Error ? error.message : String(error)], requiredFields: receiptSchema(primitiveId)?.requiredPaths ?? [], activationProof: false };
+  }
   const definition = receiptSchema(primitiveId);
   const errors: string[] = [];
   if (!definition) {
@@ -1930,6 +2016,9 @@ function gitCommit(): string | null {
 }
 
 const producerFileByTool: Record<string, string> = {
+  "script-kit-devtools.design": "design.ts",
+  "script-kit-devtools.stories": "stories.ts",
+  "script-kit-devtools.build-ops": "build-ops.ts",
   "script-kit-devtools.targets": "targets.ts",
   "script-kit-devtools.surface": "surface.ts",
   "script-kit-devtools.surfaces": "surfaces.ts",
@@ -1968,6 +2057,8 @@ function fileFingerprint(path: string): string | null {
 
 const sharedReceiptPolicyOwners = [
   "receipt-schema.ts",
+  "receipt-artifact.ts",
+  "fixture-contract.ts",
   "privacy.ts",
   "evidence-class.ts",
   "geometry-evidence.ts",
@@ -1975,6 +2066,28 @@ const sharedReceiptPolicyOwners = [
   "workflow-task-contract.ts",
   "workflow-task-proof.ts",
   "task-proof-policy.ts",
+  "operator-safety.ts",
+  "target-identity.ts",
+  "client.ts",
+  "owned-evaluation.ts",
+  "png-rgba.ts",
+  "story-contract.ts",
+  "../driver.ts",
+  "../native-lifecycle.ts",
+  "../../agentic/build-artifact.ts",
+  "../../agentic/artifact-lifecycle.ts",
+  "../../agentic/owned-process.ts",
+  "../../../src/runtime_policy.rs",
+  "../../../src/design_evaluation/runtime.rs",
+  "../../agentic/agent-cargo.sh",
+  "../../agentic/session-supervisor.py",
+  "../../agentic/cargo-cache-locks.sh",
+  "build-ops-inventory.ts",
+  "../../../src/theme/live_edit.rs",
+  "../../../src/theme/service.rs",
+  "../../../src/theme/persistence.rs",
+  "../../../src/theme/types.rs",
+  "../../../src/config/editor.rs",
 ] as const;
 let cachedReceiptPolicyFingerprint: string | null = null;
 
@@ -2091,8 +2204,9 @@ function normalizedCleanup(value: unknown): JsonObject {
     ownedPids: Array.isArray(cleanup.ownedPids) ? cleanup.ownedPids : [],
     ownedSessions: Array.isArray(cleanup.ownedSessions) ? cleanup.ownedSessions : [],
     ownedBrowserPids: Array.isArray(cleanup.ownedBrowserPids) ? cleanup.ownedBrowserPids : [],
-    closed: typeof cleanup.closed === "boolean" ? cleanup.closed : true,
-    survivors: Array.isArray(cleanup.survivors) ? cleanup.survivors : [],
+    closed: typeof cleanup.closed === "boolean" ? cleanup.closed : cleanup.resourcesAcquired === false,
+    survivors: Array.isArray(cleanup.survivors) ? cleanup.survivors :
+      cleanup.resourcesAcquired === false ? [] : [{ kind: "owned-resources", identity: "unknown", observation: "unknown" }],
   };
 }
 
@@ -2276,8 +2390,8 @@ function invalidEnvelope(
     missingPrimitives: [],
     assertions: [],
     negativeControls: [],
-    interference: normalizedInterference(null),
-    cleanup: normalizedCleanup(null),
+    interference: normalizedInterference(sanitized.interference),
+    cleanup: normalizedCleanup(sanitized.cleanup),
     disposition,
     pass: false,
     errors: [],
@@ -2307,6 +2421,16 @@ export function prepareValidatedReceipt(
   primitiveId: string,
   receipt: JsonObject,
 ): { receipt: JsonObject; validation: ReceiptValidationResult; exitCode: number } {
+  if (isReferenceReceipt(receipt)) {
+    try {
+      const prepared = prepareValidatedReceipt(primitiveId, resolveReceiptDetails(receipt));
+      return { ...prepared, receipt: prepared.validation.valid ? receipt : prepared.receipt };
+    } catch (error) {
+      const validation: ReceiptValidationResult = { primitiveId, valid: false, disposition: "INVALID_SCHEMA", errors: [error instanceof Error ? error.message : String(error)], requiredFields: receiptSchema(primitiveId)?.requiredPaths ?? [], activationProof: false };
+      const privacy = sanitizeReceipt({}, {});
+      return { receipt: invalidEnvelope(primitiveId, {}, validation, privacy), validation, exitCode: 4 };
+    }
+  }
   const privacy = sanitizeReceipt(normalizeCandidatePaths(receipt), privacyOptions(receipt));
   const sanitized = privacy.sanitized as JsonObject;
   if (privacy.mode !== "fixture-cleartext") assertNoCleartextCanaries(sanitized);
@@ -2355,8 +2479,14 @@ export function emitValidatedReceipt(
 }
 
 export function validateReceiptFile(primitiveId: string, path: string) {
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as JsonObject;
-  return prepareValidatedReceipt(primitiveId, parsed);
+  try {
+    const parsed = readReceiptDocument(path);
+    resolveReceiptDetails(parsed, path);
+    return prepareValidatedReceipt(primitiveId, parsed);
+  } catch (error) {
+    const validation: ReceiptValidationResult = { primitiveId, valid: false, disposition: "INVALID_SCHEMA", errors: [error instanceof Error ? error.message : String(error)], requiredFields: receiptSchema(primitiveId)?.requiredPaths ?? [], activationProof: false };
+    return { receipt: invalidEnvelope(primitiveId, {}, validation, sanitizeReceipt({}, {})), validation, exitCode: 4 };
+  }
 }
 
 /// Stable identity for the receipt registry itself: version plus a
@@ -2407,5 +2537,15 @@ export function receiptRegistryReport() {
     activationProof: definition.activationProof === true,
     predicates: definition.predicates.map((predicate) => predicate.id),
     description: definition.description,
+    ...(definition.primitiveId === "devtools.design.run" || definition.primitiveId === "devtools.stories.run" ? {
+      wireFormat: {
+        receiptFormat: OWNED_RECEIPT_FORMAT, receiptFormatVersion: OWNED_RECEIPT_VERSION,
+        detailArtifactId: "observation", artifactIdentity: "artifactLifecycle.artifacts: relativePath, bytes, sha256",
+        ownerIdentity: "detailReference.ownerSha256 binds the existing ownership marker",
+        maximumDetailBytes: MAX_RECEIPT_DETAIL_BYTES, maximumWireBytes: MAX_COMPACT_RECEIPT_BYTES,
+        resolution: "one owned detailed payload; resolve and verify before applying requiredFields or predicates; emitted receipts stay compact",
+        failClosedWhen: ["missing payload", "symlink or traversal", "hash or size mismatch", "stale owner", "ambiguous artifact identity", "nested reference", "obsolete inline owned receipt"],
+      },
+    } : {}),
   }));
 }

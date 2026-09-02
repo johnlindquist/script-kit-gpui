@@ -51,6 +51,9 @@ fn primary_screen_array_index(screen_count: usize) -> Option<usize> {
 /// mouse position in Core Graphics.
 #[cfg(target_os = "macos")]
 pub fn get_global_mouse_position() -> Option<(f64, f64)> {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) {
+        return None;
+    }
     use core_foundation::base::CFRelease;
     use core_graphics::geometry::CGPoint;
     use std::ffi::c_void;
@@ -89,6 +92,9 @@ pub fn get_global_mouse_position() -> Option<(f64, f64)> {
 /// macOS uses bottom-left origin; we convert to top-left origin.
 #[cfg(target_os = "macos")]
 pub fn primary_screen_height() -> Option<f64> {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) {
+        return None;
+    }
     if require_main_thread("primary_screen_height") {
         return None;
     }
@@ -132,6 +138,9 @@ fn nsrect_to_display_bounds(rect: NSRect, primary_height: f64) -> DisplayBounds 
 /// Get all displays with both full frame and visible placement frame.
 #[cfg(target_os = "macos")]
 pub fn get_macos_visible_displays() -> Vec<VisibleDisplayBounds> {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) {
+        return Vec::new();
+    }
     if require_main_thread("get_macos_visible_displays") {
         return Vec::new();
     }
@@ -204,6 +213,9 @@ pub fn get_macos_visible_displays() -> Vec<VisibleDisplayBounds> {
 /// Falls back to the first display (primary) when `mainScreen` is nil.
 #[cfg(target_os = "macos")]
 pub fn get_active_display() -> Option<VisibleDisplayBounds> {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) {
+        return None;
+    }
     if require_main_thread("get_active_display") {
         return None;
     }
@@ -333,6 +345,9 @@ pub fn clamp_to_visible(bounds: Bounds<Pixels>, visible_area: &DisplayBounds) ->
 /// animations should be disabled or simplified.
 #[cfg(target_os = "macos")]
 pub fn prefers_reduced_motion() -> bool {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) {
+        return false;
+    }
     // SAFETY: NSWorkspace.sharedWorkspace is a singleton accessor safe to call
     // from the main thread. accessibilityDisplayShouldReduceMotion is a read-only
     // property that queries the system accessibility preference.

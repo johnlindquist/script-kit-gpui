@@ -69,6 +69,7 @@
             gpui_input_subscriptions: vec![gpui_input_subscription],
             bounds_subscription: None,     // Set later after window setup
             appearance_subscription: None, // Set later after window setup
+            frontmost_menu_subscription_task: None,
             suppress_filter_events: false,
             pending_programmatic_filter_echo: None,
             pending_filter_sync: false,
@@ -92,6 +93,7 @@
             script_session: Arc::new(ParkingMutex::new(None)),
             arg_input: TextInputState::new(),
             arg_selected_index: 0,
+            arg_selection_revision: 0,
             prompt_receiver: None,
             response_sender: Some(default_response_sender.clone()),
             default_response_sender: Some(default_response_sender),
@@ -108,6 +110,7 @@
             menu_syntax_form_field_bounds: Default::default(),
             list_scroll_handle: UniformListScrollHandle::new(),
             arg_list_scroll_handle: UniformListScrollHandle::new(),
+            arg_prompt_geometry: std::rc::Rc::new(std::cell::Cell::new(None)),
             clipboard_list_scroll_handle: UniformListScrollHandle::new(),
             emoji_scroll_handle: UniformListScrollHandle::new(),
             emoji_frequent_snapshot: Vec::new(),
@@ -141,6 +144,8 @@
             file_search_actions_path: None,
             file_search_sort_mode: crate::actions::FileSearchSortMode::default(),
             file_search_gen: 0,
+            #[cfg(any(test, feature = "owned-ui-evaluation"))]
+            file_search_stream_state: None,
             file_search_cancel: None,
             file_search_display_indices: Vec::new(),
             show_actions_popup: false,

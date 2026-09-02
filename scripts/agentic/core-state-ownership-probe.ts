@@ -217,7 +217,7 @@ try {
     assert(!strings.some((value) => value.includes("plan_type")), "raw provider diagnostic leaked into UI semantics", semantic);
     const agentState = await driver.request(
       { type: "getAgentChatState", target: { type: "id", id: "main" } },
-      { expect: "agentChatStateResult", timeoutMs: 15_000 },
+      { expect: "agent_chatStateResult", timeoutMs: 15_000 },
     );
     const reliability = agentState.reliability as Json | undefined;
     assert(reliability?.phase === "awaitingRecovery", "typed recovery phase missing", agentState);

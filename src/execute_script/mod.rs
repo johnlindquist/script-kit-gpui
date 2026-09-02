@@ -1606,12 +1606,20 @@ impl ScriptListApp {
                                                 query,
                                                 file_search::DEFAULT_CACHE_LIMIT,
                                             )
+                                            .map_err(file_search::SearchFailure::from)
                                         } else {
                                             file_search::search_files(
                                                 query,
                                                 only_in.as_deref(),
                                                 file_search::DEFAULT_SEARCH_LIMIT,
                                             )
+                                        };
+                                        let (results, error) = match results {
+                                            Ok(results) => (results, None),
+                                            Err(error) => {
+                                                tracing::warn!(category = "EXEC", request_id = %request_id, error = %error, "FileSearch source failed");
+                                                (Vec::new(), Some(error.to_string()))
+                                            }
                                         };
 
                                         let file_entries: Vec<protocol::FileSearchResultEntry> =
@@ -1634,6 +1642,7 @@ impl ScriptListApp {
                                         let response = Message::file_search_result(
                                             request_id.clone(),
                                             file_entries,
+                                            error,
                                         );
 
                                         if let Err(e) = reader_response_tx.send(response) {
@@ -2086,6 +2095,7 @@ impl ScriptListApp {
                                         options,
                                         trace,
                                         target,
+                                        expected,
                                     } = &msg
                                     {
                                         tracing::info!(
@@ -2102,6 +2112,7 @@ impl ScriptListApp {
                                             options: options.clone(),
                                             trace: *trace,
                                             target: target.clone(),
+                                            expected: expected.clone(),
                                         };
                                         if tx.send_blocking(prompt_msg).is_err() {
                                             tracing::info!(
@@ -2141,26 +2152,18 @@ impl ScriptListApp {
                                         continue;
                                     }
 
-                                    // Forward SimulateGpuiEvent to entity for real GPUI dispatch
-                                    if let Message::SimulateGpuiEvent {
-                                        request_id,
-                                        target,
-                                        event,
-                                    } = msg.clone()
-                                    {
-                                        tracing::info!(
-                                            target: "script_kit::automation",
-                                            request_id = %request_id,
-                                            target = ?target,
-                                            event = ?event,
-                                            "gpui_event_simulation.forwarding_to_entity"
-                                        );
-                                        let prompt_msg = PromptMessage::SimulateGpuiEvent {
-                                            request_id,
-                                            target,
-                                            event,
-                                        };
-                                        if tx.send_blocking(prompt_msg).is_err() {
+                                    // Both dispatch and cancellation reach the same terminal-response owner.
+                                    if matches!(
+                                        msg,
+                                        Message::SimulateGpuiEvent { .. }
+                                            | Message::CancelGpuiEvent { .. }
+                                    ) {
+                                        if tx
+                                            .send_blocking(PromptMessage::SimulateGpuiEvent {
+                                                message: Box::new(msg),
+                                            })
+                                            .is_err()
+                                        {
                                             tracing::info!(
                                                 category = "EXEC",
                                                 "Prompt channel closed, reader exiting"

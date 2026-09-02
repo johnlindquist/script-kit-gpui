@@ -68,7 +68,7 @@ function passingSources(): StateOwnershipSource[] {
     "src/main.rs":
       "mod root_search_store; use root_search_store::RootSearchStore; mod filter_coalescer; use crate::filter_coalescer::FilterCoalescer; mod list_item; mod footer_popup;",
     "src/main_window_preflight/build.rs":
-      "fn preflight() { app.redacted_command_receipt(); app.root_search.root_passive_frame(); }",
+      "fn preflight() { result.redacted_command_receipt(None); app.root_search.root_passive_frame(); }",
     "src/app_render/focused_info.rs":
       "fn info() { result.command_descriptor(); info.with_command_descriptor(value); }",
     "src/actions/builders/script_context.rs":

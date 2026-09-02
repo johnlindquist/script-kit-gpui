@@ -239,9 +239,14 @@ impl ScriptListApp {
                     match key {
                         _ if is_key_enter(key) => {
                             if let Some(emoji) = ordered_emojis.get(*selected_index) {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    emoji.emoji.to_string(),
-                                ));
+                                let receipt = match crate::platform::copy_text(emoji.emoji) {
+                                    Ok(receipt) => receipt,
+                                    Err(error) => {
+                                        this.show_error_toast(format!("Failed to copy emoji: {error}"), cx);
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                };
                                 if let Err(error) =
                                     crate::emoji_usage::record_emoji_use(emoji.emoji)
                                 {
@@ -251,12 +256,20 @@ impl ScriptListApp {
                                         "failed to record emoji usage"
                                     );
                                 }
-                                let _ = this.finalize_paste_after_clipboard_ready(
-                                    "emoji",
-                                    emoji.name,
-                                    PasteCloseBehavior::HideWindow,
-                                    cx,
-                                );
+                                if receipt.destination() == crate::runtime_policy::CopyDestination::OwnedProcessLocal {
+                                    this.show_hud(
+                                        receipt.feedback(format!("Copied {}", emoji.emoji)),
+                                        Some(HUD_SHORT_MS),
+                                        cx,
+                                    );
+                                } else {
+                                    let _ = this.finalize_paste_after_clipboard_ready(
+                                        "emoji",
+                                        emoji.name,
+                                        PasteCloseBehavior::HideWindow,
+                                        cx,
+                                    );
+                                }
                             }
                             cx.stop_propagation();
                         }
@@ -369,11 +382,13 @@ impl ScriptListApp {
                                                     if let Some(app) = click_entity.upgrade() {
                                                         let emoji_value = emoji_value.clone();
                                                         app.update(cx, |this, cx| {
-                                                            cx.write_to_clipboard(
-                                                                gpui::ClipboardItem::new_string(
-                                                                    emoji_value.clone(),
-                                                                ),
-                                                            );
+                                                            let receipt = match crate::platform::copy_text(&emoji_value) {
+                                                                Ok(receipt) => receipt,
+                                                                Err(error) => {
+                                                                    this.show_error_toast(format!("Failed to copy emoji: {error}"), cx);
+                                                                    return;
+                                                                }
+                                                            };
                                                             if let Err(error) =
                                                                 crate::emoji_usage::record_emoji_use(
                                                                     &emoji_value,
@@ -384,6 +399,14 @@ impl ScriptListApp {
                                                                     %error,
                                                                     "failed to record emoji usage"
                                                                 );
+                                                            }
+                                                            if receipt.destination() == crate::runtime_policy::CopyDestination::OwnedProcessLocal {
+                                                                this.show_hud(
+                                                                    receipt.feedback(format!("Copied {emoji_value}")),
+                                                                    Some(HUD_SHORT_MS),
+                                                                    cx,
+                                                                );
+                                                                return;
                                                             }
                                                             this.hide_main_and_reset(cx);
                                                             std::thread::spawn(|| {

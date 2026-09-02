@@ -1,8 +1,5 @@
 use super::*;
 
-static SCRIPT_REFRESH_REQUEST_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 const HUD_PLUGIN_INVENTORY_MS: u64 = 1400;
 
 /// Canonical string spelling of a scriptlet markdown path. Falls back to
@@ -106,10 +103,32 @@ enum ScriptHotkeyRefreshAction {
 
 struct AsyncScriptRefreshLoadResult {
     scripts: Vec<std::sync::Arc<scripts::Script>>,
-    scriptlets: Vec<std::sync::Arc<scripts::Scriptlet>>,
+    scriptlets: scripts::ScriptletCatalogue,
     scripts_elapsed: std::time::Duration,
     scriptlets_elapsed: std::time::Duration,
     total_elapsed: std::time::Duration,
+}
+
+pub(super) struct RootCatalogueWork {
+    source: &'static str,
+    generation: u64,
+    scope: String,
+    script_revision: Option<u64>,
+    pub(super) run: Option<crate::design_evaluation::search_fixtures::SearchRun>,
+}
+
+fn catalogue_completion_terminal<T>(
+    result: &Result<anyhow::Result<T>, async_channel::RecvError>,
+    count: impl FnOnce(&T) -> usize,
+) -> crate::design_evaluation::search_fixtures::ProviderTerminal {
+    use crate::design_evaluation::search_fixtures::ProviderTerminal;
+    match result {
+        Ok(Ok(value)) => ProviderTerminal::Completed {
+            count: count(value),
+        },
+        Ok(Err(error)) => ProviderTerminal::for_error(error),
+        Err(_) => ProviderTerminal::Disconnected,
+    }
 }
 
 fn canonical_script_shortcut(shortcut: Option<&str>) -> Option<String> {
@@ -175,13 +194,12 @@ fn plan_script_hotkey_refresh(
         .collect()
 }
 
-fn load_plugin_skills() -> Vec<std::sync::Arc<crate::plugins::PluginSkill>> {
-    crate::plugins::discover_plugins()
-        .and_then(|index| crate::plugins::discover_plugin_skills(&index))
-        .unwrap_or_default()
+fn load_plugin_skills() -> anyhow::Result<Vec<std::sync::Arc<crate::plugins::PluginSkill>>> {
+    let index = crate::plugins::discover_plugins()?;
+    Ok(crate::plugins::discover_plugin_skills(&index)?
         .into_iter()
         .map(std::sync::Arc::new)
-        .collect()
+        .collect())
 }
 
 fn apply_script_hotkey_refresh(actions: &[ScriptHotkeyRefreshAction]) {
@@ -207,209 +225,466 @@ fn apply_script_hotkey_refresh(actions: &[ScriptHotkeyRefreshAction]) {
 }
 
 fn spawn_async_script_refresh_load(
-    scripts_loader: impl FnOnce() -> Vec<std::sync::Arc<scripts::Script>> + Send + 'static,
-    scriptlets_loader: impl FnOnce() -> Vec<std::sync::Arc<scripts::Scriptlet>> + Send + 'static,
-) -> async_channel::Receiver<AsyncScriptRefreshLoadResult> {
+    scripts_loader: impl FnOnce() -> anyhow::Result<Vec<std::sync::Arc<scripts::Script>>>
+        + Send
+        + 'static,
+    scriptlets_loader: impl FnOnce() -> anyhow::Result<scripts::ScriptletCatalogue> + Send + 'static,
+) -> async_channel::Receiver<anyhow::Result<AsyncScriptRefreshLoadResult>> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let load_started_at = std::time::Instant::now();
-        let (scripts, scripts_elapsed, scriptlets, scriptlets_elapsed) = std::thread::scope(
-            |scope| {
-                let scripts_handle = scope.spawn(move || {
-                    let started = std::time::Instant::now();
-                    (scripts_loader(), started.elapsed())
-                });
-                let scriptlets_handle = scope.spawn(move || {
-                    let started = std::time::Instant::now();
-                    (scriptlets_loader(), started.elapsed())
-                });
-
-                let (scripts, scripts_elapsed) = match scripts_handle.join() {
-                    Ok(result) => result,
-                    Err(_) => {
-                        logging::log(
-                        "ERROR",
-                        "script_refresh_async: attempted=load_scripts failed=thread_panicked state=background_loading",
-                    );
-                        (Vec::new(), std::time::Duration::ZERO)
-                    }
-                };
-                let (scriptlets, scriptlets_elapsed) = match scriptlets_handle.join() {
-                    Ok(result) => result,
-                    Err(_) => {
-                        logging::log(
-                        "ERROR",
-                        "script_refresh_async: attempted=load_scriptlets failed=thread_panicked state=background_loading",
-                    );
-                        (Vec::new(), std::time::Duration::ZERO)
-                    }
-                };
-
-                (scripts, scripts_elapsed, scriptlets, scriptlets_elapsed)
-            },
-        );
-
-        let result = AsyncScriptRefreshLoadResult {
-            scripts,
-            scriptlets,
-            scripts_elapsed,
-            scriptlets_elapsed,
-            total_elapsed: load_started_at.elapsed(),
-        };
-
-        if tx.send_blocking(result).is_err() {
-            logging::log(
-                "ERROR",
-                "script_refresh_async: attempted=send_load_result failed=receiver_dropped state=background_complete",
-            );
-        }
+        let result = std::thread::scope(|scope| -> anyhow::Result<_> {
+            let scripts_handle = scope.spawn(move || {
+                let started = std::time::Instant::now();
+                (scripts_loader(), started.elapsed())
+            });
+            let scriptlets_handle = scope.spawn(move || {
+                let started = std::time::Instant::now();
+                (scriptlets_loader(), started.elapsed())
+            });
+            // Join both workers even when one failed; no panic becomes an
+            // apparently successful empty catalogue that erases last-good data.
+            let scripts = scripts_handle.join();
+            let scriptlets = scriptlets_handle.join();
+            let (scripts, scripts_elapsed) =
+                scripts.map_err(|_| anyhow::anyhow!("scripts_loader_panicked"))?;
+            let (scriptlets, scriptlets_elapsed) =
+                scriptlets.map_err(|_| anyhow::anyhow!("scriptlets_loader_panicked"))?;
+            let scripts = scripts?;
+            let scriptlets = scriptlets?;
+            Ok(AsyncScriptRefreshLoadResult {
+                scripts,
+                scriptlets,
+                scripts_elapsed,
+                scriptlets_elapsed,
+                total_elapsed: load_started_at.elapsed(),
+            })
+        });
+        let _ = tx.send_blocking(result);
     });
     rx
 }
 
 impl ScriptListApp {
-    pub(crate) fn refresh_scripts(&mut self, cx: &mut Context<Self>) {
-        let request_id =
-            SCRIPT_REFRESH_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        logging::log(
-            "APP",
-            &format!(
-                "script_refresh_async: state=dispatching_background_load request_id={} current_scripts={} current_scriptlets={}",
-                request_id,
-                self.scripts.len(),
-                self.scriptlets.len()
-            ),
+    pub(crate) fn reset_owned_search_catalogues(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.main_services.owned_sources().is_some(),
+            "owned_catalogue_services_required"
         );
+        anyhow::ensure!(
+            self.root_search.computed_query_stamp().is_none(),
+            "owned_catalogue_reset_requires_pending_query"
+        );
+        let scope = crate::runtime_policy::owned_evaluation()
+            .ok_or_else(|| anyhow::anyhow!("owned_catalogue_scope_required"))?;
+        scope.require_owned_path(scope.root())?;
+        let catalogue = super::startup_data::OwnedMainCatalogueSources::initial(scope.root());
+        self.spine_cwd = Some(catalogue.cwd);
+        self.spine_cwd_label = Some(catalogue.cwd_label.into());
+        self.spine_cwd_revision = self
+            .spine_cwd_revision
+            .checked_add(1)
+            .expect("owned catalogue cwd revision exhausted");
+        self.install_loaded_skills(catalogue.skills);
+        let scriptlets =
+            scripts::ScriptletCatalogue::from_scriptlets(catalogue.scriptlets).publish();
+        self.install_loaded_scripts_and_scriptlets(catalogue.scripts, scriptlets);
+        self.apps.clear();
+        self.complete_root_app_catalog(catalogue.apps, std::time::Duration::ZERO, cx);
+        let _ = self.rebuild_registries();
+        Ok(())
+    }
 
-        let rx = spawn_async_script_refresh_load(scripts::read_scripts, scripts::load_scriptlets);
-        cx.spawn(async move |this, cx| {
-            let Ok(load_result) = rx.recv().await else {
-                logging::log(
-                    "ERROR",
-                    "script_refresh_async: attempted=receive_load_result failed=channel_closed state=awaiting_background_load",
-                );
-                return;
-            };
+    pub(super) fn begin_root_catalogue_refresh(
+        &mut self,
+        source: &'static str,
+        scope: &str,
+    ) -> Option<RootCatalogueWork> {
+        if self.root_search.named_provider_in_flight(source) {
+            self.root_search.note_desired_provider(
+                source,
+                "",
+                scope,
+                RootProviderPublicationPolicy::Visible,
+            );
+            return None;
+        }
+        let generation = self.root_search.allocate_named_provider_generation(source);
+        let run = if let Some(gate) = self.main_services.search_gate() {
+            Some(gate.begin(
+                source,
+                &self.filter_text,
+                generation,
+                RootProviderPublicationPolicy::Visible,
+            )?)
+        } else if self.main_services.is_production() {
+            None
+        } else {
+            return None;
+        };
+        self.root_search.begin_named_provider(
+            source,
+            generation,
+            "",
+            scope,
+            RootProviderPublicationPolicy::Visible,
+            false,
+        );
+        let script_revision =
+            (source == "validation").then(|| self.root_search.script_catalogue_revision());
+        Some(RootCatalogueWork {
+            source,
+            generation,
+            scope: scope.to_owned(),
+            script_revision,
+            run,
+        })
+    }
 
-            let scripts_count = load_result.scripts.len();
-            let scriptlets_count = load_result.scriptlets.len();
-            let scripts_elapsed_ms = load_result.scripts_elapsed.as_secs_f64() * 1000.0;
-            let scriptlets_elapsed_ms = load_result.scriptlets_elapsed.as_secs_f64() * 1000.0;
-            let total_elapsed_ms = load_result.total_elapsed.as_secs_f64() * 1000.0;
-            let latest_request_id =
-                SCRIPT_REFRESH_REQUEST_ID.load(std::sync::atomic::Ordering::Relaxed);
-            if request_id != latest_request_id {
-                logging::log(
-                    "APP",
-                    &format!(
-                        "script_refresh_async: state=discarding_stale_result request_id={} latest_request_id={} scripts={} scriptlets={}",
-                        request_id,
-                        latest_request_id,
-                        scripts_count,
-                        scriptlets_count
-                    ),
+    fn restart_root_catalogue_refresh(&mut self, source: &'static str, cx: &mut Context<Self>) {
+        match source {
+            "scripts" => self.refresh_scripts(cx),
+            "skills" => self.refresh_skills(cx),
+            "apps" => self.start_root_app_catalog(cx),
+            "validation" => self.refresh_root_validation(cx),
+            "flow-roster" => self.refresh_root_flow_roster(cx),
+            "icons" => self.refresh_root_app_icons(cx),
+            _ => unreachable!("unknown catalogue source"),
+        }
+    }
+
+    pub(super) fn complete_root_catalogue_refresh<T>(
+        &mut self,
+        work: &RootCatalogueWork,
+        result: Result<anyhow::Result<T>, async_channel::RecvError>,
+        count: impl FnOnce(&T) -> usize,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, &mut Context<Self>, T) -> anyhow::Result<bool>,
+    ) {
+        use crate::design_evaluation::search_fixtures::ProviderTerminal;
+        if !self
+            .root_search
+            .named_provider_work_is_current(work.source, work.generation)
+        {
+            if let Some(run) = &work.run {
+                run.finish(
+                    ProviderTerminal::StaleDiscarded,
+                    RootProviderPublicationPolicy::Visible,
                 );
-                return;
             }
-
-            let update_result = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    app.apply_loaded_scripts_and_scriptlets(
-                        load_result.scripts,
-                        load_result.scriptlets,
-                        cx,
-                    );
-                    logging::log(
-                        "APP",
-                        &format!(
-                            "script_refresh_async: state=applied_to_ui request_id={} scripts={} scriptlets={} scripts_ms={:.2} scriptlets_ms={:.2} total_ms={:.2}",
-                            request_id,
-                            scripts_count,
-                            scriptlets_count,
-                            scripts_elapsed_ms,
-                            scriptlets_elapsed_ms,
-                            total_elapsed_ms
-                        ),
-                    );
-                })
-            });
-
-            if update_result.is_err() {
-                logging::log(
-                    "ERROR",
-                    "script_refresh_async: attempted=apply_loaded_results failed=ui_entity_unavailable state=applying_to_ui",
+            return;
+        }
+        // A source change supersedes this snapshot without starting a second
+        // worker. Retire this exact producer, then read the latest source once.
+        let desired = self.root_search.take_named_provider_desired(work.source);
+        let source_replaced = work
+            .script_revision
+            .is_some_and(|revision| revision != self.root_search.script_catalogue_revision());
+        if desired || source_replaced {
+            self.root_search.finish_named_provider(
+                work.source,
+                work.generation,
+                RootProviderTerminal::StaleDiscarded,
+            );
+            if let Some(run) = &work.run {
+                run.finish(
+                    ProviderTerminal::StaleDiscarded,
+                    RootProviderPublicationPolicy::Visible,
                 );
+            }
+            self.restart_root_catalogue_refresh(work.source, cx);
+            return;
+        }
+        let visible = self
+            .root_search
+            .accepts_named_provider(work.source, work.generation)
+            && (work.source != "flow-roster" || work.scope == self.flow_ux_cwd());
+        let mut terminal = catalogue_completion_terminal(&result, count);
+        let finish = |app: &mut Self, terminal| {
+            let terminal = match terminal {
+                ProviderTerminal::Completed { count: 0 } => RootProviderTerminal::Empty,
+                ProviderTerminal::Completed { .. } => RootProviderTerminal::Success,
+                ProviderTerminal::Failed => RootProviderTerminal::Failed,
+                ProviderTerminal::Unavailable => RootProviderTerminal::Unavailable,
+                ProviderTerminal::Disconnected => RootProviderTerminal::Disconnected,
+                ProviderTerminal::Cancelled => RootProviderTerminal::Cancelled,
+                ProviderTerminal::StaleDiscarded => RootProviderTerminal::StaleDiscarded,
+            };
+            app.root_search
+                .finish_named_provider(work.source, work.generation, terminal);
+        };
+        if let Ok(Ok(value)) = result {
+            if visible {
+                self.commit_main_menu_results_refresh(
+                    work.source,
+                    Some((work.source, work.generation)),
+                    cx,
+                    |app, cx| {
+                        let changed = match apply(app, cx, value) {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                terminal = ProviderTerminal::for_error(&error);
+                                false
+                            }
+                        };
+                        finish(app, terminal);
+                        changed
+                    },
+                );
+            } else {
+                if let Err(error) = apply(self, cx, value) {
+                    terminal = ProviderTerminal::for_error(&error);
+                }
+                finish(self, terminal);
+            }
+        } else {
+            finish(self, terminal);
+        }
+        let succeeded = matches!(terminal, ProviderTerminal::Completed { .. });
+        if let Some(run) = &work.run {
+            run.finish(
+                terminal,
+                if visible {
+                    RootProviderPublicationPolicy::Visible
+                } else {
+                    RootProviderPublicationPolicy::CacheOnly
+                },
+            );
+        }
+        if !succeeded {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn refresh_scripts(&mut self, cx: &mut Context<Self>) {
+        let Some(work) = self.begin_root_catalogue_refresh("scripts", "catalogue") else {
+            return;
+        };
+        let (tx, rx) = if work.run.is_some() {
+            let (tx, rx) = async_channel::bounded(1);
+            (Some(tx), rx)
+        } else {
+            (
+                None,
+                spawn_async_script_refresh_load(scripts::read_scripts, scripts::load_scriptlets),
+            )
+        };
+        cx.spawn(async move |this, cx| {
+            if let (Some(run), Some(tx)) = (&work.run, tx) {
+                run.deliver(move |result| tx.try_send(result), |outcome, run| {
+                    crate::design_evaluation::search_fixtures::script_catalog(outcome, run).map(|(scripts, scriptlets)| AsyncScriptRefreshLoadResult {
+                        scripts, scriptlets: scripts::ScriptletCatalogue::from_scriptlets(scriptlets), scripts_elapsed: std::time::Duration::ZERO,
+                        scriptlets_elapsed: std::time::Duration::ZERO, total_elapsed: std::time::Duration::ZERO,
+                    })
+                }).await;
+            }
+            let result = rx.recv().await;
+            let update = this.update(cx, |app, cx| {
+                app.complete_root_catalogue_refresh(&work, result, |loaded| loaded.scripts.len() + loaded.scriptlets.len(), cx, |app, cx, loaded| {
+                    logging::log("APP", &format!("script_refresh_async: scripts_ms={:.2} scriptlets_ms={:.2} total_ms={:.2}",
+                        loaded.scripts_elapsed.as_secs_f64() * 1000.0, loaded.scriptlets_elapsed.as_secs_f64() * 1000.0, loaded.total_elapsed.as_secs_f64() * 1000.0));
+                    app.apply_loaded_scripts_and_scriptlets(loaded.scripts, loaded.scriptlets, cx);
+                    Ok(true)
+                });
+            });
+            if update.is_err() {
+                if let Some(run) = &work.run {
+                    run.finish(crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded, RootProviderPublicationPolicy::Visible);
+                }
+            }
+        }).detach();
+    }
+
+    pub(crate) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        let Some(work) = self.begin_root_catalogue_refresh("skills", "catalogue") else {
+            return;
+        };
+        let (tx, rx) = async_channel::bounded(1);
+        let owned_tx = if work.run.is_some() {
+            Some(tx)
+        } else {
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(load_plugin_skills());
+            });
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            if let (Some(run), Some(tx)) = (&work.run, owned_tx) {
+                run.deliver(
+                    move |result| tx.try_send(result),
+                    crate::design_evaluation::search_fixtures::skill_catalog,
+                )
+                .await;
+            }
+            let result = rx.recv().await;
+            let update = this.update(cx, |app, cx| {
+                app.complete_root_catalogue_refresh(
+                    &work,
+                    result,
+                    Vec::len,
+                    cx,
+                    |app, _cx, skills| {
+                        app.install_loaded_skills(skills);
+                        Ok(true)
+                    },
+                );
+            });
+            if update.is_err() {
+                if let Some(run) = &work.run {
+                    run.finish(
+                        crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
             }
         })
         .detach();
     }
 
-    pub(crate) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
-        let before_count = self.skills.len();
-        self.skills = load_plugin_skills();
+    fn install_loaded_skills(&mut self, skills: Vec<std::sync::Arc<crate::plugins::PluginSkill>>) {
+        self.skills = skills;
         crate::ai::context_selector::publish_launcher_catalog(
             &self.scripts,
             &self.scriptlets,
             &self.skills,
         );
-
         self.invalidate_filter_cache();
         self.invalidate_grouped_cache();
-
-        self.sync_list_state();
-        self.selected_index = 0;
-        self.validate_selection_bounds(cx);
-        self.main_list_state
-            .scroll_to_reveal_item(self.selected_index);
-        self.last_scrolled_index = Some(self.selected_index);
-
-        if before_count != self.skills.len() {
-            logging::log(
-                "APP",
-                &format!(
-                    "Plugin skills refreshed: {} -> {} available",
-                    before_count,
-                    self.skills.len()
-                ),
-            );
-        } else {
-            logging::log(
-                "APP",
-                &format!("Plugin skills refreshed: {} available", self.skills.len()),
-            );
-        }
-
-        cx.notify();
     }
 
-    fn apply_loaded_scripts_and_scriptlets(
+    fn install_script_validation_report(&mut self, validation: &scripts::ValidationReport) -> bool {
+        let report = scripts::merge_scriptlet_validation_issues(validation, &self.scriptlets);
+        if self.script_validation_report.as_ref().is_some_and(|old| {
+            old.schema_version == report.schema_version
+                && old.total_candidates == report.total_candidates
+                && old.valid_count == report.valid_count
+                && old.fatal_count == report.fatal_count
+                && old.warning_count == report.warning_count
+                && old.failed_scripts == report.failed_scripts
+                && old.warnings == report.warnings
+                && old.retained_issues == report.retained_issues
+        }) {
+            return false;
+        }
+        self.script_validation_report = Some(std::sync::Arc::new(report));
+        self.invalidate_filter_cache();
+        self.invalidate_grouped_cache();
+        true
+    }
+
+    pub(crate) fn refresh_root_validation(&mut self, cx: &mut Context<Self>) {
+        let Some(work) = self.begin_root_catalogue_refresh("validation", "catalogue") else {
+            return;
+        };
+        let (_, candidates) = self.root_search.script_catalogue_candidates();
+        let (tx, rx) = async_channel::bounded(1);
+        let owned = if work.run.is_some() {
+            Some((tx, candidates))
+        } else {
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(Ok(scripts::validate_script_catalog(candidates.to_vec())));
+            });
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            if let (Some(run), Some((tx, candidates))) = (&work.run, owned) {
+                run.deliver(
+                    move |result| tx.try_send(result),
+                    |outcome, run| {
+                        crate::design_evaluation::search_fixtures::validation_catalog(
+                            outcome,
+                            run,
+                            candidates.to_vec(),
+                        )
+                    },
+                )
+                .await;
+            }
+            let result = rx.recv().await;
+            let update = this.update(cx, |app, cx| {
+                app.complete_root_catalogue_refresh(
+                    &work,
+                    result,
+                    |report| report.validation.total_candidates,
+                    cx,
+                    |app, _cx, report| Ok(app.install_script_validation_report(&report.validation)),
+                );
+            });
+            if update.is_err() {
+                if let Some(run) = &work.run {
+                    run.finish(
+                        crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_root_flow_roster(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.flow_ux_cwd();
+        if self.main_services.is_production() {
+            crate::flows::catalog::flow_catalog().refresh(&cwd);
+            return;
+        }
+        let Some(work) = self.begin_root_catalogue_refresh("flow-roster", &cwd) else {
+            return;
+        };
+        let (tx, rx) = async_channel::bounded(1);
+        cx.spawn(async move |this, cx| {
+            let Some(run) = &work.run else {
+                return;
+            };
+            run.deliver(
+                move |result| tx.try_send(result),
+                crate::design_evaluation::search_fixtures::flow_roster,
+            )
+            .await;
+            let result = rx.recv().await;
+            let update = this.update(cx, |app, cx| {
+                app.complete_root_catalogue_refresh(
+                    &work,
+                    result,
+                    Vec::len,
+                    cx,
+                    |app, _cx, flows| {
+                        // Install only after the producer fence: an old fixture is
+                        // never allowed to write this process-wide catalogue.
+                        crate::flows::catalog::flow_catalog().install_owned_roster(cwd, flows)?;
+                        app.invalidate_filter_cache();
+                        app.invalidate_grouped_cache();
+                        Ok(true)
+                    },
+                );
+            });
+            if update.is_err() {
+                if let Some(run) = &work.run {
+                    run.finish(
+                        crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn install_loaded_scripts_and_scriptlets(
         &mut self,
         loaded_scripts: Vec<std::sync::Arc<scripts::Script>>,
         loaded_scriptlets: Vec<std::sync::Arc<scripts::Scriptlet>>,
-        cx: &mut Context<Self>,
     ) {
-        let before_counts = collect_plugin_inventory_counts(&self.scripts, &self.scriptlets);
-        let after_counts = collect_plugin_inventory_counts(&loaded_scripts, &loaded_scriptlets);
-
-        let hotkey_refresh_actions = plan_script_hotkey_refresh(&self.scripts, &loaded_scripts);
-        apply_script_hotkey_refresh(&hotkey_refresh_actions);
-
-        // Re-run validation on the freshly loaded catalog so the "Script Issues"
-        // launcher row reflects current disk state. Validation is in-memory and
-        // cheap compared to file I/O.
-        let catalog_report = crate::scripts::validate_script_catalog(loaded_scripts);
-        let loaded_scripts: Vec<std::sync::Arc<scripts::Script>> =
-            catalog_report.scripts.iter().cloned().collect();
-        self.script_validation_report = Some(std::sync::Arc::new(
-            crate::scripts::merge_scriptlet_validation_issues(
-                &catalog_report.validation,
-                &loaded_scriptlets,
-            ),
-        ));
-
-        self.scripts = loaded_scripts;
-        // Use load_scriptlets() to load from all plugins (plugins/*/scriptlets/*.md)
+        let candidates: std::sync::Arc<[std::sync::Arc<scripts::Script>]> = loaded_scripts.into();
+        let catalog_report = scripts::validate_script_catalog(candidates.to_vec());
+        self.root_search
+            .install_script_catalogue_candidates(candidates);
+        self.scripts = catalog_report.scripts.to_vec();
         self.scriptlets = loaded_scriptlets;
+        self.install_script_validation_report(&catalog_report.validation);
         crate::ai::context_selector::publish_launcher_catalog(
             &self.scripts,
             &self.scriptlets,
@@ -418,6 +693,24 @@ impl ScriptListApp {
         self.invalidate_filter_cache();
         self.invalidate_grouped_cache();
         self.invalidate_preview_cache();
+    }
+
+    fn apply_loaded_scripts_and_scriptlets(
+        &mut self,
+        loaded_scripts: Vec<std::sync::Arc<scripts::Script>>,
+        loaded_scriptlets: scripts::ScriptletCatalogue,
+        cx: &mut Context<Self>,
+    ) {
+        let loaded_scriptlets = loaded_scriptlets.publish();
+        let before_counts = collect_plugin_inventory_counts(&self.scripts, &self.scriptlets);
+        let after_counts = collect_plugin_inventory_counts(&loaded_scripts, &loaded_scriptlets);
+
+        if self.main_services.is_production() {
+            let hotkey_refresh_actions = plan_script_hotkey_refresh(&self.scripts, &loaded_scripts);
+            apply_script_hotkey_refresh(&hotkey_refresh_actions);
+        }
+
+        self.install_loaded_scripts_and_scriptlets(loaded_scripts, loaded_scriptlets);
 
         let indexed_bodies = self.scripts.iter().filter(|s| s.body.is_some()).count();
         logging::log(
@@ -435,15 +728,6 @@ impl ScriptListApp {
             scriptlets = after_counts.scriptlets,
             "plugin_inventory_refreshed"
         );
-
-        // Sync list component state and validate selection
-        // This moves state mutation OUT of render() (anti-pattern fix)
-        self.sync_list_state();
-        self.selected_index = 0;
-        self.validate_selection_bounds(cx);
-        self.main_list_state
-            .scroll_to_reveal_item(self.selected_index);
-        self.last_scrolled_index = Some(self.selected_index);
 
         // Rebuild alias/shortcut registries and show HUD for newly appearing
         // conflicts only — persistent ones already toasted on a prior refresh.
@@ -464,7 +748,6 @@ impl ScriptListApp {
                 self.scriptlets.len()
             ),
         );
-        cx.notify();
     }
 
     /// Refresh app launcher cache and invalidate search caches.
@@ -479,43 +762,29 @@ impl ScriptListApp {
     /// 2. If user is in AppLauncherView, the list needs updating
     /// 3. The cost of an "unnecessary" notify is near-zero (just marks dirty)
     pub fn refresh_apps(&mut self, cx: &mut Context<Self>) {
-        self.apps = crate::app_launcher::get_cached_apps();
-        self.rebuild_root_windows_after_app_icon_cache_update(
-            "refresh_apps_root_windows_icons",
-            cx,
-        );
-        // Invalidate caches so main search includes new apps
-        self.invalidate_filter_cache();
-        self.invalidate_grouped_cache();
-
-        // Sync list component state and validate selection
-        // This ensures the GPUI list component knows about the new app count
-        self.sync_list_state();
-        self.validate_selection_bounds(cx);
-
-        logging::log(
-            "APP",
-            &format!("Apps refreshed: {} applications loaded", self.apps.len()),
-        );
-        cx.notify();
+        self.start_root_app_catalog(cx);
     }
 
     /// Dismiss the bun warning banner
     pub(crate) fn dismiss_bun_warning(&mut self, cx: &mut Context<Self>) {
+        if !self.show_bun_warning {
+            return;
+        }
         logging::log("APP", "Bun warning banner dismissed by user");
         self.show_bun_warning = false;
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
         cx.notify();
     }
 
     /// Open bun.sh in the default browser
-    pub(crate) fn open_bun_website(&self) {
+    pub(crate) fn open_bun_website(&self) -> anyhow::Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)?;
         logging::log("APP", "Opening https://bun.sh in default browser");
-        if let Err(e) = std::process::Command::new("open")
+        std::process::Command::new("open")
             .arg("https://bun.sh")
-            .spawn()
-        {
-            logging::log("APP", &format!("Failed to open bun.sh: {}", e));
-        }
+            .spawn()?;
+        Ok(())
     }
 
     /// Handle incremental scriptlet file change
@@ -537,6 +806,30 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         use script_kit_gpui::scriptlet_cache::{diff_scriptlets, CachedScriptlet};
+        if self.root_search.named_provider_in_flight("scripts") {
+            self.root_search.note_desired_provider(
+                "scripts",
+                "",
+                "catalogue",
+                RootProviderPublicationPolicy::Visible,
+            );
+        }
+        let source_generation = if self.root_search.named_provider_in_flight("scripts") {
+            None
+        } else {
+            let generation = self
+                .root_search
+                .allocate_named_provider_generation("scripts");
+            self.root_search.begin_named_provider(
+                "scripts",
+                generation,
+                "",
+                "catalogue",
+                RootProviderPublicationPolicy::Visible,
+                false,
+            );
+            Some(generation)
+        };
 
         logging::log(
             "APP",
@@ -574,15 +867,30 @@ impl ScriptListApp {
             })
             .collect();
 
-        // Parse new scriptlets from file (empty if deleted)
-        let new_scripts_scriptlets = if is_deleted {
-            vec![]
+        // A deletion is an explicit successful empty source. A failed read is
+        // not a deletion and must preserve the old rows and capability snapshot.
+        let parsed = if is_deleted {
+            scripts::ScriptletCatalogue::empty_source(path)
         } else {
-            scripts::read_scriptlets_from_file(path)
+            match scripts::read_scriptlets_from_file(path) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    tracing::warn!(%error, "scriptlet_source_refresh_failed");
+                    if let Some(generation) = source_generation {
+                        self.root_search.finish_named_provider(
+                            "scripts",
+                            generation,
+                            RootProviderTerminal::Failed,
+                        );
+                        cx.notify();
+                    }
+                    return;
+                }
+            }
         };
 
-        let new_scriptlets: Vec<CachedScriptlet> = new_scripts_scriptlets
-            .iter()
+        let new_scriptlets: Vec<CachedScriptlet> = parsed
+            .scriptlets()
             .map(|s| {
                 CachedScriptlet::new(
                     s.name.clone(),
@@ -593,31 +901,6 @@ impl ScriptListApp {
                 )
             })
             .collect();
-
-        // ALWAYS update keyword triggers when a file changes
-        // This is needed because the diff only tracks registration metadata (name, shortcut, keyword, alias)
-        // but NOT the actual content. So content changes like "success three" -> "success four"
-        // would be missed if we only update on diff changes.
-        #[cfg(target_os = "macos")]
-        {
-            let (added, removed, updated) =
-                crate::keyword_manager::update_keyword_triggers_for_file(
-                    path,
-                    &new_scripts_scriptlets,
-                );
-            if added > 0 || removed > 0 || updated > 0 {
-                logging::log(
-                    "KEYWORD",
-                    &format!(
-                        "Updated keyword triggers for {}: {} added, {} removed, {} updated",
-                        path.display(),
-                        added,
-                        removed,
-                        updated
-                    ),
-                );
-            }
-        }
 
         // Compute diff for registration metadata changes (shortcuts, aliases)
         let diff = diff_scriptlets(&old_scriptlets, &new_scriptlets);
@@ -679,41 +962,79 @@ impl ScriptListApp {
             }
         }
 
-        // Update the scriptlets list
-        // Remove old scriptlets from this file (canonical compare — see
-        // scriptlet_file_path_matches for why raw prefix match is not enough)
-        self.scriptlets.retain(|s| {
-            !s.file_path
-                .as_ref()
-                .map(|fp| scriptlet_file_path_matches(fp, &changed_raw, &changed_canonical))
-                .unwrap_or(false)
+        let generation = source_generation.unwrap_or_else(|| {
+            self.root_search
+                .allocate_named_provider_generation("scripts")
         });
-
-        // Add new scriptlets from this file
-        self.scriptlets.extend(new_scripts_scriptlets);
-
-        // Sort by name to maintain consistent ordering
-        self.scriptlets.sort_by(|a, b| a.name.cmp(&b.name));
-        crate::ai::context_selector::publish_launcher_catalog(
-            &self.scripts,
-            &self.scriptlets,
-            &self.skills,
-        );
-
-        // Invalidate caches
-        self.invalidate_filter_cache();
-        self.invalidate_grouped_cache();
-        self.invalidate_preview_cache();
-
-        // Sync list component state so GPUI renders the correct item count
-        self.sync_list_state();
-        self.validate_selection_bounds(cx);
-
-        // Rebuild alias/shortcut registries for this file's scriptlets;
-        // toast only conflicts that were not already announced.
-        let conflicts = self.rebuild_registries();
-        for conflict in self.take_unannounced_registry_conflicts(conflicts) {
-            self.show_hud(conflict, Some(HUD_CONFLICT_MS), cx);
+        let apply = |app: &mut Self, cx: &mut Context<Self>| {
+            let new_scripts_scriptlets = parsed.publish();
+            // ALWAYS update keyword triggers when a file changes
+            // This is needed because the diff only tracks registration metadata (name, shortcut, keyword, alias)
+            // but NOT the actual content. So content changes like "success three" -> "success four"
+            // would be missed if we only update on diff changes.
+            #[cfg(target_os = "macos")]
+            {
+                let (added, removed, updated) =
+                    crate::keyword_manager::update_keyword_triggers_for_file(
+                        path,
+                        &new_scripts_scriptlets,
+                    );
+                if added > 0 || removed > 0 || updated > 0 {
+                    logging::log(
+                        "KEYWORD",
+                        &format!(
+                            "Updated keyword triggers for {}: {} added, {} removed, {} updated",
+                            path.display(),
+                            added,
+                            removed,
+                            updated
+                        ),
+                    );
+                }
+            }
+            // Canonical comparison also handles deleted source files.
+            app.scriptlets.retain(|scriptlet| {
+                !scriptlet.file_path.as_ref().is_some_and(|file_path| {
+                    scriptlet_file_path_matches(file_path, &changed_raw, &changed_canonical)
+                })
+            });
+            app.scriptlets.extend(new_scripts_scriptlets);
+            app.scriptlets.sort_by(|a, b| a.name.cmp(&b.name));
+            let (_, candidates) = app.root_search.script_catalogue_candidates();
+            let report = scripts::validate_script_catalog(candidates.to_vec());
+            app.install_script_validation_report(&report.validation);
+            if let Some(generation) = source_generation {
+                let terminal = if app.scripts.is_empty() && app.scriptlets.is_empty() {
+                    RootProviderTerminal::Empty
+                } else {
+                    RootProviderTerminal::Success
+                };
+                app.root_search
+                    .finish_named_provider("scripts", generation, terminal);
+            }
+            crate::ai::context_selector::publish_launcher_catalog(
+                &app.scripts,
+                &app.scriptlets,
+                &app.skills,
+            );
+            app.invalidate_filter_cache();
+            app.invalidate_grouped_cache();
+            app.invalidate_preview_cache();
+            let conflicts = app.rebuild_registries();
+            for conflict in app.take_unannounced_registry_conflicts(conflicts) {
+                app.show_hud(conflict, Some(HUD_CONFLICT_MS), cx);
+            }
+            true
+        };
+        if self.root_search.query_is_current() {
+            self.commit_main_menu_results_refresh(
+                "scriptlet-file-change",
+                Some(("scripts", generation)),
+                cx,
+                apply,
+            );
+        } else {
+            apply(self, cx);
         }
 
         logging::log(
@@ -724,8 +1045,6 @@ impl ScriptListApp {
                 self.scriptlets.len()
             ),
         );
-
-        cx.notify();
     }
 }
 
@@ -753,7 +1072,7 @@ mod tests {
                     .lock()
                     .expect("scripts thread id lock should succeed") =
                     Some(std::thread::current().id());
-                Vec::new()
+                Ok(Vec::new())
             },
             move || {
                 std::thread::sleep(Duration::from_millis(5));
@@ -761,13 +1080,14 @@ mod tests {
                     .lock()
                     .expect("scriptlets thread id lock should succeed") =
                     Some(std::thread::current().id());
-                Vec::new()
+                Ok(scripts::ScriptletCatalogue::from_scriptlets(Vec::new()))
             },
         );
 
         let result = rx
             .recv_blocking()
-            .expect("background loaders should send exactly one result");
+            .expect("background loaders should send exactly one result")
+            .expect("background catalogue loading should succeed");
 
         assert!(result.total_elapsed >= result.scripts_elapsed);
         assert!(result.total_elapsed >= result.scriptlets_elapsed);
@@ -785,6 +1105,58 @@ mod tests {
         assert_ne!(scriptlets_worker_thread, main_thread_id);
     }
 
+    #[test]
+    fn script_loader_panic_is_an_error_not_a_successful_empty_catalogue() {
+        let rx = spawn_async_script_refresh_load(
+            || panic!("owned loader failure"),
+            || Ok(scripts::ScriptletCatalogue::from_scriptlets(Vec::new())),
+        );
+        let result = rx
+            .recv_blocking()
+            .expect("worker should report loader failure");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn native_broken_pipe_error_is_not_a_catalogue_transport_disconnect() {
+        use crate::design_evaluation::search_fixtures::ProviderTerminal;
+        let native: Result<anyhow::Result<Vec<()>>, async_channel::RecvError> = Ok(Err(
+            std::io::Error::from(std::io::ErrorKind::BrokenPipe).into(),
+        ));
+        assert!(matches!(
+            catalogue_completion_terminal(&native, Vec::len),
+            ProviderTerminal::Failed
+        ));
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<Vec<()>>>(1);
+        drop(tx);
+        assert!(matches!(
+            catalogue_completion_terminal(&rx.recv_blocking(), Vec::len),
+            ProviderTerminal::Disconnected
+        ));
+    }
+
+    #[test]
+    fn native_source_read_failure_rejects_combined_catalogue_payload() {
+        let rx = spawn_async_script_refresh_load(
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+            || Ok(scripts::ScriptletCatalogue::from_scriptlets(Vec::new())),
+        );
+        let result = rx
+            .recv_blocking()
+            .expect("worker returns actual read result");
+        assert!(
+            result.is_err(),
+            "failed scripts cannot install successful empty scriptlets"
+        );
+        let rx = spawn_async_script_refresh_load(
+            || Ok(Vec::new()),
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+        );
+        assert!(rx
+            .recv_blocking()
+            .expect("worker returns scriptlet error")
+            .is_err());
+    }
     fn test_script(path: &str, shortcut: Option<&str>) -> Arc<Script> {
         Arc::new(Script {
             path: PathBuf::from(path),

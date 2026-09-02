@@ -79,11 +79,7 @@ fn streaming_activity_row_is_a_single_idempotent_tail_row() {
     // synthetic "Thinking…" tail row so submit gives immediate visible
     // feedback. The tail row is now permanent, so the setter must be
     // idempotent and must not reset the measured list when visibility changes.
-    let setter_body = source_between(
-        TRANSCRIPT_SOURCE,
-        "pub fn set_show_activity_row(",
-        "\n    pub fn toggle_collapsed(",
-    );
+    let setter_body = function_body(TRANSCRIPT_SOURCE, "pub fn set_show_activity_row(");
     assert!(
         setter_body.contains("if self.show_activity_row == show")
             && setter_body.contains("return;"),

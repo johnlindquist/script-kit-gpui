@@ -26,6 +26,11 @@ EOF
     esac
 done
 
+if [[ "$APPLY" == "1" && "${SCRIPT_KIT_NONINTERACTIVE:-1}" != "0" ]]; then
+    echo '[cargo-clean] destructive emergency cleanup refused in noninteractive mode; use report-only diagnostics' >&2
+    exit 78
+fi
+
 PATH="/Users/johnlindquist/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 

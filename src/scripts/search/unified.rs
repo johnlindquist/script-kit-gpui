@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::sync::Arc;
 
 use crate::app_launcher::AppInfo;
@@ -252,21 +252,16 @@ pub fn fuzzy_search_unified_all_with_skills_and_flows(
         );
     }
 
-    // Sort by explicit relevance tier first, then score, type order, and name.
+    // Durable identity is only the final tie-break; cache source hashes once.
     let sort_start = std::time::Instant::now();
-    results.sort_by(|a, b| match b.match_tier().cmp(&a.match_tier()) {
-        Ordering::Equal => match b.score().cmp(&a.score()) {
-            Ordering::Equal => {
-                let type_order_a = result_type_order(a);
-                let type_order_b = result_type_order(b);
-                match type_order_a.cmp(&type_order_b) {
-                    Ordering::Equal => a.name().cmp(b.name()),
-                    other => other,
-                }
-            }
-            other => other,
-        },
-        other => other,
+    results.sort_by_cached_key(|result| {
+        (
+            Reverse(result.match_tier()),
+            Reverse(result.score()),
+            result_type_order(result),
+            result.name().to_owned(),
+            result.stable_selection_key(),
+        )
     });
 
     // Emit post-sort top-skill signal for observability
@@ -389,22 +384,78 @@ pub fn fuzzy_search_unified_with_windows(
         }
     });
 
-    // Sort by explicit relevance tier first, then score, type, and name.
-    // Fallbacks always sort last (they have their own ordering by priority)
-    results.sort_by(|a, b| match b.match_tier().cmp(&a.match_tier()) {
-        Ordering::Equal => match b.score().cmp(&a.score()) {
-            Ordering::Equal => {
-                let type_order_a = result_type_order(a);
-                let type_order_b = result_type_order(b);
-                match type_order_a.cmp(&type_order_b) {
-                    Ordering::Equal => a.name().cmp(b.name()),
-                    other => other,
-                }
-            }
-            other => other,
-        },
-        other => other,
+    // Preserve tier, score, type and name precedence before exact identity.
+    results.sort_by_cached_key(|result| {
+        (
+            Reverse(result.match_tier()),
+            Reverse(result.score()),
+            result_type_order(result),
+            result.name().to_owned(),
+            result.stable_selection_key(),
+        )
     });
 
     results
+}
+
+#[cfg(test)]
+mod deterministic_tie_tests {
+    use super::*;
+
+    fn app(path: &str, name: &str) -> AppInfo {
+        AppInfo {
+            name: name.into(),
+            path: path.into(),
+            bundle_id: None,
+            icon: None,
+        }
+    }
+
+    #[test]
+    fn equal_name_apps_have_deterministic_final_ties_without_changing_relevance() {
+        let apps = [
+            app("/Applications/A/Editor.app", "Editor"),
+            app("/Applications/B/Editor.app", "Editor"),
+            app("/Applications/Tools.app", "Editor Tools"),
+        ];
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let mut expected = None;
+        for order in orders {
+            let input: Vec<_> = order.into_iter().map(|i| apps[i].clone()).collect();
+            for results in [
+                fuzzy_search_unified_all_with_skills_and_flows(
+                    &[],
+                    &[],
+                    &[],
+                    &input,
+                    &[],
+                    &[],
+                    "Editor",
+                ),
+                fuzzy_search_unified_with_windows(&[], &[], &[], &input, &[], "Editor"),
+            ] {
+                assert_eq!(results.len(), 3);
+                assert_eq!(results[0].name(), "Editor");
+                assert_eq!(results[1].name(), "Editor");
+                assert_eq!(results[0].score(), results[1].score());
+                assert!(results[1].score() > results[2].score());
+                let keys: Vec<_> = results
+                    .iter()
+                    .map(|result| result.stable_selection_key().unwrap())
+                    .collect();
+                assert!(keys[0] < keys[1]);
+                match &expected {
+                    Some(expected) => assert_eq!(&keys, expected),
+                    None => expected = Some(keys),
+                }
+            }
+        }
+    }
 }

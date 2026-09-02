@@ -172,6 +172,7 @@ pub fn slugify_script_kit_selfie_state(state: &str) -> String {
 }
 
 pub fn capture_script_kit_selfie(state: &str) -> anyhow::Result<ScriptKitSelfieReceipt> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     #[cfg(target_os = "macos")]
     {
         capture_script_kit_selfie_macos(state)

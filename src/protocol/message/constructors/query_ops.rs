@@ -15,8 +15,16 @@ impl Message {
     }
 
     /// Create a file search result response
-    pub fn file_search_result(request_id: String, files: Vec<FileSearchResultEntry>) -> Self {
-        Message::FileSearchResult { request_id, files }
+    pub fn file_search_result(
+        request_id: String,
+        files: Vec<FileSearchResultEntry>,
+        error: Option<String>,
+    ) -> Self {
+        Message::FileSearchResult {
+            request_id,
+            files,
+            error,
+        }
     }
 
     // ============================================================
@@ -574,6 +582,7 @@ impl Message {
             options,
             trace: TransactionTraceMode::Off,
             target: None,
+            expected: None,
         }
     }
 
@@ -590,6 +599,7 @@ impl Message {
             options,
             trace,
             target: None,
+            expected: None,
         }
     }
 
@@ -647,6 +657,9 @@ impl Message {
             request_id,
             target,
             event,
+            deadline_unix_ms: None,
+            expected: None,
+            expected_frame: None,
         }
     }
 
@@ -668,6 +681,7 @@ impl Message {
             resolved_window_id,
             dispatch_completed,
             dispatch_scheduled,
+            was_deferred: false,
             activation_proof,
         }
     }
@@ -691,6 +705,7 @@ impl Message {
             resolved_window_id,
             dispatch_completed: false,
             dispatch_scheduled: false,
+            was_deferred: false,
             activation_proof: None,
         }
     }

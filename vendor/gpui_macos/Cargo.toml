@@ -18,6 +18,10 @@ screen-capture = ["gpui/screen-capture"]
 [dependencies]
 gpui = { path = "../gpui", default-features = false }
 
+[dev-dependencies]
+# This crate's cfg(test) renderer/window implementations use GPUI's test traits.
+gpui = { path = "../gpui", default-features = false, features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 anyhow = "1.0.86"
 async-task = "4.7"

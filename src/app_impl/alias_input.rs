@@ -16,27 +16,74 @@ impl ScriptListApp {
         );
 
         // Load existing alias if any
-        let existing_alias = crate::aliases::load_alias_overrides()
-            .ok()
-            .and_then(|overrides| {
-                overrides.get(&command_id).cloned().or_else(|| {
-                    self.get_selected_result()
-                        .and_then(|selected| selected.command_preference_identity())
-                        .filter(|identity| identity.exact_id == command_id)
-                        .and_then(|identity| overrides.get(&identity.legacy_id).cloned())
+        let existing_alias = if let Some(sources) = self.main_services.owned_sources() {
+            sources
+                .alias_overrides
+                .get(&command_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            crate::aliases::load_alias_overrides()
+                .ok()
+                .and_then(|overrides| {
+                    overrides.get(&command_id).cloned().or_else(|| {
+                        self.get_selected_result()
+                            .and_then(|selected| selected.command_preference_identity())
+                            .filter(|identity| identity.exact_id == command_id)
+                            .and_then(|identity| overrides.get(&identity.legacy_id).cloned())
+                    })
                 })
-            })
-            .unwrap_or_default();
+                .unwrap_or_default()
+        };
 
         // Store state
         self.alias_input_state = Some(AliasInputState {
-            command_id,
-            command_name,
-            alias_text: existing_alias,
+            command_id: command_id.clone(),
+            command_name: command_name.clone(),
+            alias_text: existing_alias.clone(),
         });
 
         // Close actions popup if open
         self.clear_actions_popup_state();
+        let theme = self.theme.clone();
+        let input_entity = cx.new(|cx| {
+            crate::components::alias_input::AliasInput::new(cx, theme)
+                .with_command_id(command_id)
+                .with_command_name(command_name)
+                .with_current_alias((!existing_alias.is_empty()).then_some(existing_alias))
+        });
+        let mut previous = input_entity.read(cx).semantic_token();
+        self.alias_input_subscription = Some(cx.observe(&input_entity, move |this, input, cx| {
+            if this
+                .alias_input_entity
+                .as_ref()
+                .map(|entity| entity.entity_id())
+                != Some(input.entity_id())
+            {
+                return;
+            }
+            let (token, action) = input.update(cx, |input, _| {
+                (input.semantic_token(), input.take_pending_action())
+            });
+            if token != previous {
+                previous = token;
+                if let Some(state) = &mut this.alias_input_state {
+                    state.alias_text = input.read(cx).text().to_owned();
+                }
+                this.mark_main_data_changed();
+                cx.notify();
+            }
+            use crate::components::alias_input::AliasInputAction;
+            match action {
+                Some(AliasInputAction::Save(alias)) => this.save_alias_with_text(Some(alias), cx),
+                Some(AliasInputAction::Clear) => this.save_alias_with_text(Some(String::new()), cx),
+                Some(AliasInputAction::Cancel) => this.close_alias_input(cx),
+                None => {}
+            }
+        }));
+        self.alias_input_entity = Some(input_entity);
+        self.mark_main_data_changed();
+        self.mark_main_presentation_changed();
 
         cx.notify();
     }
@@ -51,18 +98,26 @@ impl ScriptListApp {
             );
             self.alias_input_state = None;
             self.alias_input_entity = None; // Clear entity to reset for next open
-                                            // Return focus to the main filter input (like close_shortcut_recorder does)
+            self.alias_input_subscription = None;
+            self.mark_main_data_changed();
+            self.mark_main_presentation_changed();
+            // Return focus to the main filter input (like close_shortcut_recorder does)
             self.pending_focus = Some(FocusTarget::MainFilter);
             cx.notify();
         }
     }
 
     /// Update the alias text in the input state.
-    /// Currently unused - will be connected when real text input is added.
-    #[allow(dead_code)]
+    /// Updates the same retained field used by keyboard editing.
     pub(crate) fn update_alias_text(&mut self, text: String, cx: &mut Context<Self>) {
         if let Some(ref mut state) = self.alias_input_state {
             state.alias_text = text;
+            if let Some(input) = &self.alias_input_entity {
+                input.update(cx, |input, cx| {
+                    input.input.set_text(state.alias_text.clone());
+                    cx.notify();
+                });
+            }
             cx.notify();
         }
     }
@@ -74,71 +129,72 @@ impl ScriptListApp {
         alias_from_entity: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(ref state) = self.alias_input_state else {
-            logging::log("ALIAS", "No alias input state when trying to save");
+        let Some(state) = self.alias_input_state.as_ref() else {
             return;
         };
-
         let command_id = state.command_id.clone();
         let command_name = state.command_name.clone();
-        // Prefer alias from entity if provided, else use state
         let alias_text = alias_from_entity
             .unwrap_or_else(|| state.alias_text.clone())
             .trim()
             .to_string();
-
-        if alias_text.is_empty() {
-            // Empty alias means remove it
-            match crate::aliases::remove_alias_override(&command_id) {
-                Ok(()) => {
-                    logging::log("ALIAS", &format!("Removed alias for: {}", command_id));
-                    self.show_hud("Alias removed".to_string(), Some(HUD_MEDIUM_MS), cx);
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to remove alias");
-                    self.show_error_toast(format!("Failed to remove alias: {}", e), cx);
-                }
-            }
-        } else {
-            // Validate alias: should be alphanumeric with optional hyphens/underscores
-            if !alias_text
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-            {
-                self.show_error_toast(
-                    "Alias must contain only letters, numbers, hyphens, or underscores",
-                    cx,
-                );
+        if !alias_text
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            self.show_error_toast(
+                "Alias must contain only letters, numbers, hyphens, or underscores",
+                cx,
+            );
+            return;
+        }
+        if let Some(scope) = crate::runtime_policy::owned_evaluation() {
+            if let Err(error) = scope.require_owned_path(&crate::aliases::default_aliases_path()) {
+                self.show_error_toast(format!("Alias was not saved: {error}"), cx);
                 return;
             }
-
-            logging::log(
-                "ALIAS",
-                &format!(
-                    "Saving alias for '{}' ({}): {}",
-                    command_name, command_id, alias_text
-                ),
-            );
-
-            match crate::aliases::save_alias_override(&command_id, &alias_text) {
-                Ok(()) => {
-                    logging::log("ALIAS", "Alias saved to aliases.json");
-                    self.show_hud(
-                        format!("Alias set: {} → {}", alias_text, command_name),
-                        Some(HUD_MEDIUM_MS),
-                        cx,
-                    );
-                    // Refresh scripts to update the alias registry
-                    self.refresh_scripts(cx);
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to save alias");
-                    self.show_error_toast(format!("Failed to save alias: {}", e), cx);
+        }
+        let mut save_error = None;
+        self.commit_main_menu_results_refresh("alias-override", None, cx, |app, _cx| {
+            let result = if alias_text.is_empty() {
+                crate::aliases::remove_alias_override(&command_id)
+            } else {
+                crate::aliases::save_alias_override(&command_id, &alias_text)
+            };
+            if let Err(error) = result {
+                save_error = Some(error);
+                return false;
+            }
+            if let MainServices::OwnedFixtures(sources) = &mut app.main_services {
+                let overrides = &mut Arc::make_mut(sources).alias_overrides;
+                if alias_text.is_empty() {
+                    overrides.remove(&command_id);
+                } else {
+                    overrides.insert(command_id.clone(), alias_text.clone());
                 }
             }
+            app.rebuild_registries();
+            app.mark_main_data_changed();
+            true
+        });
+        if let Some(error) = save_error {
+            self.show_error_toast(format!("Failed to save alias: {error}"), cx);
+            return;
         }
-
-        // Close the input and restore focus
+        let message = if alias_text.is_empty() {
+            "Alias removed".to_string()
+        } else {
+            format!("Alias set: {} → {}", alias_text, command_name)
+        };
+        if self.main_services.owned_sources().is_some() {
+            self.toast_manager.push(
+                components::toast::Toast::success(message, &self.theme)
+                    .duration_ms(Some(TOAST_SUCCESS_MS)),
+            );
+            crate::runtime_policy::record_completed_fixture_effect();
+        } else {
+            self.show_hud(message, Some(HUD_MEDIUM_MS), cx);
+        }
         self.close_alias_input(cx);
     }
 
@@ -154,97 +210,19 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        use crate::components::alias_input::{AliasInput, AliasInputAction};
-
-        // Check if we have state but no entity yet - need to create the input
-        let state = self.alias_input_state.as_ref()?;
-
-        // Create entity if needed (only once per show)
-        if self.alias_input_entity.is_none() {
-            let command_id = state.command_id.clone();
-            let command_name = state.command_name.clone();
-            let current_alias = if state.alias_text.is_empty() {
-                None
-            } else {
-                Some(state.alias_text.clone())
-            };
-            let theme = std::sync::Arc::clone(&self.theme);
-
-            let input_entity = cx.new(move |cx| {
-                // Create the alias input with its own focus handle from its own context
-                // This is CRITICAL for keyboard events to work
-                AliasInput::new(cx, theme)
-                    .with_command_name(command_name)
-                    .with_command_id(command_id)
-                    .with_current_alias(current_alias)
-            });
-
-            self.alias_input_entity = Some(input_entity);
-            logging::log("ALIAS", "Created new alias input entity");
-        }
-
-        // Get the existing entity - clone it early to avoid borrow conflicts
-        let input_entity = self.alias_input_entity.clone()?;
-
-        // ALWAYS focus the input entity to ensure it captures keyboard input
-        // This is critical for modal behavior - the input must have focus
-        let input_fh = input_entity.read(cx).focus_handle.clone();
-        let was_focused = input_fh.is_focused(window);
-        window.focus(&input_fh, cx);
-        if !was_focused {
-            logging::log("ALIAS", "Focused alias input (was not focused)");
-        }
-
-        // Check for pending actions from the input entity (Save, Cancel, or Clear)
-        // We need to update() the entity to take the pending action
-        let pending_action = input_entity.update(cx, |input, _cx| input.take_pending_action());
-
-        if let Some(action) = pending_action {
-            match action {
-                AliasInputAction::Save(alias) => {
-                    logging::log("ALIAS", &format!("Handling save action: {}", alias));
-                    // Handle the save - need to defer to avoid borrow issues
-                    let app_entity = cx.entity().downgrade();
-                    cx.spawn(async move |_this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1))
-                            .await;
-                        cx.update(|cx| {
-                            if let Some(app) = app_entity.upgrade() {
-                                app.update(cx, |this, cx| {
-                                    this.save_alias_with_text(Some(alias), cx);
-                                });
-                            }
-                        });
-                    })
-                    .detach();
-                }
-                AliasInputAction::Cancel => {
-                    logging::log("ALIAS", "Handling cancel action");
-                    self.close_alias_input(cx);
-                }
-                AliasInputAction::Clear => {
-                    logging::log("ALIAS", "Handling clear action (remove alias)");
-                    // Clear means remove the alias - save with empty string
-                    let app_entity = cx.entity().downgrade();
-                    cx.spawn(async move |_this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1))
-                            .await;
-                        cx.update(|cx| {
-                            if let Some(app) = app_entity.upgrade() {
-                                app.update(cx, |this, cx| {
-                                    this.save_alias_with_text(Some(String::new()), cx);
-                                });
-                            }
-                        });
-                    })
-                    .detach();
-                }
+        self.alias_input_state.as_ref()?;
+        let input = self.alias_input_entity.clone()?;
+        let theme = self.theme.clone();
+        input.update(cx, |input, cx| {
+            if !Arc::ptr_eq(&input.theme, &theme) {
+                input.update_theme(theme);
+                cx.notify();
             }
+        });
+        let focus = input.read(cx).focus_handle.clone();
+        if !focus.is_focused(window) {
+            window.focus(&focus, cx);
         }
-
-        // Return the entity's view as an element
-        Some(input_entity.into_any_element())
+        Some(input.into_any_element())
     }
 }

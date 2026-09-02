@@ -74,7 +74,7 @@ mod tests {
 
         assert_eq!(
             resources.len(),
-            29,
+            30,
             "Resource registry count should be updated when new MCP resources land"
         );
 
@@ -83,6 +83,10 @@ mod tests {
         assert!(uris.contains(&"kit://notes"), "Should include kit://notes");
         assert!(uris.contains(&"kit://brain"), "Should include kit://brain");
         assert!(uris.contains(&"kit://audit"), "Should include kit://audit");
+        assert!(
+            uris.contains(&crate::computer_use::COMPUTER_USE_READINESS_RESOURCE_URI),
+            "Should include the Computer Use readiness resource"
+        );
         assert!(uris.contains(&"scripts://"), "Should include scripts://");
         assert!(
             uris.contains(&"scriptlets://"),

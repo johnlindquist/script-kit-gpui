@@ -530,7 +530,7 @@ mod agent_chat_spine_dispatch_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let catalog = crate::flows::catalog::flow_catalog();
-        catalog.set_notify_hook(|| {});
+        catalog.set_notify_hook(|_, _| {});
         catalog.prime_ready_for_test(&crate::flows::resolve_flow_cwd(None));
 
         let app_slot = Arc::new(Mutex::new(None));
@@ -748,7 +748,7 @@ mod modal_backdrop_policy_tests {
     #[gpui::test]
     fn backdrop_dismissal_never_mutates_backgrounded_sessions(cx: &mut gpui::TestAppContext) {
         let catalog = crate::flows::catalog::flow_catalog();
-        catalog.set_notify_hook(|| {});
+        catalog.set_notify_hook(|_, _| {});
         catalog.prime_ready_for_test(&crate::flows::resolve_flow_cwd(None));
 
         let app_slot = Arc::new(Mutex::new(None));
@@ -784,7 +784,7 @@ mod modal_backdrop_policy_tests {
                         None,
                         None,
                         focus_handle,
-                        Some(Arc::new(|_| {}) as crate::prompts::ChatSubmitCallback),
+                        Some(Arc::new(|_| Ok(())) as crate::prompts::ChatSubmitCallback),
                         Arc::new(crate::theme::Theme::default()),
                     )
                 });

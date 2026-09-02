@@ -2,11 +2,10 @@
 /**
  * Runtime proof for the launcher's top-fade and phased boundary affordance.
  *
- * Build the named artifact first:
- *   SCRIPT_KIT_AGENT_ARTIFACT_NAME=launcher-scroll-affordance \
- *     ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
- *
- * Override that pinned artifact with PROBE_BINARY or --binary when needed.
+ * Build an immutable reference, then supply it explicitly:
+ *   bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out .test-output/launcher-scroll.reference.json
+ *   SCRIPT_KIT_ARTIFACT_REFERENCE=.test-output/launcher-scroll.reference.json bun scripts/agentic/launcher-scroll-affordance-probe.ts
+ * PROBE_BINARY/--binary, when supplied, must match that exact reference.
  */
 import {
   existsSync,
@@ -18,6 +17,7 @@ import {
 } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { Driver, type Json } from "../devtools/driver.ts";
+import { runtimeArtifactFromEnvironment } from "../devtools/lib/runtime-task-proof.ts";
 import { inspectMainListScrollAffordance } from "../devtools/scroll.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -34,7 +34,7 @@ const query = "launcher-scroll-affordance";
 const filterInput = `${query} `;
 const target = { type: "main" };
 const pollMs = 20;
-const defaultBinary = "target-agent/artifacts/launcher-scroll-affordance/script-kit-gpui";
+const artifact = runtimeArtifactFromEnvironment();
 
 function argValue(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
@@ -49,7 +49,7 @@ const binary = resolve(
     "--binary",
     process.env.PROBE_BINARY
       ?? process.env.SCRIPT_KIT_GPUI_BINARY
-      ?? defaultBinary,
+      ?? artifact.executablePath,
   ),
 );
 const timeoutMs = Number(argValue("--timeout", "10000"));
@@ -682,7 +682,7 @@ async function captureScreenshot(): Promise<Json> {
 async function runProbe(): Promise<Json> {
   if (!existsSync(binary)) {
     throw new Error(
-      `Pinned probe binary is missing: ${binary}. Build SCRIPT_KIT_AGENT_ARTIFACT_NAME=launcher-scroll-affordance first or pass PROBE_BINARY/--binary.`,
+      `Published probe executable is missing: ${binary}. Rebuild and supply SCRIPT_KIT_ARTIFACT_REFERENCE.`,
     );
   }
 
@@ -703,6 +703,7 @@ async function runProbe(): Promise<Json> {
 
   driver = await Driver.launch({
     binary,
+    immutableArtifact: artifact.reference,
     sessionName: "launcher-scroll-affordance",
     sessionDir,
     sandboxHome: true,
@@ -1150,6 +1151,7 @@ const receipt = {
   schemaVersion: 1,
   probe: "launcher-scroll-affordance",
   status: failures.length === 0 ? "pass" : "fail",
+  artifact: artifact.reference,
   binary: {
     path: relative(repoRoot, binary),
     override: process.env.PROBE_BINARY != null || process.argv.includes("--binary"),

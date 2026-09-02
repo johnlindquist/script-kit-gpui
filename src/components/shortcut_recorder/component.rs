@@ -198,14 +198,121 @@ impl ShortcutRecorder {
         cx.notify();
     }
 
-    pub fn activate_focused_action(&mut self, cx: &mut Context<Self>) {
-        match self.focused_action {
-            ShortcutRecorderFocusedAction::Save if self.can_save() => self.save(),
-            ShortcutRecorderFocusedAction::Clear if self.can_clear() => self.clear(cx),
+    pub(super) fn action_disabled_reason(
+        &self,
+        action: ShortcutRecorderFocusedAction,
+    ) -> Option<&'static str> {
+        match action {
+            ShortcutRecorderFocusedAction::Save if self.conflict.is_some() => {
+                Some("shortcut_conflict")
+            }
+            ShortcutRecorderFocusedAction::Save if !self.can_save() => Some("shortcut_incomplete"),
+            ShortcutRecorderFocusedAction::Clear if !self.can_clear() => Some("shortcut_empty"),
+            _ => None,
+        }
+    }
+
+    pub(super) fn activate_action(
+        &mut self,
+        action: ShortcutRecorderFocusedAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.action_disabled_reason(action).is_some() {
+            return false;
+        }
+        match action {
+            ShortcutRecorderFocusedAction::Save => self.save(),
+            ShortcutRecorderFocusedAction::Clear => self.clear(cx),
             ShortcutRecorderFocusedAction::Cancel => self.cancel(),
-            ShortcutRecorderFocusedAction::Save | ShortcutRecorderFocusedAction::Clear => {}
         }
         cx.notify();
+        true
+    }
+
+    pub fn activate_focused_action(&mut self, cx: &mut Context<Self>) {
+        self.activate_action(self.focused_action, cx);
+    }
+
+    /// Semantic activation is the same action reducer used by pointer and key input.
+    pub fn activate_semantic_action(
+        &mut self,
+        semantic_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
+        let Some(action) = ShortcutRecorderFocusedAction::from_semantic_id(semantic_id) else {
+            return Ok(false);
+        };
+        if self.capture_only {
+            return Err("shortcut_action_not_present".into());
+        }
+        if let Some(reason) = self.action_disabled_reason(action) {
+            return Err(reason.into());
+        }
+        Ok(self.activate_action(action, cx))
+    }
+
+    /// Project the visible production recorder, including disabled controls.
+    pub fn automation_elements(&self) -> Vec<crate::protocol::ElementInfo> {
+        use crate::protocol::{ElementContentKind, ElementInfo};
+        let mut title = ElementInfo::panel("shortcut-recorder-header");
+        title.semantic_id = "shortcut-recorder-header".into();
+        title.text = Some(
+            self.command_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("Shortcut")
+                .to_string(),
+        );
+        let keycaps = self.get_display_keycaps();
+        let mut capture = ElementInfo::input("shortcut-capture", Some(&keycaps.join(" ")), false);
+        capture.semantic_id = "shortcut-key-display".into();
+        capture.focused = None;
+        capture.role = Some("shortcutCapture".into());
+        capture.kind = Some(
+            if self.is_recording {
+                "recording"
+            } else {
+                "recorded"
+            }
+            .into(),
+        );
+        if keycaps.is_empty() {
+            capture.text = Some("Press keys".into());
+        }
+        let mut elements = vec![title.redact_text(ElementContentKind::UserContent), capture];
+        for (index, keycap) in keycaps.into_iter().enumerate() {
+            let mut key = ElementInfo::panel("shortcut-keycap");
+            key.semantic_id = format!("shortcut-keycap:{index}");
+            key.text = Some(keycap);
+            key.role = Some("keycap".into());
+            key.index = Some(index);
+            elements.push(key.redact_text(ElementContentKind::UserContent));
+        }
+        if let Some(conflict) = &self.conflict {
+            let mut warning = ElementInfo::panel("shortcut-conflict-warning");
+            warning.semantic_id = "shortcut-conflict-warning".into();
+            warning.text = Some(format!("Conflicts with \"{}\"", conflict.command_name));
+            warning.role = Some("warning".into());
+            elements.push(warning.redact_text(ElementContentKind::UserContent));
+        }
+        if !self.capture_only {
+            for (index, action) in [
+                ShortcutRecorderFocusedAction::Save,
+                ShortcutRecorderFocusedAction::Clear,
+                ShortcutRecorderFocusedAction::Cancel,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut button = ElementInfo::button(index, action.label());
+                button.semantic_id = action.semantic_id().into();
+                button.selected = Some(self.focused_action == action);
+                button.action_disabled = self.action_disabled_reason(action).map(str::to_string);
+                button.selectable = Some(button.action_disabled.is_none());
+                elements.push(button);
+            }
+        }
+        elements
     }
 
     /// Take the pending action (returns it and clears the field)

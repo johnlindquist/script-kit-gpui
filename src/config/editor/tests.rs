@@ -2,6 +2,57 @@
 // --- merged from part_01.rs ---
 use super::*;
 
+#[test]
+fn prepared_property_replaces_only_the_selected_preference() {
+    let input =
+        "export default { theme: { presetId: 'nord' }, ai: { enabled: true } } satisfies Config;";
+    let property = ConfigProperty::new("theme", "{ presetId: null }");
+    let prepared = prepare_config_property(input, &property).unwrap();
+    assert!(prepared.contains("theme: { presetId: null }"));
+    assert!(prepared.contains("ai: { enabled: true }"));
+    assert_eq!(
+        prepare_config_property(&prepared, &property).unwrap(),
+        prepared
+    );
+    assert!(prepare_config_property("not valid config", &property).is_err());
+    assert!(prepare_config_property("", &property)
+        .unwrap()
+        .contains("presetId: null"));
+}
+
+#[test]
+fn static_config_decodes_literals_and_omits_reset_preferences() {
+    let config = parse_static_config(
+        r#"import type { Config } from '@scriptkit/sdk';
+        export default { theme: undefined, enabled: true, nested: { 'quoted-key': 'it\'s "safe"',
+        values: [1, - 2.5, false, null, "unicode\u1234",], }, } satisfies Config;"#,
+    )
+    .unwrap();
+    assert!(config.get("theme").is_none());
+    assert_eq!(config["nested"]["quoted-key"], "it's \"safe\"");
+    assert_eq!(config["nested"]["values"][1], -2.5);
+    assert!(config["nested"]["values"][3].is_null());
+}
+
+#[test]
+fn static_config_rejects_executable_and_ambiguous_values() {
+    for value in [
+        "readSecret()",
+        "process.env",
+        "() => 1",
+        "{ ...other }",
+        "{ get key() { return 1; } }",
+        "{ key: undefined, key: 2 }",
+        "{ key: 1, key: 2 }",
+        "[,1]",
+        "`template ${run()}`",
+    ] {
+        let source = format!("export default {{ field: {value} }} satisfies Config;");
+        assert!(parse_static_config(&source).is_err(), "accepted {value}");
+    }
+    assert!(parse_static_config("run(); export default {} satisfies Config;").is_err());
+}
+
 // ==========================================================================
 // Test: contains_property
 // ==========================================================================

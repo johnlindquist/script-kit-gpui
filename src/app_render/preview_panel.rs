@@ -1,3 +1,49 @@
+#[cfg(feature = "owned-ui-evaluation")]
+fn bind_main_menu_preview_paint<E: gpui::ParentElement>(
+    panel: E,
+    binding: Option<(String, serde_json::Value)>,
+    load_state: &'static str,
+    lines: Option<&[syntax::HighlightedLine]>,
+) -> E {
+    let Some((id, mut metadata)) = binding else {
+        return panel;
+    };
+    metadata["loadState"] = serde_json::json!(load_state);
+    if let Some(lines) = lines {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        for line in lines {
+            digest.update((line.spans.len() as u64).to_be_bytes());
+            for span in &line.spans {
+                digest.update((span.text.len() as u64).to_be_bytes());
+                digest.update(span.text.as_bytes());
+                digest.update(span.color.to_be_bytes());
+            }
+        }
+        metadata["contentHash"] = serde_json::json!(format!("{:x}", digest.finalize()));
+    }
+    let metadata = std::rc::Rc::new(metadata);
+    panel.child(
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                if window.owned_frame_observation_active() {
+                    window.record_owned_paint_binding(
+                        "mainSearchPreview",
+                        id.clone(),
+                        bounds,
+                        metadata.clone(),
+                    );
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    )
+}
+
 fn preview_panel_typography_section_label_size(typography: designs::DesignTypography) -> f32 {
     typography.font_size_xs
 }
@@ -100,20 +146,26 @@ impl ScriptListApp {
         }
         let _ = preview_start; // Used in PREVIEW_PANEL_DONE below
 
-        // Get grouped results to map from selected_index to actual result (cached)
-        let selected_index = self.selected_index;
-        self.get_grouped_results_cached();
-
-        let selected_result_idx = self
-            .main_menu_result_caches
-            .flat_result_index_for_grouped_item(selected_index);
-        let selected_result = selected_result_idx.and_then(|result_idx| {
-            self.main_menu_result_caches
-                .cloned_search_result_for_flat_index(result_idx)
-        });
-        let selected_calculator = selected_result_idx
-            .and_then(|result_idx| self.inline_calculator_for_result_index(result_idx))
-            .cloned();
+        self.sync_main_menu_preview_binding();
+        let (selected_result, selected_calculator) =
+            match self.resolved_main_menu_selected_subject() {
+                Some(ResolvedMainMenuSelection::SearchResult { result, .. }) => {
+                    (Some(result.clone()), None)
+                }
+                Some(ResolvedMainMenuSelection::Calculator { result, .. }) => {
+                    (None, Some(result.clone()))
+                }
+                None => (None, None),
+            };
+        #[cfg(feature = "owned-ui-evaluation")]
+        let preview_binding = crate::runtime_policy::is_owned_evaluation().then(|| self.resolved_main_menu_selected_subject().map(|subject| {
+            let row = match subject { ResolvedMainMenuSelection::SearchResult { row, .. } | ResolvedMainMenuSelection::Calculator { row, .. } => row };
+            (row.semantic_id.clone(), serde_json::json!({
+                "query": self.main_menu_committed_query_stamp(), "stableKey": row.stable_key,
+                "contentFingerprint": row.content_fingerprint, "contentRevision": self.main_menu_result_revision(),
+                "loadState": "metadata", "contentHash": serde_json::Value::Null,
+            }))
+        })).flatten();
 
         // Build shared focused-info style from current theme/design
         let style = FocusedInfoStyle::from_theme_and_design(&self.theme, self.current_design);
@@ -147,6 +199,7 @@ impl ScriptListApp {
         // Preview panel container with left border separator. The main shell
         // supplies vibrancy; avoid painting an opaque panel over it.
         let mut panel = div()
+            .relative()
             .w_full()
             .h_full()
             .border_l_1()
@@ -160,6 +213,10 @@ impl ScriptListApp {
         // Handle calculator result via shared focused-info renderer
         if let Some(calculator) = selected_calculator {
             panel = panel.child(render_focused_info_for_calculator(&calculator, &style));
+            #[cfg(feature = "owned-ui-evaluation")]
+            {
+                panel = bind_main_menu_preview_paint(panel, preview_binding, "ready", None);
+            }
             return panel;
         }
 
@@ -523,6 +580,20 @@ impl ScriptListApp {
             }
         }
 
+        #[cfg(feature = "owned-ui-evaluation")]
+        {
+            let (load_state, lines) = match selected_result.as_ref() {
+                Some(scripts::SearchResult::Script(_)) => (
+                    self.main_menu_preview_load_state(),
+                    Some(self.preview_cache_lines.as_slice()),
+                ),
+                Some(scripts::SearchResult::Scriptlet(_)) => {
+                    ("ready", Some(self.scriptlet_preview_cache_lines.as_slice()))
+                }
+                _ => ("metadata", None),
+            };
+            panel = bind_main_menu_preview_paint(panel, preview_binding, load_state, lines);
+        }
         panel
     }
 }

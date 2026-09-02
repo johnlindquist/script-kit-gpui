@@ -171,6 +171,7 @@ impl Render for AliasInput {
         // Modal content - with stop propagation to prevent backdrop dismiss
         let modal = div()
             .id("alias-input-modal-content")
+            .debug_selector(|| "alias-input-modal-content".into())
             .w(px(MODAL_WIDTH))
             .p(px(MODAL_PADDING))
             .when_some(get_vibrancy_background(&self.theme), |d, bg| d.bg(bg))
@@ -193,6 +194,7 @@ impl Render for AliasInput {
         // The overlay captures ALL keyboard events while open
         div()
             .id("alias-input-overlay")
+            .debug_selector(|| "alias-input-overlay".into())
             .absolute()
             .inset_0()
             .track_focus(&self.focus_handle)

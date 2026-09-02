@@ -16,6 +16,7 @@ impl Render for ScriptListApp {
         let render_start = std::time::Instant::now();
         let filter_snapshot = self.filter_text.clone();
         self.log_current_view_transition_if_changed("render");
+        self.bind_owned_surface_revision_observers(cx);
         if matches!(self.current_view, AppView::ScriptList)
             && self.computed_filter_text == filter_snapshot
             && self
@@ -207,7 +208,8 @@ impl Render for ScriptListApp {
         // Focus-lost auto-dismiss: Close dismissable prompts when the main window loses focus
         // This includes focus loss to other app windows like Notes/AI.
         // When is_pinned is true, the window stays open on blur (only closes via ESC/Cmd+W)
-        let is_window_focused = platform::is_main_window_focused();
+        let interactive_host = !self.main_services.host_policy().is_hidden();
+        let is_window_focused = interactive_host && platform::is_main_window_focused();
         if !self.was_window_focused && is_window_focused {
             logging::log("FOCUS", "Main window gained focus");
 
@@ -359,13 +361,15 @@ impl Render for ScriptListApp {
         // NOTE: Prompt messages are now handled via event-driven async_channel listener
         // spawned in execute_interactive() - no polling needed in render()
 
+        // The hidden host retains the real footer descriptors and stage partition,
+        // but never installs/orders raw native footer peers.
         self.sync_main_footer_popup(window, cx);
 
         // Native footer active in glass mode: the GPUI fallback rail isn't
         // rendered, so no capsule sync ever prunes the groups it registered
         // during startup frames — drop them or they linger as ghost capsules
         // at the container's bottom edge.
-        if crate::footer_popup::glass_scroll_bands_active() && self.main_window_uses_native_footer()
+        if interactive_host && crate::footer_popup::glass_scroll_bands_active() && self.main_window_uses_native_footer()
         {
             crate::components::footer_chrome::remove_glass_capsule_window(window);
         }
@@ -410,18 +414,36 @@ impl Render for ScriptListApp {
                         }
                     }),
                     open_github: std::rc::Rc::new(move |_event, _window, _cx| {
+                        if let Err(error) = crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::OpenExternal,
+                        ) {
+                            logging::log("ABOUT", &format!("Failed to open GitHub: {}", error));
+                            return;
+                        }
                         if let Err(error) = open::that(crate::branding::URL_GITHUB) {
                             logging::log("ABOUT", &format!("Failed to open GitHub: {}", error));
                         }
                         let _ = github_app.upgrade();
                     }),
                     open_discord: std::rc::Rc::new(move |_event, _window, _cx| {
+                        if let Err(error) = crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::OpenExternal,
+                        ) {
+                            logging::log("ABOUT", &format!("Failed to open Discord: {}", error));
+                            return;
+                        }
                         if let Err(error) = open::that(crate::branding::URL_DISCORD) {
                             logging::log("ABOUT", &format!("Failed to open Discord: {}", error));
                         }
                         let _ = discord_app.upgrade();
                     }),
                     follow_x: std::rc::Rc::new(move |_event, _window, _cx| {
+                        if let Err(error) = crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::OpenExternal,
+                        ) {
+                            logging::log("ABOUT", &format!("Failed to open X: {}", error));
+                            return;
+                        }
                         if let Err(error) = open::that(crate::branding::URL_FOLLOW_US) {
                             logging::log("ABOUT", &format!("Failed to open X: {}", error));
                         }
@@ -462,6 +484,15 @@ impl Render for ScriptListApp {
                                 .map(|guard| guard.clone())
                                 .unwrap_or_else(|_| crate::updates::UpdateState::Idle);
                             if let Some(url) = snapshot.release_page_url() {
+                                if let Err(error) = crate::runtime_policy::check(
+                                    crate::runtime_policy::ExternalEffect::OpenExternal,
+                                ) {
+                                    logging::log(
+                                        "ABOUT",
+                                        &format!("Failed to open release page: {}", error),
+                                    );
+                                    return;
+                                }
                                 if let Err(error) = open::that(url) {
                                     logging::log(
                                         "ABOUT",
@@ -789,12 +820,12 @@ impl Render for ScriptListApp {
             let entity_for_dismiss = entity.clone();
 
             Some(
-                div().w_full().px(px(12.)).pt(px(8.)).child(
+                div().debug_selector(|| "main-warning-banner".into()).w_full().px(px(12.)).pt(px(8.)).child(
                     WarningBanner::new("bun is not installed. Install from bun.sh", banner_colors)
                         .on_click(Box::new(move |_event, _window, cx| {
                             if let Some(app) = entity.upgrade() {
-                                app.update(cx, |this, _cx| {
-                                    this.open_bun_website();
+                                app.update(cx, |this, cx| {
+                                    if let Err(error) = this.open_bun_website() { this.show_error_toast(format!("Browser was not opened: {error}"), cx); }
                                 });
                             }
                         }))
@@ -924,6 +955,32 @@ impl Render for ScriptListApp {
             None
         };
 
+        // Arg-family windows price rows before layout, but the root can also
+        // contain intrinsically sized chrome (notably the missing-Bun warning).
+        // Observe the real shell allocation rather than duplicating that
+        // chrome's text/button metrics or suppressing it for compact prompts.
+        let arg_sizing = match &self.current_view {
+            AppView::MiniPrompt { .. } => {
+                Some(crate::window_resize::arg_layout::ArgPresentationMode::Mini)
+            }
+            AppView::ArgPrompt { .. } => {
+                Some(crate::window_resize::arg_layout::ArgPresentationMode::Full)
+            }
+            _ => None,
+        }
+        .map(|mode| {
+            let choice_count = self.filtered_arg_choices().len();
+            let choice_count = if mode
+                == crate::window_resize::arg_layout::ArgPresentationMode::Full
+                && matches!(&self.current_view, AppView::ArgPrompt { choices, .. } if !choices.is_empty())
+            {
+                choice_count.max(1)
+            } else {
+                choice_count
+            };
+            (mode, choice_count)
+        });
+
         // Outer container: holds both the clipped main content and the dialog
         // layer which must NOT be clipped (same pattern as Notes window).
         let main_content_container: AnyElement = if view_owns_main_window_shell {
@@ -932,6 +989,72 @@ impl Render for ScriptListApp {
                 .w_full()
                 .min_h(px(0.))
                 .child(main_content)
+                .when_some(arg_sizing, |container, (mode, choice_count)| {
+                    let entity = cx.entity().downgrade();
+                    let revision = self.main_revisions;
+                    let warning_visible = self.show_bun_warning;
+                    let geometry = self.arg_prompt_geometry.clone();
+                    container.on_children_prepainted(move |bounds, window, cx| {
+                        let Some(shell_bounds) = bounds.first() else {
+                            return;
+                        };
+                        let observed_size = window.viewport_size();
+                        let window_height = f32::from(observed_size.height);
+                        let inputs = crate::window_resize::arg_layout::current_arg_layout_inputs(
+                            mode,
+                            choice_count,
+                            window_height,
+                        );
+                        let rendered_inputs = crate::window_resize::arg_layout::arg_layout_inputs_from_rendered_content(
+                            inputs,
+                            f32::from(shell_bounds.size.height),
+                            crate::footer_popup::glass_scroll_bands_active(),
+                        );
+                        let layout = crate::window_resize::arg_layout::resolved_arg_layout(rendered_inputs);
+                        geometry.set(Some(ArgPromptGeometry {
+                            revision,
+                            warning_visible,
+                            window_size: observed_size,
+                            shell_bounds: *shell_bounds,
+                            inputs,
+                            resolved: layout,
+                        }));
+                        let max_height = crate::window_resize::current_standard_height();
+                        let target = crate::window_resize::arg_layout::target_arg_window_height(
+                            layout,
+                            rendered_inputs.window_non_content_height,
+                            f32::from(crate::window_resize::layout::MIN_HEIGHT),
+                            max_height,
+                        );
+                        // Round outward so a fractional text line cannot cost
+                        // the final row a device pixel after native rounding.
+                        let scale = window.scale_factor();
+                        let target = ((target * scale).ceil() / scale).min(max_height);
+                        if (target - window_height).abs() < 1.0 / scale {
+                            return;
+                        }
+                        let entity = entity.clone();
+                        window.defer(cx, move |window, cx| {
+                            let Some(entity) = entity.upgrade() else {
+                                return;
+                            };
+                            entity.update(cx, |this, cx| {
+                                if this.main_revisions != revision
+                                    || this.show_bun_warning != warning_visible
+                                    || window.viewport_size() != observed_size
+                                {
+                                    return;
+                                }
+                                // Window::defer is bound to this exact window
+                                // lifetime; the global native resize queue can
+                                // instead target whichever main window is live.
+                                window.resize(gpui::size(observed_size.width, px(target)));
+                                this.mark_main_presentation_changed();
+                                cx.notify();
+                            });
+                        });
+                    })
+                })
                 .into_any_element()
         } else {
             let menu_def = self.current_main_menu_theme.def();

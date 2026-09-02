@@ -240,6 +240,7 @@ impl ScriptListApp {
 
         let entity = cx.new(|_| env_prompt);
         self.current_view = AppView::EnvPrompt { id, entity };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None; // EnvPrompt has its own focus handling
         self.pending_focus = Some(FocusTarget::EnvPrompt);
 
@@ -351,7 +352,7 @@ impl ScriptListApp {
         }
 
         // Reload config and rebuild provider registry in background
-        self.config = crate::config::load_config();
+        self.update_config(cx);
         self.rebuild_provider_registry_async(cx);
 
         // Check if Claude CLI is actually installed (this is an explicit user action,
@@ -405,6 +406,12 @@ impl ScriptListApp {
     /// Open the scratch pad editor with auto-save functionality
     fn open_scratch_pad(&mut self, cx: &mut Context<Self>) {
         tracing::info!(message = %"Opening Scratch Pad");
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)
+        {
+            self.show_error_toast(error.to_string(), cx);
+            return;
+        }
 
         // Get or create scratch pad file path
         let scratch_path = Self::get_scratch_pad_path();
@@ -443,113 +450,22 @@ impl ScriptListApp {
         tracing::info!(message = %&format!("Loaded scratch pad with {} bytes", content.len()),
         );
 
-        // Create editor focus handle
-        let editor_focus_handle = cx.focus_handle();
-
-        // Create submit callback that saves and signals errors via channel
-        let scratch_path_clone = scratch_path.clone();
-        let (save_err_tx, save_err_rx) = async_channel::bounded::<String>(1);
-        let submit_callback: std::sync::Arc<dyn Fn(String, Option<String>) + Send + Sync> =
-            std::sync::Arc::new(move |_id: String, value: Option<String>| {
-                if let Some(content) = value {
-                    // Save the content to disk
-                    if let Err(e) = std::fs::write(&scratch_path_clone, &content) {
-                        let action = ScratchPadExecutionAction::SubmitSave;
-                        tracing::error!(message = %action.log_message(&e));
-                        let _ = save_err_tx.try_send(action.toast_message(&e));
-                    } else {
-                        tracing::info!(bytes = content.len(), "Scratch pad saved on submit");
-                    }
-                }
-            });
-
-        // Listen for submit-save errors and show toast
-        cx.spawn(async move |this, cx| {
-            if let Ok(err_msg) = save_err_rx.recv().await {
-                let _ = this.update(cx, |this, cx| {
-                    this.show_error_toast(err_msg, cx);
-                });
-            }
-        })
-        .detach();
-
-        // Get the target height for editor view (subtract footer height for unified footer)
-        let editor_height = px(700.0 - window_resize::layout::FOOTER_HEIGHT);
-
-        // Create the editor prompt
-        let editor_prompt = EditorPrompt::with_height(
-            "scratch-pad".to_string(),
-            content,
-            "markdown".to_string(), // Use markdown for nice highlighting
-            editor_focus_handle.clone(),
-            submit_callback,
-            std::sync::Arc::clone(&self.theme),
-            std::sync::Arc::new(self.config.clone()),
-            Some(editor_height),
-        );
-
-        let entity = cx.new(|_| editor_prompt);
-
-        // Set up auto-save timer using weak reference
-        let scratch_path_for_save = scratch_path;
-        let entity_weak = entity.downgrade();
-        let (autosave_err_tx, autosave_err_rx) = async_channel::bounded::<String>(1);
-        cx.spawn(async move |_this, cx| {
-            loop {
-                // Auto-save every 2 seconds
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(2))
-                    .await;
-
-                // Try to save the current content
-                let save_result = cx.update(|cx| {
-                    if let Some(entity) = entity_weak.upgrade() {
-                        // Use update on the entity to get the correct Context<EditorPrompt>
-                        let content: String = entity.update(cx, |editor, cx| editor.content(cx));
-                        if let Err(e) = std::fs::write(&scratch_path_for_save, &content) {
-                            let action = ScratchPadExecutionAction::AutoSave;
-                            tracing::warn!(message = %action.log_message(&e));
-                            let _ = autosave_err_tx.try_send(action.toast_message(&e));
-                        } else {
-                            tracing::debug!(bytes = content.len(), "Auto-saved scratch pad");
-                        }
-                        true // Entity still exists
-                    } else {
-                        false // Entity dropped, stop the task
-                    }
-                });
-
-                if save_result {
-                    continue;
-                }
-                break; // Entity gone, stop the task
-            }
-        })
-        .detach();
-
-        // Listen for auto-save errors and show toast (only first error)
-        cx.spawn(async move |this, cx| {
-            if let Ok(err_msg) = autosave_err_rx.recv().await {
-                let _ = this.update(cx, |this, cx| {
-                    this.show_error_toast(err_msg, cx);
-                });
-            }
-        })
-        .detach();
-
-        self.current_view = AppView::ScratchPadView {
-            entity,
-            focus_handle: editor_focus_handle,
+        use crate::design_evaluation::prompt_fixtures::{
+            EditorPromptSeed, PromptSeed, PromptSeedCommon, ScratchPadPromptSeed,
         };
-        self.focused_input = FocusedInput::None;
-        self.pending_focus = Some(FocusTarget::EditorPrompt);
-
-        // DEFERRED RESIZE: Avoid RefCell borrow error by deferring window resize
-        // to after the current GPUI update cycle completes.
-        cx.spawn(async move |_this, _cx| {
-            resize_to_view_sync(ViewType::EditorPrompt, 0);
-        })
-        .detach();
-        cx.notify();
+        let seed = PromptSeed::ScratchPad(ScratchPadPromptSeed {
+            editor: EditorPromptSeed {
+                common: PromptSeedCommon::local("scratch-pad"),
+                content,
+                language: "markdown".to_string(),
+                template: None,
+            },
+            path: scratch_path,
+        });
+        if let Err(error) = self.construct_prompt_seed(seed, cx) {
+            self.show_error_toast(error.to_string(), cx);
+            return;
+        }
+        self.prepare_constructed_sdk_prompt("scratch-pad", true, cx);
     }
 }

@@ -3,7 +3,7 @@
  * and re-run the exporter; Rust is the single authority.
  */
 :root {
-  /* bundleHash: sha256:b67da62822a38755e628e89a98acbbe3cdc331bece858187c9433c682ea10df5 */
+  /* bundleHash: sha256:4ef12100d9e889d97931fbe0bdb76272eaf5dc9bdb56bbc6f43b9d0eecd59d24 */
   --sk-actions-dialog-list-padding-bottom: 6px;
   --sk-actions-dialog-list-padding-top: 0px;
   --sk-actions-dialog-row-height: 36px;
@@ -195,10 +195,6 @@
   --sk-font-ui: ".AppleSystemUIFont";
   --sk-notes-editor-padding-x: 16px;
   --sk-notes-editor-padding-y: 12px;
-  --sk-notes-footer-action-gap: 2px;
-  --sk-notes-footer-content-inset-x: 14px;
-  --sk-notes-footer-rest-opacity: 0.5;
-  --sk-notes-footer-status-min-width: 24px;
   --sk-notes-titlebar-height: 36px;
   --sk-notes-titlebar-traffic-width: 60px;
   --sk-notes-titlebar-padding-x: 12px;
@@ -256,7 +252,7 @@
   --sk-arg-input-font-size: 20px;
   --sk-arg-input-height: 22px;
   --sk-arg-input-line-height: 25px;
-  --sk-arg-window-height: 299px;
+  --sk-arg-window-height: 320px;
   --sk-builtin-main-input-count-font-size: 14px;
   --sk-builtin-main-input-count-font-weight: 400;
   --sk-builtin-main-input-count-line-height: 23px;
@@ -303,8 +299,6 @@
   --sk-framework-gap-1: 4px;
   --sk-framework-text-sm-font-size: 14px;
   --sk-framework-text-xs-font-size: 12px;
-  --sk-list-item-default-first-section-padding-top: 6px;
-  --sk-list-item-default-first-section-slot-height: 26px;
   --sk-main-menu-context-keycap-font-size: 9.239999771118164px;
   --sk-main-menu-context-keycap-height: 17.5px;
   --sk-main-menu-icon-tile-background: rgb(251 191 36 / 0.9490196078);
@@ -329,8 +323,6 @@
   --sk-notes-markdown-title-color: rgb(251 191 36);
   --sk-notes-markdown-title-font-weight: 700;
   --sk-notes-editor-text-color: rgb(255 255 255);
-  --sk-notes-footer-height: 32px;
-  --sk-notes-footer-status-font-size: 12px;
   --sk-notes-titlebar-title-font-size: 14px;
   --sk-compact-resource-row-gap: 8px;
   --sk-terminal-ansi-green: rgb(80 250 123);

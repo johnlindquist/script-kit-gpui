@@ -896,6 +896,209 @@ mod tests {
             .contains("does not prove macOS WindowServer compositor"));
     }
 
+    fn target_tool_validator(tool_name: &str) -> jsonschema::Validator {
+        let tool = get_computer_use_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .expect("advertised target tool");
+        jsonschema::validator_for(&tool.input_schema).expect("valid advertised JSON schema")
+    }
+
+    #[test]
+    fn computer_target_schemas_accept_serialized_exact_instance_requests() {
+        let capture = target_tool_validator(COMPUTER_CAPTURE_RENDER_WINDOW_TOOL);
+        let see = target_tool_validator(COMPUTER_SEE_TOOL);
+        for generation in [1, 7, u64::MAX] {
+            let target = AutomationWindowTarget::Instance {
+                id: "notes:primary".into(),
+                generation,
+            };
+            let request = ComputerUseCaptureRenderWindowArgs {
+                target: target.clone(),
+                expected: Some(crate::protocol::AutomationTargetIdentitySnapshot {
+                    window_id: "notes:primary".into(),
+                    window_generation: Some(generation),
+                    app_view_variant: "Notes".into(),
+                    target_generation: 2,
+                    surface_generation: 3,
+                    data_generation: 4,
+                    presentation_revision: Some(5),
+                    theme_revision: Some(6),
+                    frame_generation: Some(8),
+                }),
+                hi_dpi: true,
+                include_image: true,
+                probes: Vec::new(),
+            };
+            let serialized = serde_json::to_value(request).expect("serialize actual capture args");
+            capture
+                .validate(&serialized)
+                .expect("exact capture request conforms to advertised schema");
+            let request = ComputerUseSeeArgs {
+                target: Some(target),
+                hi_dpi: Some(true),
+                probes: vec![],
+            };
+            let serialized = serde_json::to_value(request).expect("serialize actual see args");
+            see.validate(&serialized)
+                .expect("exact see request conforms to advertised schema");
+        }
+    }
+
+    #[test]
+    fn computer_target_schemas_reject_missing_and_invalid_instance_generations() {
+        let request = ComputerUseCaptureRenderWindowArgs {
+            target: AutomationWindowTarget::Instance {
+                id: "main".into(),
+                generation: 7,
+            },
+            expected: None,
+            hi_dpi: false,
+            include_image: false,
+            probes: Vec::new(),
+        };
+        let capture = serde_json::to_value(request).expect("serialize actual capture args");
+        for tool_name in [COMPUTER_CAPTURE_RENDER_WINDOW_TOOL, COMPUTER_SEE_TOOL] {
+            let validator = target_tool_validator(tool_name);
+            let mut valid = capture.clone();
+            if tool_name == COMPUTER_SEE_TOOL {
+                valid.as_object_mut().unwrap().remove("includeImage");
+            }
+            assert!(
+                validator.is_valid(&valid),
+                "positive control for {tool_name}"
+            );
+            let mut missing = valid.clone();
+            missing["target"]
+                .as_object_mut()
+                .unwrap()
+                .remove("generation");
+            assert!(
+                !validator.is_valid(&missing),
+                "missing generation: {tool_name}"
+            );
+            for invalid in [
+                serde_json::json!(0),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(1e30),
+                serde_json::json!("7"),
+                serde_json::json!(true),
+                Value::Null,
+                serde_json::json!([]),
+                serde_json::json!({}),
+            ] {
+                let mut request = valid.clone();
+                request["target"]["generation"] = invalid.clone();
+                assert!(
+                    !validator.is_valid(&request),
+                    "invalid generation {invalid}: {tool_name}"
+                );
+            }
+            let mut empty_id = valid.clone();
+            empty_id["target"]["id"] = serde_json::json!("");
+            assert!(
+                !validator.is_valid(&empty_id),
+                "empty exact id: {tool_name}"
+            );
+            let mut extra_field = valid.clone();
+            extra_field["target"]["kind"] = serde_json::json!("main");
+            assert!(
+                !validator.is_valid(&extra_field),
+                "mixed target selectors: {tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn computer_target_schemas_accept_every_serialized_current_window_kind() {
+        use strum::IntoEnumIterator;
+
+        let capture = target_tool_validator(COMPUTER_CAPTURE_RENDER_WINDOW_TOOL);
+        let see = target_tool_validator(COMPUTER_SEE_TOOL);
+        for kind in AutomationWindowKind::iter() {
+            for index in [None, Some(0), Some(3)] {
+                let target = AutomationWindowTarget::Kind { kind, index };
+                let capture_args = ComputerUseCaptureRenderWindowArgs {
+                    target: target.clone(),
+                    expected: None,
+                    hi_dpi: false,
+                    include_image: false,
+                    probes: Vec::new(),
+                };
+                let see_args = ComputerUseSeeArgs {
+                    target: Some(target),
+                    hi_dpi: None,
+                    probes: vec![],
+                };
+                let serialized =
+                    serde_json::to_value(capture_args).expect("serialize capture kind");
+                capture
+                    .validate(&serialized)
+                    .expect("current kind accepted for capture discovery");
+                let serialized = serde_json::to_value(see_args).expect("serialize see kind");
+                see.validate(&serialized)
+                    .expect("current kind accepted for see discovery");
+            }
+        }
+        for tool_name in [COMPUTER_CAPTURE_RENDER_WINDOW_TOOL, COMPUTER_SEE_TOOL] {
+            let validator = target_tool_validator(tool_name);
+            assert!(!validator.is_valid(&serde_json::json!({
+                "target": { "type": "kind", "kind": "unknownWindowKind" }
+            })));
+        }
+    }
+
+    #[test]
+    fn computer_discovery_selectors_do_not_satisfy_exact_instance_authority() {
+        let capture = target_tool_validator(COMPUTER_CAPTURE_RENDER_WINDOW_TOOL);
+        let see = target_tool_validator(COMPUTER_SEE_TOOL);
+        let exact = jsonschema::validator_for(&automation_window_instance_target_schema())
+            .expect("valid exact-instance schema");
+        assert!(exact.is_valid(
+            &serde_json::to_value(AutomationWindowTarget::Instance {
+                id: "main".into(),
+                generation: 7,
+            })
+            .unwrap()
+        ));
+        for target in [
+            AutomationWindowTarget::Main,
+            AutomationWindowTarget::Focused,
+            AutomationWindowTarget::Id { id: "main".into() },
+            AutomationWindowTarget::Kind {
+                kind: AutomationWindowKind::Main,
+                index: None,
+            },
+            AutomationWindowTarget::TitleContains {
+                text: "Script Kit".into(),
+            },
+        ] {
+            let target = serde_json::to_value(target).expect("serialize discovery selector");
+            assert!(
+                !exact.is_valid(&target),
+                "discovery is not exact authority: {target}"
+            );
+            let mut request = serde_json::json!({ "target": target });
+            assert!(
+                capture.is_valid(&request),
+                "ordinary capture compatibility: {request}"
+            );
+            assert!(see.is_valid(&request), "ordinary discovery: {request}");
+            request["target"]["generation"] = serde_json::json!(7);
+            assert!(
+                !capture.is_valid(&request),
+                "generation cannot qualify a discovery selector"
+            );
+            assert!(
+                !see.is_valid(&request),
+                "generation cannot qualify a discovery selector"
+            );
+        }
+        assert!(see.is_valid(&serde_json::json!({})));
+        assert!(!capture.is_valid(&serde_json::json!({})));
+    }
+
     #[test]
     fn computer_capture_render_window_rejects_mutating_arguments() {
         let result = handle_computer_use_tool_call(
@@ -3073,6 +3276,7 @@ mod tests {
                 height: 200.0,
             }),
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: Some(1234),
             generation: None,
@@ -3124,6 +3328,7 @@ mod tests {
                 height: 200.0,
             }),
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: Some(1234),
             generation: None,
@@ -3194,6 +3399,7 @@ mod tests {
                 height: 200.0,
             }),
             parent_window_id: None,
+            parent_window_generation: None,
             parent_kind: None,
             pid: Some(1234),
             generation: None,

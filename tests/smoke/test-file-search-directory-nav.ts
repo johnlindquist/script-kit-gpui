@@ -56,17 +56,15 @@ async function runTests() {
     });
     log('list-home-dir', homePass ? 'pass' : 'fail', { count: homeResults.length });
 
-    // Test 3: Non-existent path should handle gracefully
+    // Test 3: An unavailable directory must reject, not become an empty success.
     log('nonexistent-path', 'running');
-    const nonExistPath = '/this/path/does/not/exist/at/all/12345/';
-    const nonExistResults = await fileSearch(nonExistPath);
-    const nonExistPass = Array.isArray(nonExistResults); // Should return empty array, not throw
-    results.push({
-      name: 'nonexistent-path',
-      pass: nonExistPass,
-      message: nonExistPass ? `Handled gracefully with ${nonExistResults.length} results` : 'Did not handle gracefully'
-    });
-    log('nonexistent-path', nonExistPass ? 'pass' : 'fail', { count: nonExistResults.length });
+    const nonExistPath = testDir + '/missing-source-directory/';
+    let sourceError: unknown;
+    try { await fileSearch(nonExistPath); } catch (error) { sourceError = error; }
+    const nonExistPass = sourceError instanceof Error && sourceError.message.length > 0;
+    results.push({ name: 'nonexistent-path', pass: nonExistPass,
+      message: nonExistPass ? `Rejected failed source: ${sourceError.message}` : 'Source failure was silently converted to success' });
+    log('nonexistent-path', nonExistPass ? 'pass' : 'fail', { error: String(sourceError) });
 
     // Test 4: Directories should appear first in results
     log('dirs-first', 'running');

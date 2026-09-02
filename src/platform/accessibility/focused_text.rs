@@ -209,6 +209,8 @@ pub fn focused_text_snapshot_for_selection_paste(
 /// return `None`. Never posts keystrokes and never touches the pasteboard,
 /// so it is safe to call speculatively (hint chips, previews).
 pub fn selected_text_for_app_ax_only(pid: Option<i32>) -> Result<Option<String>, FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+        .map_err(|error| FocusedTextError::Platform(error.to_string()))?;
     if !super::permissions::has_accessibility_permission() {
         return Err(FocusedTextError::AccessibilityPermissionRequired);
     }
@@ -247,6 +249,8 @@ fn selected_text_for_app_ax_only_platform(
 /// truncated to [`MAX_FOCUSED_TEXT_CAPTURE_CHARS`]. Secure fields return
 /// `None`. Never posts keystrokes and never touches the pasteboard.
 pub fn focused_text_for_app_ax_only(pid: Option<i32>) -> Result<Option<String>, FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+        .map_err(|error| FocusedTextError::Platform(error.to_string()))?;
     if !super::permissions::has_accessibility_permission() {
         return Err(FocusedTextError::AccessibilityPermissionRequired);
     }
@@ -287,6 +291,8 @@ fn focused_text_for_app_ax_only_platform(
 pub fn capture_focused_text_field(
     options: CaptureFocusedTextOptions,
 ) -> Result<FocusedTextSnapshot, FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+        .map_err(|error| FocusedTextError::Platform(error.to_string()))?;
     if !super::permissions::has_accessibility_permission() {
         return Err(FocusedTextError::AccessibilityPermissionRequired);
     }

@@ -194,7 +194,7 @@ const secretKeyPattern =
 const secretValuePattern =
   /(?:\bbearer\s+[a-z0-9._~-]{8,}\b|\b(?:sk-(?:proj-[a-z0-9_-]{8,}|ant-api\d{2}-[a-z0-9_-]{8,}|[a-z0-9_-]{20,})|gsk_[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9_]{8,}|github_pat_[a-z0-9_]{8,}|xox[baprs]-[a-z0-9-]{8,}|AIza[a-z0-9_-]{20,})\b|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)/i;
 
-function inferredKindForKey(key: string): ReceiptContentKind | null {
+export function inferredKindForKey(key: string): Exclude<ReceiptContentKind, "ProductStatic"> | null {
   if (secretKeyPattern.test(key)) return "Secret";
   if (
     diagnosticKeys.has(key)
@@ -266,13 +266,14 @@ export function sanitizeReceipt(
         return sanitize(current.value, path, "ProductStatic");
       }
       if (typeof current.value === "string") {
+        const text = current.value;
         if (context.cleartextAllowed && current.kind !== "Secret") {
           rawContentReturned = true;
-          return current.value;
+          return text;
         }
-        canariesRedacted += canaries.filter((canary) => current.value.includes(canary)).length;
+        canariesRedacted += canaries.filter((canary) => text.includes(canary)).length;
         redactedCount += 1;
-        return textDescriptor(current.kind, current.value, context.key);
+        return textDescriptor(current.kind, text, context.key);
       }
       return sanitize(current.value, path, current.kind);
     }

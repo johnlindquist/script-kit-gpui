@@ -132,7 +132,8 @@ fn test_extract_html_metadata_multiple() {
 
 #[test]
 fn test_extract_html_metadata_ignores_commented_codefence_body() {
-    let text = "<!--\nshortcut: cmd k\n```metadata\nkeyword: ignored,,\n```\ndescription: Test\n-->";
+    let text =
+        "<!--\nshortcut: cmd k\n```metadata\nkeyword: ignored,,\n```\ndescription: Test\n-->";
     let metadata = extract_html_comment_metadata(text);
     assert_eq!(metadata.get("shortcut"), Some(&"cmd k".to_string()));
     assert_eq!(metadata.get("keyword"), None);
@@ -151,13 +152,6 @@ fn test_parse_scriptlet_none_without_code_block() {
     let section = "## Name\nNo code block here";
     let scriptlet = parse_scriptlet_section(section, None);
     assert!(scriptlet.is_none());
-}
-
-#[test]
-fn test_read_scripts_returns_vec() {
-    let scripts = read_scripts();
-    // scripts should be a Vec, check it's valid
-    assert!(scripts.is_empty() || !scripts.is_empty());
 }
 
 #[test]
@@ -338,7 +332,7 @@ fn test_search_result_type_label() {
         match_indices: MatchIndices::default(),
         match_kind: ScriptMatchKind::default(),
         content_match: None,
-            match_evidence: None,
+        match_evidence: None,
     });
 
     let scriptlet = SearchResult::Scriptlet(ScriptletMatch {
@@ -346,7 +340,7 @@ fn test_search_result_type_label() {
         score: 50,
         display_file_path: None,
         match_indices: MatchIndices::default(),
-            match_evidence: None,
+        match_evidence: None,
     });
 
     assert_eq!(script.type_label(), "Script");

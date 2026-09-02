@@ -442,9 +442,8 @@ fn record_transaction_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::super::legacy::{compile_legacy_window_action, LegacyWindowAction};
+    use super::super::provider_test_env::EnvGuard;
     use super::super::registry;
-    use super::super::test_support::test_env::EnvGuard;
-    use super::super::types::Bounds;
     use super::*;
 
     fn fixture(windows_json: &str) -> EnvGuard {

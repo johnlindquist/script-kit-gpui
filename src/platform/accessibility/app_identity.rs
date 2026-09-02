@@ -17,6 +17,10 @@ impl ActiveAppIdentity {
 
 #[cfg(target_os = "macos")]
 pub fn current_frontmost_app_identity() -> ActiveAppIdentity {
+    if !super::super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+    {
+        return ActiveAppIdentity::unknown();
+    }
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
 

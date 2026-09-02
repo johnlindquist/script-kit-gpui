@@ -13,6 +13,7 @@ static OSASCRIPT_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
 
 #[cfg(target_os = "macos")]
 pub fn run_osascript(script: &str, context: &str) -> anyhow::Result<String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
     tracing::debug!(
         context = context,
         script_len = script.len(),
@@ -68,6 +69,7 @@ pub fn run_osascript_with_timeout(
     context: &str,
     timeout: Duration,
 ) -> anyhow::Result<String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
     tracing::debug!(
         context = context,
         script_len = script.len(),
@@ -132,6 +134,7 @@ pub fn run_osascript_with_timeout(
 
 #[cfg(target_os = "macos")]
 pub fn run_jxa(script: &str, context: &str) -> anyhow::Result<String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
     tracing::debug!(
         context = context,
         script_len = script.len(),
@@ -189,6 +192,7 @@ pub fn run_jxa_with_timeout(
     context: &str,
     timeout: Duration,
 ) -> anyhow::Result<String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
     tracing::debug!(
         context = context,
         script_len = script.len(),

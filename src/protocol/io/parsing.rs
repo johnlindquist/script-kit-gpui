@@ -302,7 +302,10 @@ fn parse_message_graceful(line: &str) -> ParseResult {
     }
 }
 
-/// Serialize a message to JSONL format
+/// Serialize a message to JSONL format with the current transport protocol version.
+///
+/// Keep the envelope out of `Message` itself. Stamping the serialized object
+/// also prevents a flattened payload from overriding the transport version.
 ///
 /// # Arguments
 /// * `msg` - The message to serialize
@@ -310,5 +313,11 @@ fn parse_message_graceful(line: &str) -> ParseResult {
 /// # Returns
 /// * `Result<String, serde_json::Error>` - JSON string (without newline)
 pub fn serialize_message(message: &Message) -> Result<String, serde_json::Error> {
-    serde_json::to_string(message)
+    let mut value = serde_json::to_value(message)?;
+    if !super::version::attach_current_version(&mut value) {
+        return Err(<serde_json::Error as serde::ser::Error>::custom(
+            "protocol message must serialize as an object",
+        ));
+    }
+    serde_json::to_string(&value)
 }

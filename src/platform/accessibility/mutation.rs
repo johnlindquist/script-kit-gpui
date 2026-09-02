@@ -77,6 +77,9 @@ fn mutate_in_memory_target(
     };
     let changed = next != *current;
     targets.insert(session_id.to_string(), next);
+    if changed {
+        crate::runtime_policy::record_completed_fixture_effect();
+    }
     Some(TextMutationResult {
         action,
         changed_text: changed,
@@ -192,6 +195,8 @@ pub fn replace_focused_text(
     if let Some(result) = mutate_in_memory_target(&session_id, TextMutationAction::Replace, text) {
         return Ok(result);
     }
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| FocusedTextError::Platform(error.to_string()))?;
 
     if is_selection_paste_target(&session_id) {
         #[cfg(target_os = "macos")]
@@ -231,6 +236,8 @@ pub fn append_focused_text(
     if let Some(result) = mutate_in_memory_target(&session_id, TextMutationAction::Append, text) {
         return Ok(result);
     }
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| FocusedTextError::Platform(error.to_string()))?;
 
     #[cfg(target_os = "macos")]
     {

@@ -59,8 +59,12 @@ impl TerminalHandle {
 
         if events.iter().any(TerminalEvent::is_exit) {
             self.exit_event_emitted = true;
-        } else if !self.exit_event_emitted {
-            match self.pty.try_wait() {
+        } else if let Some(pty) = self.pty.as_mut() {
+            match if self.exit_event_emitted {
+                Ok(None)
+            } else {
+                pty.try_wait()
+            } {
                 Ok(Some(status)) => {
                     let exit_code = status.exit_code() as i32;
                     debug!(exit_code, "Emitting terminal child exit status");
@@ -102,10 +106,9 @@ impl TerminalHandle {
                     bytes = text.len(),
                     "Writing terminal emulator response back to PTY"
                 );
-                if let Err(e) = self.pty.write_all(text.as_bytes()) {
-                    tracing::warn!(error = %e, "Failed to write terminal response to PTY");
+                if let Err(e) = self.input(text.as_bytes()) {
+                    tracing::warn!(error = %e, "Failed to write terminal response");
                 }
-                let _ = self.pty.flush();
                 false // Remove PtyWrite from the returned events
             } else {
                 true
@@ -130,10 +133,16 @@ impl TerminalHandle {
             return Ok(());
         }
 
-        self.pty
-            .write_all(bytes)
-            .context("Failed to write to PTY")?;
-        self.pty.flush().context("Failed to flush PTY")?;
+        if let Some(pty) = self.pty.as_mut() {
+            pty.write_all(bytes).context("Failed to write to PTY")?;
+            pty.flush().context("Failed to flush PTY")?;
+        } else {
+            anyhow::ensure!(
+                self.fixture_input.len().saturating_add(bytes.len()) <= MAX_PROCESS_BYTES_PER_TICK,
+                "terminal_fixture_input_full"
+            );
+            self.fixture_input.extend_from_slice(bytes);
+        }
         debug!(bytes_len = bytes.len(), "Sent input to terminal");
         Ok(())
     }
@@ -163,9 +172,9 @@ impl TerminalHandle {
             return Ok(());
         }
 
-        self.pty
-            .resize(cols, rows)
-            .context("Failed to resize PTY")?;
+        if let Some(pty) = self.pty.as_mut() {
+            pty.resize(cols, rows).context("Failed to resize PTY")?;
+        }
 
         let size = TerminalSize::new(cols, rows);
         {
@@ -192,12 +201,12 @@ impl TerminalHandle {
     ///
     /// `true` if the child process is still running, `false` otherwise.
     pub fn is_running(&mut self) -> bool {
-        self.pty.is_running()
+        self.pty.as_mut().is_some_and(PtyManager::is_running)
     }
 
     /// Checks if the terminal child process is still alive.
     pub fn is_alive(&mut self) -> bool {
-        self.pty.is_running()
+        self.is_running()
     }
 
     /// Kill the PTY child process and signal the reader thread to stop.
@@ -208,10 +217,10 @@ impl TerminalHandle {
     pub fn kill(&mut self) -> Result<()> {
         self.reader_stop_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if self.pty.is_running() {
-            self.pty
-                .kill()
-                .context("Failed to kill PTY child process")?;
+        if let Some(pty) = self.pty.as_mut() {
+            if pty.is_running() {
+                pty.kill().context("Failed to kill PTY child process")?;
+            }
         }
         Ok(())
     }

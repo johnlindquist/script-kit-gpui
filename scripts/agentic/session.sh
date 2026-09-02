@@ -75,26 +75,22 @@ canonical_session_dir() {
   (cd "$dir" && pwd -P)
 }
 SESSION_DIR="$(canonical_session_dir "$SESSION_DIR_RAW")"
-# With no explicit override, pick the freshest of the dev.sh binary and the
-# agent-cargo pool binary so a just-built agent binary is never silently
-# shadowed by a stale target/debug one (and vice versa).
-resolve_default_binary() {
-  local dev_bin="${PROJECT_ROOT}/target/debug/script-kit-gpui"
-  local agent_bin="${PROJECT_ROOT}/target-agent/pools/agent-debug/debug/script-kit-gpui"
-  if [ ! -x "$agent_bin" ]; then echo "$dev_bin"; return; fi
-  if [ ! -x "$dev_bin" ]; then echo "$agent_bin"; return; fi
-  if [ "$agent_bin" -nt "$dev_bin" ]; then
-    echo "[session.sh] binary: $agent_bin (fresher than target/debug; set SCRIPT_KIT_GPUI_BINARY to override)" >&2
-    echo "$agent_bin"
-  else
-    echo "[session.sh] binary: $dev_bin (fresher than agent pool; set SCRIPT_KIT_GPUI_BINARY to override)" >&2
-    echo "$dev_bin"
-  fi
-}
+# Human default is deterministically the dev target. Proof uses an explicit ref.
+resolve_default_binary() { printf '%s\n' "${PROJECT_ROOT}/target/debug/script-kit-gpui"; }
 if [ "$SESSION_SUBCOMMAND" = "start" ]; then
   BINARY="${SCRIPT_KIT_GPUI_BINARY:-$(resolve_default_binary)}"
 else
   BINARY="${SCRIPT_KIT_GPUI_BINARY:-}"
+fi
+if [[ "$SESSION_SUBCOMMAND" == "start" && -n "${SCRIPT_KIT_ARTIFACT_REFERENCE:-}" ]]; then
+  verified_binary="$(bun "${PROJECT_ROOT}/scripts/agentic/build-artifact.ts" verify-reference "$PROJECT_ROOT" "$SCRIPT_KIT_ARTIFACT_REFERENCE")"
+  if [[ -n "${SCRIPT_KIT_GPUI_BINARY:-}" && "$SCRIPT_KIT_GPUI_BINARY" != "$verified_binary" ]]; then
+    echo 'session artifact reference and explicit executable disagree' >&2; exit 78
+  fi
+  BINARY="$verified_binary"
+fi
+if [[ "$SESSION_SUBCOMMAND" == "start" && "$BINARY" == "${PROJECT_ROOT}/target-agent/artifacts/"* && -z "${SCRIPT_KIT_ARTIFACT_REFERENCE:-}" ]]; then
+  echo 'immutable session launch requires SCRIPT_KIT_ARTIFACT_REFERENCE' >&2; exit 78
 fi
 READY_TIMEOUT_MS="${SCRIPT_KIT_SESSION_READY_TIMEOUT_MS:-3000}"
 STOP_GRACE_MS="${SCRIPT_KIT_SESSION_STOP_GRACE_MS:-2000}"
@@ -233,7 +229,10 @@ json_lifecycle_error() {
     "$SCHEMA_VERSION" "$name" "$keep_actions_window_open" "$lifecycle_path" "$last_event" "$code" "$escaped_msg"
 }
 
-session_dir() { echo "${SESSION_DIR}/$1"; }
+session_dir() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo 'invalid session name' >&2; return 64; }
+  echo "${SESSION_DIR}/$1"
+}
 
 session_now_ms() {
   if [ -n "${EPOCHREALTIME:-}" ]; then
@@ -359,132 +358,27 @@ wait_for_process_exit() {
 # session registry files are removed.
 SESSION_STOP_FORCED_KILL=false
 terminate_session_app() {
-  local name="$1"
-  local sdir="$2"
-  local pid="$3"
-  local supervisor_pid="${4:-}"
-
+  local name="$1" sdir="$2" pid="$3" supervisor_pid="${4:-}"
   SESSION_STOP_FORCED_KILL=false
-  if ! kill -0 "$pid" 2>/dev/null; then
-    return 0
-  fi
-
-  if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
-    # The supervisor forwards SIGTERM to the app's dedicated process group and
-    # stays alive until it has reaped the child and written its exit receipt.
-    if ! verify_stop_ownership "$name" "$sdir"; then
-      return 1
-    fi
-    kill -TERM "$supervisor_pid" 2>/dev/null || true
-  else
-    if ! verify_stop_ownership "$name" "$sdir"; then
-      return 1
-    fi
-    if ! kill -TERM -- "-$pid" 2>/dev/null; then
-      if ! verify_stop_ownership "$name" "$sdir"; then
-        return 1
-      fi
-      kill -TERM "$pid" 2>/dev/null || true
-    fi
-  fi
-
-  if wait_for_process_exit "$pid" "$STOP_GRACE_MS"; then
-    log "Stopped session '${name}' gracefully (pid ${pid})"
-    return 0
-  fi
-
-  SESSION_STOP_FORCED_KILL=true
-  log "Session '${name}' ignored SIGTERM; sending SIGKILL to process group ${pid}"
-  if ! verify_stop_ownership "$name" "$sdir"; then
+  verify_stop_ownership "$name" "$sdir" || return 1
+  if ! python3 -B "${PROJECT_ROOT}/scripts/agentic/session-supervisor.py" --stop-session "$sdir"; then
+    json_lifecycle_error "$name" "session_stop_failed" "Exact supervisor/process-group cleanup not proved; preserving ${sdir}."
     return 1
   fi
-  if ! kill -KILL -- "-$pid" 2>/dev/null; then
-    if ! verify_stop_ownership "$name" "$sdir"; then
-      return 1
-    fi
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
-  if wait_for_process_exit "$pid" "$STOP_KILL_TIMEOUT_MS"; then
-    log "Stopped session '${name}' with SIGKILL (pid ${pid})"
-    return 0
-  fi
-
-  json_lifecycle_error "$name" "session_stop_failed" \
-    "Session '${name}' app process (pid ${pid}) survived SIGTERM and SIGKILL; preserving ${sdir} for recovery."
-  return 1
 }
 
-path_aliases() {
-  local file_path="$1"
-  printf '%s\n' "$file_path"
-  if [ "$SESSION_DIR_RAW" != "$SESSION_DIR" ] && [[ "$file_path" == "$SESSION_DIR"* ]]; then
-    printf '%s\n' "${SESSION_DIR_RAW}${file_path#"$SESSION_DIR"}"
-  fi
+stop_exact_forwarder() {
+  local sdir="$1" pid expected actual
+  pid="$(cat "${sdir}/fwd_pid" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+  expected="$(cat "${sdir}/fwd-start" 2>/dev/null || true)"
+  actual="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
+  [[ -n "$expected" && "$expected" == "$actual" ]] || { echo 'forwarder ownership unproved' >&2; return 78; }
+  kill -TERM "$pid"
+  wait_for_process_exit "$pid" 2000
 }
 
-regex_escape() {
-  printf '%s' "$1" | sed 's/[][(){}.^$*+?|\\]/\\&/g'
-}
-
-session_forwarder_pids() {
-  local pipe_path="$1"
-  local input_fifo="$2"
-  local candidate
-  local pipe_pattern
-  local input_pattern
-
-  while IFS= read -r candidate; do
-    pipe_pattern="$(regex_escape "$candidate")"
-    pgrep -f "$pipe_pattern" 2>/dev/null || true
-  done < <(path_aliases "$pipe_path")
-
-  while IFS= read -r candidate; do
-    input_pattern="$(regex_escape "$candidate")"
-    pgrep -f "cat ${input_pattern}" 2>/dev/null || true
-  done < <(path_aliases "$input_fifo")
-}
-
-is_descendant_of() {
-  local pid="$1"
-  local ancestor="${2:-}"
-
-  if [ -z "$ancestor" ]; then
-    return 1
-  fi
-
-  while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ]; do
-    if [ "$pid" = "$ancestor" ]; then
-      return 0
-    fi
-    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-  done
-
-  return 1
-}
-
-cleanup_orphan_session_forwarders() {
-  local pipe_path="$1"
-  local input_fifo="$2"
-  local keep_pid="${3:-}"
-  local ownership_name="${4:-}"
-  local ownership_sdir="${5:-}"
-
-  while IFS= read -r orphan_pid; do
-    if [ -z "$orphan_pid" ]; then
-      continue
-    fi
-    if [ -n "$keep_pid" ] && is_descendant_of "$orphan_pid" "$keep_pid"; then
-      continue
-    fi
-    if [ "$orphan_pid" = "$$" ]; then
-      continue
-    fi
-    if [ -n "$ownership_name" ] && ! verify_stop_ownership "$ownership_name" "$ownership_sdir"; then
-      return 1
-    fi
-    kill "$orphan_pid" 2>/dev/null || true
-  done < <(session_forwarder_pids "$pipe_path" "$input_fifo")
-}
 
 send_startup_keepalive() {
   local input_fifo="$1"
@@ -496,6 +390,7 @@ send_startup_keepalive() {
 
 cmd_start() {
   local name="${1:-default}"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { json_error invalid_session_name 'Session must name one registry child'; return 64; }
   local sdir
   sdir="$(session_dir "$name")"
   local input_fifo="${sdir}/input"
@@ -527,7 +422,7 @@ cmd_start() {
     local can_resume=true
     local reason=""
 
-    if ! kill -0 "$old_pid" 2>/dev/null; then
+    if ! python3 -B "${PROJECT_ROOT}/scripts/agentic/session-supervisor.py" --check-session "$sdir" 2>/dev/null; then
       can_resume=false
       reason="app process (pid ${old_pid}) dead"
     elif [ -z "$old_fwd_pid" ] || ! kill -0 "$old_fwd_pid" 2>/dev/null; then
@@ -551,13 +446,19 @@ cmd_start() {
         json_error "session_env_mismatch" "Session '${name}' exists but was not launched with SCRIPT_KIT_AGENTIC_KEEP_ACTIONS_WINDOW_OPEN=1. Use a fresh session name or stop it explicitly."
         return 1
       fi
-      cleanup_orphan_session_forwarders "$primary_pipe" "$input_fifo" "$old_fwd_pid"
+      local recorded_binary recorded_generation
+      recorded_binary="$(cat "${sdir}/binary" 2>/dev/null || true)"
+      recorded_generation="$(cat "${sdir}/generation" 2>/dev/null || true)"
+      if [[ -z "$recorded_binary" || -z "$recorded_generation" || "$recorded_binary" != "$BINARY" ]]; then
+        json_error session_binary_mismatch 'Existing recorded binary/generation differs or is unknown'; return 78
+      fi
       log "Resuming existing session '${name}' (pid ${old_pid})"
       json_envelope "ok" \
         "session:\"${name}\"" \
         "pid:${old_pid}" \
         "pipe:\"${input_fifo}\"" \
-        "binary:\"${BINARY}\"" \
+        "binary:\"${recorded_binary}\"" \
+        "sessionGeneration:\"${recorded_generation}\"" \
         "log:\"${log_path}\"" \
         "responses:\"${responses_path}\"" \
         "lifecycle:\"${lifecycle_path}\"" \
@@ -575,14 +476,8 @@ cmd_start() {
       if ! terminate_session_app "$name" "$sdir" "$old_pid" "$old_supervisor_pid"; then
         return 1
       fi
-      if [ -n "$old_fwd_pid" ] && kill -0 "$old_fwd_pid" 2>/dev/null; then
-        kill -TERM "$old_fwd_pid" 2>/dev/null || true
-      fi
-      if [ -n "$old_supervisor_pid" ] && kill -0 "$old_supervisor_pid" 2>/dev/null; then
-        kill -TERM "$old_supervisor_pid" 2>/dev/null || true
-      fi
-      cleanup_orphan_session_forwarders "$primary_pipe" "$input_fifo"
-      rm -rf "${sdir}"
+      stop_exact_forwarder "$sdir" || return 1
+      mv "$sdir" "${sdir}.closed-$(cat "${sdir}/generation")"
     fi
   fi
 
@@ -596,6 +491,9 @@ cmd_start() {
   mkdir -p "${sdir}"
   printf '%s\n' "$keep_actions_window_open_requested" > "${sdir}/keep_actions_window_open"
   printf '%s\n' "$BINARY" > "${sdir}/binary"
+  if [[ -n "${SCRIPT_KIT_ARTIFACT_REFERENCE:-}" ]]; then
+    cp -p "$SCRIPT_KIT_ARTIFACT_REFERENCE" "${sdir}/artifact-reference.json"
+  fi
   local pipe_path="${sdir}/pipe"
   local pid_path="${sdir}/pid"
   local supervisor_pid_path="${sdir}/supervisor_pid"
@@ -608,7 +506,6 @@ cmd_start() {
   # into the app pipe while keeping the write end open across shells.
   rm -f "$input_fifo"
   mkfifo "$input_fifo"
-  cleanup_orphan_session_forwarders "$pipe_path" "$input_fifo"
 
   # Create the responses artifact files
   : > "$responses_path"
@@ -623,7 +520,7 @@ cmd_start() {
   # Background forwarder: reads from input_fifo and writes to pipe.
   # It is started before the app so the app's read-open on the primary FIFO
   # does not block forever waiting for a writer.
-  nohup python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' bash -c '
+  nohup python3 -B -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' bash -c '
     trap "" HUP
     pipe_path="$1"
     input_fifo="$2"
@@ -642,6 +539,7 @@ cmd_start() {
   ' _ "$pipe_path" "$input_fifo" </dev/null >/dev/null 2>&1 &
   local fwd_pid=$!
   echo "$fwd_pid" > "${sdir}/fwd_pid"
+  LC_ALL=C ps -p "$fwd_pid" -o lstart= | sed 's/^ *//;s/ *$//' > "${sdir}/fwd-start"
 
   # Launch the app reading from the pipe after the forwarder has opened the
   # write end, otherwise the shell can deadlock opening the read end.
@@ -661,7 +559,7 @@ cmd_start() {
     SCRIPT_KIT_AGENTIC_PROTOCOL_RESPONSES_PATH="$protocol_responses_path" \
     SCRIPT_KIT_AGENTIC_SESSION_NAME="$name" \
     SCRIPT_KIT_AGENTIC_SESSION_GENERATION="$session_generation" \
-    python3 "${PROJECT_ROOT}/scripts/agentic/session-supervisor.py" \
+    python3 -B "${PROJECT_ROOT}/scripts/agentic/session-supervisor.py" \
       --binary "$BINARY" \
       --stdin-path "$pipe_path" \
       --stdout-path "$log_path" \
@@ -673,7 +571,9 @@ cmd_start() {
   echo "$supervisor_pid" > "$supervisor_pid_path"
   local app_pid=""
   local pid_wait_ms=0
-  while [ "$pid_wait_ms" -lt 3000 ]; do
+  local pid_deadline_ms=3000
+  [[ -z "${SCRIPT_KIT_ARTIFACT_REFERENCE:-}" ]] || pid_deadline_ms=65000
+  while [ "$pid_wait_ms" -lt "$pid_deadline_ms" ]; do
     if [ -s "$pid_path" ]; then
       app_pid="$(cat "$pid_path" 2>/dev/null || true)"
       if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
@@ -1073,6 +973,9 @@ cmd_rpc() {
       *)         shift ;;
     esac
   done
+  if [[ -z "$expect_type" ]]; then
+    json_error missing_response_expectation 'RPC requires --expect with the actual response type'; return 64
+  fi
 
   if ! acquire_session_lock "$sdir" "$timeout_ms"; then
     json_error "queue_timeout" "Timed out waiting for session '${name}' command queue after ${timeout_ms}ms."
@@ -1183,27 +1086,27 @@ cmd_status() {
   local forwarder_alive="false"
   local fwd_pid="0"
   local keep_actions_window_open="false"
-  local launched_binary="$BINARY"
+  local launched_binary="" session_generation=""
+  [[ ! -f "${sdir}/generation" ]] || session_generation="$(cat "${sdir}/generation")"
 
   if [ -f "${sdir}/keep_actions_window_open" ]; then
     keep_actions_window_open="$(cat "${sdir}/keep_actions_window_open")"
   fi
   if [ -f "${sdir}/binary" ]; then
     launched_binary="$(cat "${sdir}/binary")"
-  elif [ -z "$launched_binary" ]; then
-    launched_binary="$(resolve_default_binary)"
   fi
 
   if [ -f "${sdir}/pid" ]; then
     pid="$(cat "${sdir}/pid")"
-    if kill -0 "$pid" 2>/dev/null; then
+    if python3 -B "${PROJECT_ROOT}/scripts/agentic/session-supervisor.py" --check-session "$sdir" 2>/dev/null; then
       alive="true"
     fi
   fi
 
   if [ -f "${sdir}/fwd_pid" ]; then
     fwd_pid="$(cat "${sdir}/fwd_pid")"
-    if kill -0 "$fwd_pid" 2>/dev/null; then
+    if kill -0 "$fwd_pid" 2>/dev/null \
+      && [[ "$(cat "${sdir}/fwd-start" 2>/dev/null)" == "$(LC_ALL=C ps -p "$fwd_pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')" ]]; then
       forwarder_alive="true"
     fi
   fi
@@ -1249,6 +1152,7 @@ cmd_status() {
     "pipe:\"${pipe_path}\"" \
     "pipeWritable:${pipe_writable}" \
     "binary:\"${launched_binary}\"" \
+    "sessionGeneration:$(stop_generation_json_value "$session_generation")" \
     "keepActionsWindowOpen:${keep_actions_window_open}" \
     "log:\"${log_path}\"" \
     "responses:\"${responses_path}\"" \
@@ -1340,23 +1244,8 @@ cmd_stop() {
     return 1
   fi
 
-  # The app is confirmed dead; its supervisor should exit after writing the
-  # receipt, but stop any straggling supervisor/forwarder before FIFO cleanup.
-  if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
-    if ! verify_stop_ownership "$name" "$sdir"; then
-      return 1
-    fi
-    kill -TERM "$supervisor_pid" 2>/dev/null || true
-  fi
-  if [ -n "$fwd_pid" ] && kill -0 "$fwd_pid" 2>/dev/null; then
-    if ! verify_stop_ownership "$name" "$sdir"; then
-      return 1
-    fi
-    kill -TERM "$fwd_pid" 2>/dev/null || true
-  fi
-  if ! cleanup_orphan_session_forwarders "${sdir}/pipe" "${sdir}/input" "" "$name" "$sdir"; then
-    return 1
-  fi
+  # Only the forwarder whose start identity was registered by this session.
+  stop_exact_forwarder "$sdir" || return 1
 
   # Clean up FIFOs and directory
   if ! verify_stop_ownership "$name" "$sdir"; then
@@ -1366,7 +1255,7 @@ cmd_stop() {
   if ! verify_stop_ownership "$name" "$sdir"; then
     return 1
   fi
-  rm -rf "${sdir}"
+  mv "$sdir" "${sdir}.closed-$(cat "${sdir}/generation")"
 
   if [ "$STOP_OWNERSHIP_STRICT" = true ]; then
     json_envelope "ok" \

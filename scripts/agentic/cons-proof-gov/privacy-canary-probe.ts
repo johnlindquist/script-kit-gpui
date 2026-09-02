@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -13,10 +14,7 @@ import {
 } from "../../devtools/lib/privacy.ts";
 import { prepareValidatedReceipt } from "../../devtools/lib/receipt-schema.ts";
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY
-    ?? "target-agent/artifacts/cons-proof-c02/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const artifactPath = resolve(
   process.env.CONSISTENCY_RECEIPT_PATH
     ?? ".artifacts/consistency/PF-003/privacy-canary.json",
@@ -227,18 +225,16 @@ let responseStreamCanaryMatches = -1;
 let appStreamCanaryMatches = -1;
 
 try {
-  driver = await Driver.launch({
-    binary,
-    sessionName: `cons-proof-pf003-${process.pid}`,
-    sandboxHome: true,
-    sharedModels: false,
-    defaultTimeoutMs: 10_000,
-    env: {
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+  sessionName: `cons-proof-pf003-${process.pid}`,
+  sandboxHome: true,
+  sharedModels: false,
+  defaultTimeoutMs: 10_000,
+  env: {
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  }, });
   sessionDir = driver.sessionDir;
   logPath = driver.logPath;
 

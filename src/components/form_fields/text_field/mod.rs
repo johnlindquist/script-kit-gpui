@@ -20,6 +20,7 @@ pub struct FormTextField {
     pub cursor_position: usize,
     /// Selection anchor (CHAR INDEX). None = no selection.
     pub selection_anchor: Option<usize>,
+    input_revision: u64,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Whether to mask the text (for password fields)
@@ -44,6 +45,7 @@ impl FormTextField {
             value: initial_value.clone(),
             cursor_position: char_len(&initial_value),
             selection_anchor: None,
+            input_revision: 0,
             focus_handle: cx.focus_handle(),
             is_password,
             state,
@@ -55,6 +57,36 @@ impl FormTextField {
         &self.value
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.input_revision
+    }
+
+    fn advance_input_revision(&mut self) {
+        assert!(
+            self.input_revision < u64::MAX,
+            "form input revision exhausted"
+        );
+        self.input_revision += 1;
+    }
+
+    fn selection_state(&self) -> (usize, usize) {
+        (
+            self.selection_anchor.unwrap_or(self.cursor_position),
+            self.cursor_position,
+        )
+    }
+
+    fn record_selection_change(&mut self, previous: (usize, usize)) {
+        if self.selection_state() != previous {
+            self.advance_input_revision();
+        }
+    }
+
+    pub(crate) fn update_colors(&mut self, colors: FormFieldColors, cx: &mut Context<Self>) {
+        self.colors = colors;
+        cx.notify();
+    }
+
     /// Get the field name
     pub fn name(&self) -> &str {
         &self.field.name
@@ -62,8 +94,12 @@ impl FormTextField {
 
     /// Set the value programmatically
     pub fn set_value(&mut self, value: String) {
+        let cursor_position = char_len(&value);
+        if self.value != value || self.cursor_position != cursor_position || self.has_selection() {
+            self.advance_input_revision();
+        }
         self.value = value.clone();
-        self.cursor_position = char_len(&self.value);
+        self.cursor_position = cursor_position;
         self.selection_anchor = None;
         self.state.set_value(value);
     }
@@ -110,8 +146,10 @@ impl FormTextField {
     }
 
     fn select_all(&mut self) {
+        let previous = self.selection_state();
         self.selection_anchor = Some(0);
         self.cursor_position = self.text_len_chars();
+        self.record_selection_change(previous);
     }
 
     fn get_selected_text(&self) -> String {
@@ -126,6 +164,7 @@ impl FormTextField {
     fn delete_selection(&mut self) -> bool {
         if let Some((start, end)) = self.selection_range() {
             if start != end {
+                self.advance_input_revision();
                 drain_char_range(&mut self.value, start, end);
                 self.cursor_position = start;
                 self.selection_anchor = None;
@@ -138,6 +177,9 @@ impl FormTextField {
 
     fn insert_text_at_cursor(&mut self, text: &str) {
         self.delete_selection();
+        if !text.is_empty() {
+            self.advance_input_revision();
+        }
         let insert_byte = byte_idx_from_char_idx(&self.value, self.cursor_position);
         self.value.insert_str(insert_byte, text);
         self.cursor_position = (self.cursor_position + char_len(text)).min(self.text_len_chars());
@@ -166,11 +208,13 @@ impl FormTextField {
     }
 
     fn move_left(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if !extend_selection && self.has_selection() {
             if let Some((start, _)) = self.selection_range() {
                 self.cursor_position = start;
             }
             self.clear_selection();
+            self.record_selection_change(previous);
             return;
         }
         if extend_selection && self.selection_anchor.is_none() {
@@ -182,14 +226,17 @@ impl FormTextField {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_right(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if !extend_selection && self.has_selection() {
             if let Some((_, end)) = self.selection_range() {
                 self.cursor_position = end;
             }
             self.clear_selection();
+            self.record_selection_change(previous);
             return;
         }
         if extend_selection && self.selection_anchor.is_none() {
@@ -202,9 +249,11 @@ impl FormTextField {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_home(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if extend_selection && self.selection_anchor.is_none() {
             self.selection_anchor = Some(self.cursor_position);
         }
@@ -212,9 +261,11 @@ impl FormTextField {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_end(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if extend_selection && self.selection_anchor.is_none() {
             self.selection_anchor = Some(self.cursor_position);
         }
@@ -222,6 +273,7 @@ impl FormTextField {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn backspace_char(&mut self) {
@@ -232,6 +284,7 @@ impl FormTextField {
             return;
         }
         let del_start = self.cursor_position - 1;
+        self.advance_input_revision();
         drain_char_range(&mut self.value, del_start, self.cursor_position);
         self.cursor_position = del_start;
         self.state.set_value(self.value.clone());
@@ -245,6 +298,7 @@ impl FormTextField {
         if self.cursor_position >= len {
             return;
         }
+        self.advance_input_revision();
         drain_char_range(
             &mut self.value,
             self.cursor_position,
@@ -352,4 +406,46 @@ impl FormTextField {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn text_field_revision_tracks_text_selection_and_no_ops(cx: &mut gpui::TestAppContext) {
+    let field: Field =
+        serde_json::from_value(serde_json::json!({"name": "field", "value": "hé"})).unwrap();
+    let colors = FormFieldColors::from_theme(&crate::theme::Theme::default());
+    let input = cx.new(|cx| FormTextField::new(field, colors, cx));
+    input.update(cx, |input, cx| {
+        let initial = input.revision();
+        input.set_value("hé".into());
+        input.move_right(true);
+        input.move_right(false);
+        input.delete_forward_char();
+        input.insert_text_at_cursor("");
+        input.update_colors(colors, cx);
+        assert_eq!(input.revision(), initial);
+        input.set_value("àb".into());
+        let changed = input.revision();
+        assert!(changed > initial);
+        input.set_value("hé".into());
+        assert!(input.revision() > changed);
+        let before_cursor = input.revision();
+        input.move_left(false);
+        input.move_right(false);
+        assert!(input.revision() > before_cursor);
+        let before_selection = input.revision();
+        input.select_all();
+        assert!(input.revision() > before_selection);
+        let selected = input.revision();
+        input.select_all();
+        assert_eq!(input.revision(), selected);
+        input.insert_text_at_cursor("hé");
+        assert_eq!(input.value(), "hé");
+        assert!(!input.has_selection());
+        assert!(input.revision() > selected);
+        let before_delete = input.revision();
+        input.backspace_char();
+        assert_eq!(input.value(), "h");
+        assert!(input.revision() > before_delete);
+    });
 }

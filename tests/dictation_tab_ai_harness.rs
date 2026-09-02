@@ -165,8 +165,8 @@ fn dictation_target_enum_has_tab_ai_harness_variant() {
 #[test]
 fn dictation_transcript_delivery_routes_tab_ai_harness() {
     let fn_start = BUILTIN_EXECUTION_SOURCE
-        .find("fn handle_dictation_transcript")
-        .expect("handle_dictation_transcript must exist");
+        .find("fn mutate_internal_dictation_request")
+        .expect("mutate_internal_dictation_request must exist");
     let fn_body = &BUILTIN_EXECUTION_SOURCE[fn_start..];
     let fn_end = fn_body[1..]
         .find("\n    fn ")
@@ -176,7 +176,7 @@ fn dictation_transcript_delivery_routes_tab_ai_harness() {
 
     assert!(
         fn_body.contains("DictationTarget::TabAiHarness"),
-        "handle_dictation_transcript must have a TabAiHarness arm"
+        "mutate_internal_dictation_request must have a TabAiHarness arm"
     );
     assert!(
         fn_body.contains("dispatch_dictation_to_frozen_agent_chat"),
@@ -186,10 +186,13 @@ fn dictation_transcript_delivery_routes_tab_ai_harness() {
 
 #[test]
 fn tab_ai_harness_delivery_distinguishes_existing_and_fresh_policy() {
-    let fn_body = function_body(BUILTIN_EXECUTION_SOURCE, "fn handle_dictation_transcript");
+    let fn_body = function_body(
+        BUILTIN_EXECUTION_SOURCE,
+        "fn mutate_internal_dictation_request",
+    );
     let arm_start = fn_body
         .find("DictationTarget::TabAiHarness => {")
-        .expect("handle_dictation_transcript must have a TabAiHarness arm");
+        .expect("mutate_internal_dictation_request must have a TabAiHarness arm");
     let arm = &fn_body[arm_start..];
     let arm_end = arm
         .find("DictationTarget::DayPageToday")
@@ -207,10 +210,13 @@ fn tab_ai_harness_delivery_distinguishes_existing_and_fresh_policy() {
 
 #[test]
 fn tab_ai_harness_delivery_preserves_detached_agent_chat() {
-    let fn_body = function_body(BUILTIN_EXECUTION_SOURCE, "fn handle_dictation_transcript");
+    let fn_body = function_body(
+        BUILTIN_EXECUTION_SOURCE,
+        "fn mutate_internal_dictation_request",
+    );
     let arm_start = fn_body
         .find("DictationTarget::TabAiHarness => {")
-        .expect("handle_dictation_transcript must have a TabAiHarness arm");
+        .expect("mutate_internal_dictation_request must have a TabAiHarness arm");
     let arm = &fn_body[arm_start..];
     let arm_end = arm
         .find("DictationTarget::DayPageToday")

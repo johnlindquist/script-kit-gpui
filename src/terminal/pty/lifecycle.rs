@@ -35,6 +35,7 @@ impl PtyManager {
 
     /// Internal spawn implementation.
     fn spawn_internal(cmd: &str, args: &[&str], cols: u16, rows: u16) -> Result<Self> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
         let pty_system = native_pty_system();
 
         let size = PtySize {

@@ -1,87 +1,38 @@
-//! Async semantic pass for the root launcher "From Your Brain" section.
-//!
-//! The sync lexical pass (`crate::brain::search_root_brain_direct`, invoked
-//! per keystroke from `filtering_cache.rs`) is the instant first paint. This
-//! module mirrors `root_file_search.rs`: a debounced background task embeds
-//! the query on the warm indexer thread (bounded ~200ms budget) and runs the
-//! hybrid FTS+cosine search; results are applied by generation and preferred
-//! over lexical hits while their stored query matches the live query.
-//!
-//! Staleness contract: applying (or clearing) semantic results bumps
-//! `root_brain_semantic_epoch`, which is part of `RootPassiveFrameKey`, and
-//! invalidates the passive frame + grouped cache — a cached frame holding
-//! lexical-only brain hits can never be served after semantic results land.
+//! Query-owned Brain reads. Lexical IO runs once before first paint; the bounded
+//! semantic worker keeps the native debounce and embedding-availability policy.
+//! Grouping consumes only accepted, query-stamped source snapshots.
 
 use super::*;
+use crate::design_evaluation::search_fixtures as F;
 
 const ROOT_BRAIN_SEMANTIC_DEBOUNCE_MS: u64 = 60;
 
 impl ScriptListApp {
-    /// Brain section options for `query`, mirroring the sync passive pass in
-    /// `filtering_cache.rs` (explicit `@brain` source filter force-enables the
-    /// section and widens its caps).
-    fn root_brain_semantic_options_for_query(
+    fn root_brain_search_plan_for_query(
         &self,
-        source_filters: &crate::menu_syntax::RootUnifiedSourceFilterSet,
-    ) -> crate::brain::RootBrainSectionOptions {
+        value: &str,
+    ) -> (
+        crate::brain::RootBrainQueryPlan,
+        crate::brain::RootBrainSectionOptions,
+    ) {
+        let search_text = crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, value);
+        let trimmed = search_text.trim();
+        let search_needle = super::filtering_cache::root_passive_search_needle(trimmed);
+        let advanced = self.menu_syntax_mode.advanced_query_for(value);
+        let empty_filters = crate::menu_syntax::RootUnifiedSourceFilterSet::default();
+        let source_filters = advanced
+            .map(|query| &query.source_filters)
+            .unwrap_or(&empty_filters);
+        let explicit = source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Brain);
         let unified_search = self.config.get_unified_search();
-        let mut brain_options = unified_search.brain_section_options();
-        if source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Brain) {
-            brain_options.enabled = true;
-            brain_options.min_query_chars = 0;
-            brain_options.max_results = brain_options
+        let mut options = unified_search.brain_section_options();
+        if explicit {
+            options.enabled = true;
+            options.min_query_chars = 0;
+            options.max_results = options
                 .max_results
                 .max(unified_search.passive_result_limits().max_total_results);
         }
-        brain_options
-    }
-
-    /// Drop in-flight + stored semantic state. Invalidates caches only when
-    /// stored results actually existed.
-    fn clear_root_brain_semantic_state(&mut self, cx: &mut Context<Self>) {
-        if self.root_search.clear_root_brain_semantic() {
-            self.invalidate_root_passive_and_grouped_cache();
-            cx.notify();
-        }
-    }
-
-    /// Kick the debounced async semantic brain search for the current filter
-    /// text. Hooked at the same call sites as `maybe_start_root_file_search`
-    /// so it runs exactly when the filter text changes. Never blocks: all
-    /// embedding/search work happens on a dedicated background thread.
-    pub(crate) fn maybe_start_root_brain_semantic_search(
-        &mut self,
-        query: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let search_text =
-            crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, query).to_string();
-        let trimmed = search_text.trim();
-        let search_needle = super::filtering_cache::root_passive_search_needle(trimmed);
-        let advanced_query_owned = self.menu_syntax_mode.advanced_query_for(query).cloned();
-        let source_filters = advanced_query_owned
-            .as_ref()
-            .map(|advanced_query| advanced_query.source_filters.clone())
-            .unwrap_or_default();
-        let advanced_predicate_active = advanced_query_owned
-            .as_ref()
-            .is_some_and(|advanced_query| advanced_query.has_predicates());
-        let brain_options = self.root_brain_semantic_options_for_query(&source_filters);
-
-        // Shared query-eligibility decision with the sync lexical pass
-        // (`crate::brain::root_brain_query_plan`), plus the async-only
-        // main-list ownership checks the root file search applies.
-        // `RecentsOnly` (bare `brain:`) is ineligible here on purpose: the
-        // sync pass shows recents, which are not semantic results.
-        let explicit_brain =
-            source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Brain);
-        let brain_plan = crate::brain::root_brain_query_plan(
-            search_needle,
-            explicit_brain,
-            advanced_predicate_active,
-            source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::Brain),
-            brain_options,
-        );
         let can_collect = matches!(self.current_view, AppView::ScriptList)
             && !self.menu_syntax_object_selector_state.owns_main_list()
             && !self.menu_syntax_trigger_picker_state.owns_main_list()
@@ -89,160 +40,316 @@ impl ScriptListApp {
                 .menu_syntax_mode
                 .capture_composer_owns_input_for(trimmed)
             && !self.menu_syntax_mode.command_owns_input_for(trimmed);
-        let eligible = can_collect
-            && brain_options.max_results > 0
-            && matches!(&brain_plan, crate::brain::RootBrainQueryPlan::Search(_));
-
-        if !eligible {
-            tracing::debug!(
-                target: "script_kit::brain",
-                query_sha256 = %crate::logging::log_private_user_value(trimmed),
-                query_bytes = trimmed.len(),
-                can_collect,
-                advanced_predicate_active,
-                allows = source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::Brain),
-                max_results = brain_options.max_results,
-                plan = match &brain_plan {
-                    crate::brain::RootBrainQueryPlan::Skip => "skip",
-                    crate::brain::RootBrainQueryPlan::RecentsOnly => "recents_only",
-                    crate::brain::RootBrainQueryPlan::Search(_) => "search",
-                },
-                "brain semantic pass ineligible"
-            );
-            self.clear_root_brain_semantic_state(cx);
-            return;
-        }
-        let crate::brain::RootBrainQueryPlan::Search(query_owned) = brain_plan else {
-            unreachable!("eligible implies Search plan");
+        let plan = if can_collect && options.max_results > 0 {
+            crate::brain::root_brain_query_plan(
+                search_needle,
+                explicit,
+                advanced.is_some_and(|query| query.has_predicates()),
+                source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::Brain),
+                options,
+            )
+        } else {
+            crate::brain::RootBrainQueryPlan::Skip
         };
-        tracing::debug!(
-            target: "script_kit::brain",
-            query_sha256 = %crate::logging::log_private_user_value(&query_owned),
-            query_bytes = query_owned.len(),
-            raw_query_sha256 = %crate::logging::log_private_user_value(trimmed),
-            raw_query_bytes = trimmed.len(),
-            "brain semantic pass starting"
-        );
+        (plan, options)
+    }
 
-        // Already have (or are fetching) this exact request — nothing to do.
-        if self
-            .root_search
-            .root_brain_semantic_request_matches(&query_owned, brain_options)
+    /// `false` joins the caller's query publication; `true` publishes a source
+    /// change atomically against the already committed interaction snapshot.
+    pub(crate) fn refresh_root_brain_lexical_for_query(
+        &mut self,
+        value: &str,
+        allow_reorder: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || value != self.computed_filter_text.as_str()
+            || self.root_search.root_brain_lexical_request_is_current()
         {
             return;
         }
-
+        let (plan, options) = self.root_brain_search_plan_for_query(value);
+        let work_query = match &plan {
+            crate::brain::RootBrainQueryPlan::Skip => return,
+            crate::brain::RootBrainQueryPlan::RecentsOnly => "",
+            crate::brain::RootBrainQueryPlan::Search(query) => query.as_str(),
+        };
         let generation = self
             .root_search
-            .begin_root_brain_semantic_request(query_owned.clone(), brain_options);
+            .allocate_named_provider_generation("brain-lexical");
+        let owned_gate = self.main_services.search_gate();
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                "brain-lexical",
+                work_query,
+                generation,
+                RootProviderPublicationPolicy::VisibleSynchronous,
+            ) else {
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
+        let result = if let Some(run) = &owned_run {
+            let Ok(result) =
+                run.read_synchronously(|outcome, run| F::brain_result(outcome, run, false))
+            else {
+                // A refused control has no native IO outcome or publication policy.
+                return;
+            };
+            result
+        } else if let Some(sources) = self.main_services.owned_sources() {
+            Ok(sources.brain_hits.clone())
+        } else {
+            match &plan {
+                crate::brain::RootBrainQueryPlan::RecentsOnly => {
+                    crate::brain::recent_root_brain_hits(options.max_results)
+                }
+                crate::brain::RootBrainQueryPlan::Search(query) => {
+                    crate::brain::search_root_brain_direct(query, &options)
+                }
+                crate::brain::RootBrainQueryPlan::Skip => {
+                    unreachable!("ineligible read returned before admission")
+                }
+            }
+        };
+        self.root_search.begin_named_provider(
+            "brain-lexical",
+            generation,
+            work_query,
+            "",
+            RootProviderPublicationPolicy::VisibleSynchronous,
+            true,
+        );
+        let terminal = F::ProviderTerminal::for_result(&result);
+        let apply = |app: &mut Self, _cx: &mut Context<Self>| {
+            let changed = app.root_search.install_root_brain_lexical_results(
+                generation,
+                result,
+                options.max_results,
+            );
+            app.root_search
+                .finish_named_provider("brain-lexical", generation, terminal.into());
+            if let Some(run) = &owned_run {
+                run.finish(terminal, RootProviderPublicationPolicy::VisibleSynchronous);
+            }
+            if changed {
+                app.invalidate_root_passive_and_grouped_cache();
+            }
+            changed
+        };
+        if allow_reorder {
+            self.commit_main_menu_results_refresh(
+                "brain_lexical_refresh_complete",
+                Some(("brain-lexical", generation)),
+                cx,
+                apply,
+            );
+        } else {
+            apply(self, cx);
+        }
+    }
 
+    pub(crate) fn maybe_start_root_brain_semantic_search(
+        &mut self,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.current_view, AppView::ScriptList)
+            || !self.root_search.query_is_current()
+            || value != self.computed_filter_text.as_str()
+        {
+            return;
+        }
+        let (plan, options) = self.root_brain_search_plan_for_query(value);
+        let crate::brain::RootBrainQueryPlan::Search(query) = plan else {
+            self.root_search.invalidate_root_brain_semantic_freshness();
+            return;
+        };
+        if self
+            .root_search
+            .root_brain_semantic_request_matches(&query, options)
+        {
+            return;
+        }
+        self.root_search.note_desired_provider(
+            "brain-semantic",
+            value,
+            "",
+            RootProviderPublicationPolicy::Visible,
+        );
+        let Some(generation) = self
+            .root_search
+            .begin_root_brain_semantic_request(query.clone(), options)
+        else {
+            return;
+        };
+        let services = self.main_services.clone();
+        let owned_gate = services.search_gate();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(
                     ROOT_BRAIN_SEMANTIC_DEBOUNCE_MS,
                 ))
                 .await;
-
-            // Debounce: bail before embedding when a newer request started.
-            let still_current = cx
-                .update(|cx| {
-                    this.update(cx, |app, _| {
-                        app.root_search
+            let current = this
+                .update(cx, |app, cx| {
+                    if matches!(app.current_view, AppView::ScriptList)
+                        && app
+                            .root_search
                             .root_brain_semantic_generation_matches(generation)
-                    })
+                    {
+                        return true;
+                    }
+                    let released = app.root_search.finish_root_brain_semantic_request(
+                        generation,
+                        RootProviderTerminal::Cancelled,
+                    );
+                    if released
+                        && app
+                            .root_search
+                            .take_named_provider_desired("brain-semantic")
+                    {
+                        let value = app.computed_filter_text.clone();
+                        app.maybe_start_root_brain_semantic_search(&value, cx);
+                    }
+                    false
                 })
                 .unwrap_or(false);
-            if !still_current {
+            if !current {
                 return;
             }
 
-            // Embed + hybrid search on a dedicated thread: the embed call
-            // blocks up to its 200ms budget and the search hits sqlite.
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn({
-                let query_owned = query_owned.clone();
-                move || {
-                    let _ = tx.send(crate::brain::search_root_brain_semantic(
-                        &query_owned,
-                        &brain_options,
+            // Admit at production's IO boundary, after the real debounce fence.
+            let owned_run = if let Some(gate) = &owned_gate {
+                let Some(run) = gate.begin(
+                    "brain-semantic",
+                    &query,
+                    generation,
+                    RootProviderPublicationPolicy::Visible,
+                ) else {
+                    let _ = this.update(cx, |app, _cx| {
+                        app.root_search.finish_root_brain_semantic_request(
+                            generation,
+                            RootProviderTerminal::Cancelled,
+                        );
+                    });
+                    return;
+                };
+                Some(run)
+            } else {
+                None
+            };
+            let (tx, rx) = async_channel::bounded(1);
+            if let Some(run) = &owned_run {
+                run.deliver(
+                    move |result| tx.try_send(result),
+                    |outcome, run| F::brain_result(outcome, run, true).map(Some),
+                )
+                .await;
+            } else if let Some(sources) = services.owned_sources() {
+                cx.background_executor().timer(sources.file_delay).await;
+                let _ = tx.try_send(Ok(Some(sources.brain_hits.clone())));
+            } else {
+                let worker_query = query.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send_blocking(crate::brain::search_root_brain_semantic(
+                        &worker_query,
+                        &options,
                     ));
-                }
-            });
-
-            let outcome = loop {
-                match rx.try_recv() {
-                    Ok(outcome) => break outcome,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(16))
-                            .await;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
-                }
-            };
-
-            // None => no warm embedding model (or worker died): lexical stays.
-            let Some(hits) = outcome else {
-                tracing::debug!(
-                    target: "script_kit::brain",
-                    query_sha256 = %crate::logging::log_private_user_value(&query_owned),
-                    query_bytes = query_owned.len(),
-                    "brain semantic pass skipped (no warm embed model)"
+                });
+            }
+            let result = rx.recv().await;
+            let updated = this.update(cx, |app, cx| {
+                app.apply_root_brain_semantic_completion(
+                    generation,
+                    query,
+                    result,
+                    owned_run.as_ref(),
+                    cx,
                 );
-                return;
-            };
-            tracing::debug!(
-                target: "script_kit::brain",
-                query_sha256 = %crate::logging::log_private_user_value(&query_owned),
-                query_bytes = query_owned.len(),
-                hits = hits.len(),
-                "brain semantic results ready"
-            );
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    app.apply_root_brain_semantic_results_for_generation(
-                        generation,
-                        query_owned,
-                        hits,
-                        cx,
-                    );
-                })
             });
+            if updated.is_err() {
+                if let Some(run) = &owned_run {
+                    run.finish(
+                        F::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
+                }
+            }
         })
         .detach();
     }
 
-    /// Publish a semantic batch if it's still the newest request. Bumps the
-    /// semantic epoch (part of `RootPassiveFrameKey`) and invalidates the
-    /// passive frame + grouped cache so the next paint re-merges brain hits.
-    fn apply_root_brain_semantic_results_for_generation(
+    fn apply_root_brain_semantic_completion(
         &mut self,
         generation: u64,
         query: String,
-        hits: Vec<crate::brain::RootBrainSearchHit>,
+        result: std::result::Result<
+            anyhow::Result<Option<Vec<crate::brain::RootBrainSearchHit>>>,
+            async_channel::RecvError,
+        >,
+        owned_run: Option<&F::SearchRun>,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .root_search
-            .install_root_brain_semantic_results(generation, query, hits)
+        let released = if !matches!(self.current_view, AppView::ScriptList)
+            || !self
+                .root_search
+                .root_brain_semantic_generation_matches(generation)
         {
-            return;
-        }
-        if matches!(self.current_view, AppView::ScriptList) {
-            // Identity-preserving landing, matching every other async source
-            // (files/tabs/history/windows): snapshot selection and viewport
-            // BEFORE the re-splice so provider timing moves neither one.
-            let interaction_before = self.main_menu_interaction_snapshot();
-            self.invalidate_root_passive_and_grouped_cache();
-            self.reconcile_script_list_after_results_refresh(
-                "brain_semantic_results_applied",
-                interaction_before,
-                cx,
+            let released = self.root_search.finish_root_brain_semantic_request(
+                generation,
+                RootProviderTerminal::StaleDiscarded,
             );
+            if let Some(run) = owned_run {
+                run.finish(
+                    F::ProviderTerminal::StaleDiscarded,
+                    RootProviderPublicationPolicy::Visible,
+                );
+            }
+            released
         } else {
-            self.invalidate_root_passive_and_grouped_cache();
+            let terminal = match &result {
+                Ok(Ok(Some(hits))) => F::ProviderTerminal::Completed { count: hits.len() },
+                Ok(Ok(None)) => F::ProviderTerminal::Unavailable,
+                Ok(Err(error)) => F::ProviderTerminal::for_error(error),
+                Err(_) => F::ProviderTerminal::Disconnected,
+            };
+            let mut released = false;
+            self.commit_main_menu_results_refresh(
+                "brain_semantic_refresh_complete",
+                Some(("brain-semantic", generation)),
+                cx,
+                |app, _cx| {
+                    let changed = match result {
+                        Ok(Ok(Some(hits))) => app
+                            .root_search
+                            .install_root_brain_semantic_results(generation, query, hits),
+                        _ => false,
+                    };
+                    released = app
+                        .root_search
+                        .finish_root_brain_semantic_request(generation, terminal.into());
+                    if let Some(run) = owned_run {
+                        run.finish(terminal, RootProviderPublicationPolicy::Visible);
+                    }
+                    if changed {
+                        app.invalidate_root_passive_and_grouped_cache();
+                    }
+                    changed
+                },
+            );
+            released
+        };
+        if released
+            && self
+                .root_search
+                .take_named_provider_desired("brain-semantic")
+        {
+            let value = self.computed_filter_text.clone();
+            self.maybe_start_root_brain_semantic_search(&value, cx);
         }
-        cx.notify();
     }
 }

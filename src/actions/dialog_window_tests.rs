@@ -207,7 +207,7 @@ fn clipboard_copy_is_second_action() {
 // =========================================================================
 
 #[test]
-fn chat_no_messages_no_response_has_only_continue() {
+fn chat_no_messages_no_response_has_no_transcript_actions() {
     let info = ChatPromptInfo {
         current_model: None,
         available_models: vec![],
@@ -220,8 +220,7 @@ fn chat_no_messages_no_response_has_only_continue() {
     assert!(ids.contains(&"chat:continue_in_chat"));
     assert!(!ids.contains(&"chat:copy_response"));
     assert!(!ids.contains(&"chat:clear_conversation"));
-    // change_model + continue_in_chat + capture_screen_area
-    assert_eq!(actions.len(), 3);
+    crate::actions::dialog_builtin_validation::assert_chat_root_contract(&info, &actions);
 }
 
 #[test]

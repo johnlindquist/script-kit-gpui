@@ -51,6 +51,7 @@ fn detached_agent_chat_targeting_flow() {
         semantic_surface: Some("scriptList".into()),
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,
@@ -67,6 +68,7 @@ fn detached_agent_chat_targeting_flow() {
         semantic_surface: Some("agentChatChat".into()),
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,
@@ -123,6 +125,7 @@ fn multiple_detached_agent_chat_windows_indexed() {
         semantic_surface: Some("agentChatChat".into()),
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,
@@ -138,6 +141,7 @@ fn multiple_detached_agent_chat_windows_indexed() {
         semantic_surface: Some("agentChatChat".into()),
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,
@@ -196,6 +200,7 @@ fn agent_chat_simulate_gpui_event_request_round_trip() {
             request_id,
             target,
             event,
+            ..
         } => {
             assert_eq!(request_id, "agent_chat-sim-1");
             assert!(target.is_some());
@@ -227,6 +232,7 @@ fn agent_chat_window_close_removes_from_registry() {
         semantic_surface: Some("agentChatChat".into()),
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,
@@ -269,6 +275,7 @@ fn agent_chat_visibility_toggle() {
         semantic_surface: None,
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: None,
         generation: None,

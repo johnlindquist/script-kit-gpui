@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 usage() {
   echo "usage: bash scripts/verify.sh [--skip-bundle] [--only <phase>]" >&2
   echo "phases: fmt check clippy test test-compile integration-tests domain-tests first-run-fixtures permissions-fixtures mock-ai-fixtures privacy-fixtures proof-contracts consistency-catalog sdk-types sdk-tests pi-sidecar bundle bundle-sidecar bundle-verify" >&2
+  echo "proof-contracts uses source-bound project artifact fixtures: run it only while all Cargo builds and native evaluators are idle" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -154,6 +155,7 @@ require_clean_source_identity() {
     scripts/devtools/__tests__/client-lib.test.ts
     scripts/devtools/receipt-output.test.ts
     scripts/devtools/receipt-schema.test.ts
+    scripts/devtools/receipt-artifact.test.ts
     scripts/devtools/coverage.test.ts
     scripts/devtools/runtime-coverage.test.ts
     scripts/devtools/performance-contract.test.ts
@@ -164,6 +166,7 @@ require_clean_source_identity() {
     scripts/devtools/lib/evidence-class.ts
     scripts/devtools/lib/task-proof-policy.ts
     scripts/devtools/lib/receipt-schema.ts
+    scripts/devtools/lib/receipt-artifact.ts
     scripts/devtools/lib/runtime-coverage.ts
     scripts/devtools/family-fixtures.ts
     scripts/devtools/family-fixtures.test.ts
@@ -181,7 +184,7 @@ require_clean_source_identity() {
     scripts/devtools/design-conflicts.test.ts
     scripts/devtools/generated-byte-compare.ts
     scripts/devtools/generated-byte-compare.test.ts
-    scripts/devtools/alpha-byte-contract-harness.rs
+    src/theme/alpha.rs
     scripts/devtools/alpha-byte-contract.test.ts
     scripts/devtools/glass-entry-motion-contract.test.ts
     scripts/devtools/glass-lifecycle-filmstrip.test.ts
@@ -238,6 +241,7 @@ require_clean_source_identity() {
     scripts/agentic/compiler-input-paths.txt
     scripts/agentic/cargo-cache-locks.sh
     scripts/agentic/cargo-build-policy.test.ts
+    scripts/agentic/human-development-shell.test.ts
     scripts/agentic/reuse-rust-test-binary.sh
     scripts/agentic/build-isolated-binary.sh
     scripts/agentic/cargo-timings-summary.ts
@@ -337,20 +341,23 @@ run_step() {
   shift
   local test_log="${SCRIPT_KIT_VERIFY_TEST_LOG:-}"
 
+  # Output destinations and dirty-source authority belong to this verifier,
+  # not nested verifiers launched by children. Keep them in this parent only.
+
   printf "\n[verify] RUN  %s :: %s\n" "$name" "$*"
   if [[ -n "${test_log}" ]]; then
     mkdir -p "$(dirname "${test_log}")"
   fi
 
   if [[ -n "${test_log}" ]]; then
-    if "$@" 2>&1 | tee "${test_log}"; then
+    if (unset SCRIPT_KIT_VERIFY_TEST_LOG SCRIPT_KIT_VERIFY_RECEIPT SCRIPT_KIT_ALLOW_DIRTY_DIAGNOSTIC_EVIDENCE SCRIPT_KIT_DIRTY_EVIDENCE_OWNER_PATHS; "$@") 2>&1 | tee "${test_log}"; then
       printf "[verify] PASS %s\n" "$name"
     else
       local exit_code="${PIPESTATUS[0]}"
       printf "[verify] FAIL %s (exit %s)\n" "$name" "$exit_code" >&2
       exit "$exit_code"
     fi
-  elif "$@"; then
+  elif (unset SCRIPT_KIT_VERIFY_TEST_LOG SCRIPT_KIT_VERIFY_RECEIPT SCRIPT_KIT_ALLOW_DIRTY_DIAGNOSTIC_EVIDENCE SCRIPT_KIT_DIRTY_EVIDENCE_OWNER_PATHS; "$@"); then
     printf "[verify] PASS %s\n" "$name"
   else
     local exit_code=$?
@@ -364,7 +371,7 @@ run_step_quiet() {
   shift
 
   printf "\n[verify] RUN  %s :: %s\n" "$name" "$*"
-  if "$@" >/dev/null; then
+  if (unset SCRIPT_KIT_VERIFY_TEST_LOG SCRIPT_KIT_VERIFY_RECEIPT SCRIPT_KIT_ALLOW_DIRTY_DIAGNOSTIC_EVIDENCE SCRIPT_KIT_DIRTY_EVIDENCE_OWNER_PATHS; "$@") >/dev/null; then
     printf "[verify] PASS %s\n" "$name"
   else
     local exit_code=$?
@@ -386,6 +393,39 @@ run_sdk_tests() {
   bun "${REPO_ROOT}/scripts/release-evidence.ts" sdk-summary --result "${receipt_path}"
 }
 
+run_proof_tests() (
+  # This subshell alone owns the reporter. Never reuse a prior run's XML or
+  # export its destination to nested verifiers started by the behavior tests.
+  local reporter_dir
+  reporter_dir="$(mktemp -d "${TMPDIR:-/tmp}/script-kit-proof-junit.XXXXXXXX")" || exit $?
+  local reporter_path="${reporter_dir}/bun.xml"
+  trap 'rm -f -- "${reporter_path}"; rmdir -- "${reporter_dir}"' EXIT
+
+  if bun test --isolate --timeout 30000 --reporter=junit --reporter-outfile "${reporter_path}" "$@"; then
+    if [[ ! -f "${reporter_path}" || -L "${reporter_path}" || ! -s "${reporter_path}" ]]; then
+      echo "[verify] REFUSED missing or empty native Bun JUnit reporter" >&2
+      exit 65
+    fi
+    # run_step retains these exact producer bytes in the same hashed test log.
+    # A child may leave this shared pipe nonblocking. Restore backpressure so
+    # a large native report cannot be truncated by an EAGAIN from plain cat.
+    python3 - "${reporter_path}" <<'PY' || exit $?
+import os
+import shutil
+import sys
+
+os.set_blocking(1, True)
+sys.stdout.buffer.write(b"\n[verify] BEGIN bun-junit\n")
+with open(sys.argv[1], "rb") as report:
+    shutil.copyfileobj(report, sys.stdout.buffer)
+sys.stdout.buffer.flush()
+PY
+    printf '\n[verify] END bun-junit\n'
+  else
+    exit $?
+  fi
+)
+
 write_gate_evidence() {
   local phase="$1"
   local receipt_path="${SCRIPT_KIT_VERIFY_RECEIPT:-}"
@@ -393,8 +433,7 @@ write_gate_evidence() {
   local source_sha
   local gate_id
   local diagnostic_owner
-  local result_args=()
-  local provenance_args=()
+  local result_path=""
   local diagnostic_owners=()
 
   if [[ -z "${receipt_path}" ]]; then
@@ -406,21 +445,21 @@ write_gate_evidence() {
       gate_id="rust-tests"
       evidence_class="UNIT_BEHAVIOR"
       if [[ -n "${SCRIPT_KIT_VERIFY_TEST_LOG:-}" ]]; then
-        result_args=(--result "${SCRIPT_KIT_VERIFY_TEST_LOG}")
+        result_path="${SCRIPT_KIT_VERIFY_TEST_LOG}"
       fi
       ;;
     integration-tests|domain-tests|first-run-fixtures|permissions-fixtures|mock-ai-fixtures|privacy-fixtures)
       gate_id="${phase}"
       evidence_class="UNIT_BEHAVIOR"
       if [[ -n "${SCRIPT_KIT_VERIFY_TEST_LOG:-}" ]]; then
-        result_args=(--result "${SCRIPT_KIT_VERIFY_TEST_LOG}")
+        result_path="${SCRIPT_KIT_VERIFY_TEST_LOG}"
       fi
       ;;
     proof-contracts)
       gate_id="${phase}"
       evidence_class="UNIT_BEHAVIOR"
       if [[ -n "${SCRIPT_KIT_VERIFY_TEST_LOG:-}" ]]; then
-        result_args=(--result "${SCRIPT_KIT_VERIFY_TEST_LOG}")
+        result_path="${SCRIPT_KIT_VERIFY_TEST_LOG}"
       fi
       ;;
     consistency-catalog)
@@ -431,7 +470,7 @@ write_gate_evidence() {
       gate_id="sdk-tests"
       evidence_class="SDK_BEHAVIOR"
       if [[ -n "${SCRIPT_KIT_SDK_TEST_RECEIPT:-}" ]]; then
-        result_args=(--result "${SCRIPT_KIT_SDK_TEST_RECEIPT}")
+        result_path="${SCRIPT_KIT_SDK_TEST_RECEIPT}"
       fi
       ;;
     *)
@@ -440,24 +479,31 @@ write_gate_evidence() {
       ;;
   esac
 
+  source_sha="${GITHUB_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}"
+  # Bash 3.2 with nounset rejects expansion of an empty optional argv array.
+  # Start with required arguments and append options to this nonempty array.
+  local receipt_args=(
+    "${REPO_ROOT}/scripts/release-evidence.ts" gate
+    --gate "${gate_id}"
+    --class "${evidence_class}"
+    --source-sha "${source_sha}"
+    --output "${receipt_path}"
+  )
+  if [[ -n "${result_path}" ]]; then
+    receipt_args+=(--result "${result_path}")
+  fi
+
   if [[ "${SCRIPT_KIT_ALLOW_DIRTY_DIAGNOSTIC_EVIDENCE:-0}" == "1" ]]; then
-    provenance_args+=(--diagnostic-dirty)
+    receipt_args+=(--diagnostic-dirty)
     if [[ -n "${SCRIPT_KIT_DIRTY_EVIDENCE_OWNER_PATHS:-}" ]]; then
       IFS=':' read -r -a diagnostic_owners <<< "${SCRIPT_KIT_DIRTY_EVIDENCE_OWNER_PATHS}"
       for diagnostic_owner in "${diagnostic_owners[@]}"; do
-        provenance_args+=(--owner "${diagnostic_owner}")
+        receipt_args+=(--owner "${diagnostic_owner}")
       done
     fi
   fi
 
-  source_sha="${GITHUB_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}"
-  bun "${REPO_ROOT}/scripts/release-evidence.ts" gate \
-    --gate "${gate_id}" \
-    --class "${evidence_class}" \
-    --source-sha "${source_sha}" \
-    --output "${receipt_path}" \
-    "${result_args[@]}" \
-    "${provenance_args[@]}"
+  bun "${receipt_args[@]}"
 }
 
 run_phase() {
@@ -510,10 +556,15 @@ run_phase() {
         -- --exact
       ;;
     proof-contracts)
+      # These source-bound fixtures use the real project's artifact registry and
+      # metadata/pool leases. Run this phase exclusively, including test teardown;
+      # overlapping Cargo or native evaluation can invalidate ownership evidence.
+      # Isolate file globals and leaked handles without parallelizing shared roots.
       run_step "generated-surface-contracts" bun scripts/generate-surface-contracts.ts --check
       run_step_quiet "consistency-family-fixtures" bun scripts/devtools/family-fixtures.ts
-      run_step "proof-contracts" bun test --timeout 30000 \
+      run_step "proof-contracts" run_proof_tests \
         ./scripts/release-evidence.test.ts \
+        ./scripts/generate-surface-contracts.test.ts \
         ./scripts/devtools/consistency.test.ts \
         ./scripts/devtools/surface.test.ts \
         ./scripts/devtools/surfaces-bindings.test.ts \
@@ -530,6 +581,7 @@ run_phase() {
         ./scripts/devtools/__tests__/client-lib.test.ts \
         ./scripts/devtools/receipt-output.test.ts \
         ./scripts/devtools/receipt-schema.test.ts \
+        ./scripts/devtools/receipt-artifact.test.ts \
         ./scripts/devtools/runtime-task-proof.test.ts \
         ./scripts/devtools/workflow-task-proof.test.ts \
         ./scripts/devtools/coverage.test.ts \
@@ -548,6 +600,11 @@ run_phase() {
         ./scripts/devtools/glass-lifecycle-filmstrip.test.ts \
         ./scripts/devtools/rapid-toggle-stress.test.ts \
         ./scripts/agentic/cargo-build-policy.test.ts \
+        ./scripts/agentic/human-development-shell.test.ts \
+        ./scripts/agentic/artifact-lifecycle.test.ts \
+        ./scripts/agentic/owned-process.test.ts \
+        ./scripts/devtools/build-ops.test.ts \
+        ./scripts/devtools/lib/build-ops-inventory.test.ts \
         ./scripts/agentic/macos-input.test.ts \
         ./scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts \
         ./scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts \

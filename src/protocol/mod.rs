@@ -74,6 +74,9 @@ pub use io::{serialize_message, JsonlReader, ParseIssueKind};
 pub use message::{capabilities, Message};
 #[allow(unused_imports)]
 pub use semantic_id::{generate_semantic_id, generate_semantic_id_named, value_to_slug};
+pub(crate) use types::design_evaluation::{
+    parse_owned_frame_cursor, validate_search_run_ids, MAX_SEARCH_RELEASE_RUNS,
+};
 #[allow(unused_imports)]
 pub use types::{
     default_suggested_hit_points, default_surface_hit_point, target_bounds_in_screenshot,
@@ -115,4 +118,20 @@ pub use types::{
     AI_RELIABILITY_STATE_SCHEMA_VERSION, AUTOMATION_INSPECT_SCHEMA_VERSION,
     AUTOMATION_SURFACE_SCHEMA_VERSION, AUTOMATION_WINDOW_SCHEMA_VERSION,
     LAUNCHER_SURFACE_CONTRACT_SCHEMA_VERSION, TRANSACTION_TRACE_SCHEMA_VERSION,
+};
+
+#[cfg(any(test, feature = "owned-ui-evaluation"))]
+pub use types::{
+    AgentChatFixtureCommand, DesignCommand, DictationFixtureCommand, DictationFixtureDestination,
+    EvaluationLimits, FixtureControl, FixtureDescriptor, FlowFixtureCommand, NativeSafetyProbe,
+    NotesFixtureCommand, ObservedEffect, OwnedFileSearchPreviewCondition,
+    OwnedFileSearchStreamCondition, OwnedFrameCursor, OwnedResponseCodec, OwnedResponseEncoding,
+    OwnedRuntimeIdentity, OwnedSearchProviderCondition, OwnedSearchProviderSource,
+    OwnedSearchQueryStamp, ScheduledFrameRequirement, ScopedActionReceipt, SdkChatFixtureCommand,
+    SdkCompletionChannel, SdkPromptCommand, SdkPromptFixtureId, SearchFixtureCommand,
+    ThemeFaultOperation, ThemeFixtureCommand, OWNED_RESPONSE_CODEC,
+};
+pub use types::{
+    CompletedFrameIdentity, LiveThemeEdit, ThemeInvalidation, ThemeInvalidationCause,
+    MAX_LIVE_THEME_EDITS, OWNED_EVALUATION_LIMITS,
 };

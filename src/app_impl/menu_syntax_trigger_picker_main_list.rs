@@ -117,12 +117,6 @@ impl ScriptListApp {
         matches!(self.current_view, crate::AppView::ScriptList)
             && self.menu_syntax_trigger_picker_state.owns_main_list()
     }
-    /// Update the cached selected row id from a mouse-driven picker
-    /// selection change. The picker renders from this state on the next
-    /// sync.
-    pub(crate) fn set_menu_syntax_trigger_picker_selection(&mut self, row_id: String) {
-        self.menu_syntax_trigger_picker_state.selected_row_id = Some(row_id);
-    }
 
     pub(crate) fn arm_menu_syntax_trigger_picker_enter_guard(&mut self, route: &'static str) {
         self.menu_syntax_trigger_picker_enter_guard = Some(std::time::Instant::now());
@@ -167,12 +161,9 @@ impl ScriptListApp {
         consume
     }
 
-    /// Apply the Accept outcome for a clicked picker row. Mouse-click path
-    /// only — keyboard goes through
-    /// [`apply_menu_syntax_trigger_picker_intent`], which has access to
-    /// `&mut Window` and can therefore re-sync the picker after a
-    /// `keep_open` apply. Mouse clicks always close the picker (the row
-    /// action produces Accept, not Apply).
+    /// Accept the current canonical picker row for pointer or semantic callers.
+    /// Returns whether an actionable outcome was dispatched; keep-open state
+    /// is settled before the replacement query is published.
     pub(crate) fn accept_menu_syntax_trigger_picker_row(
         &mut self,
         row_id: &str,
@@ -192,7 +183,31 @@ impl ScriptListApp {
                 cx,
             );
         }
+        if !self.menu_syntax_trigger_picker_owns_main_keyboard() {
+            return false;
+        }
 
+        let Some(crate::ResolvedMainMenuSelection::SearchResult {
+            row,
+            result: crate::scripts::SearchResult::SpineProjection(projection),
+            ..
+        }) = self.resolved_main_menu_selected_subject()
+        else {
+            return false;
+        };
+        if !row.eligibility.activatable
+            || !matches!(&projection.action, crate::spine::SpineListAction::AcceptMenuSyntaxTrigger { row_id: owner_id } if owner_id.as_ref() == row_id)
+            || projection.id.as_ref().strip_prefix("menu-syntax-trigger:") != Some(row_id)
+        {
+            return false;
+        }
+        let observation = crate::MainMenuDispatchObservation {
+            query: self.root_search.query_stamp(),
+            stable_key: row.stable_key.clone(),
+            content_fingerprint: row.content_fingerprint.clone(),
+            status: "dispatchRequested",
+            reason: None,
+        };
         let Some(snapshot) = self
             .menu_syntax_trigger_picker_state
             .snapshot
@@ -239,54 +254,16 @@ impl ScriptListApp {
             Some(selected_index),
             &raw_filter_text,
         );
-        let keep_open = matches!(
+        if matches!(
             outcome,
-            crate::menu_syntax::TriggerPickerIntentOutcome::ReplaceInput {
-                keep_open: true,
-                ..
-            }
-        );
-
-        let has_window = window.is_some();
-        self.dispatch_menu_syntax_trigger_picker_outcome(Some(row_id), outcome, window, cx);
-        if keep_open && !has_window {
-            let text = self.filter_text.clone();
-            let picker_ctx = self.menu_syntax_trigger_picker_context(&text);
-            let transition = crate::menu_syntax_trigger_picker::plan_trigger_picker_transition(
-                &self.menu_syntax_trigger_picker_state,
-                &text,
-                &picker_ctx,
-            );
-            use crate::menu_syntax_trigger_picker::TriggerPickerTransition;
-            match transition {
-                TriggerPickerTransition::NoChange => {}
-                TriggerPickerTransition::Close => {
-                    self.menu_syntax_trigger_picker_state = Default::default();
-                }
-                TriggerPickerTransition::Open {
-                    snapshot,
-                    selected_row_id,
-                }
-                | TriggerPickerTransition::Update {
-                    snapshot,
-                    selected_row_id,
-                } => {
-                    self.menu_syntax_trigger_picker_state =
-                        crate::menu_syntax_trigger_picker::MenuSyntaxTriggerPickerState {
-                            snapshot: Some(snapshot),
-                            selected_row_id,
-                            visible_start: 0,
-                        };
-                }
-            }
-            self.invalidate_grouped_cache();
-            self.reconcile_script_list_after_filter_change(
-                "menu_syntax_trigger_picker_keep_open_main_list",
-                cx,
-            );
-            cx.notify();
+            crate::menu_syntax::TriggerPickerIntentOutcome::Ignored
+                | crate::menu_syntax::TriggerPickerIntentOutcome::SelectionChanged { .. }
+        ) {
+            return false;
         }
-        keep_open
+        self.dispatch_menu_syntax_trigger_picker_outcome(Some(row_id), outcome, window, cx);
+        self.set_main_menu_dispatch_observation(Some(observation));
+        true
     }
 
     fn dispatch_menu_syntax_trigger_picker_outcome(
@@ -318,15 +295,10 @@ impl ScriptListApp {
                 } else {
                     Self::menu_syntax_type_filter_accept_label(&text).map(|_| text.clone())
                 };
-                // Stage the replacement — render() will reconcile the GPUI
-                // InputState on the next frame (needs `&mut Window`). The
-                // input history, fallback state, and grouped cache all key
-                // off `computed_filter_text`, so updating it directly keeps
-                // the main list in sync for the current frame.
+                // Stage the replacement; the input widget synchronizes on its
+                // next frame, after the final picker owner is committed below.
                 self.filter_text = text.clone();
                 self.pending_filter_sync = true;
-                self.computed_filter_text = text.clone();
-                self.set_menu_syntax_mode_from_filter(&text);
 
                 if keep_open {
                     // Re-run the picker state machine against the new filter
@@ -334,6 +306,34 @@ impl ScriptListApp {
                     // for the next picker snapshot, not the stale one.
                     if let Some(window) = window {
                         self.run_menu_syntax_trigger_picker_state_machine(&text, window, cx);
+                    } else {
+                        let picker_ctx = self.menu_syntax_trigger_picker_context(&text);
+                        let transition =
+                            crate::menu_syntax_trigger_picker::plan_trigger_picker_transition(
+                                &self.menu_syntax_trigger_picker_state,
+                                &text,
+                                &picker_ctx,
+                            );
+                        use crate::menu_syntax_trigger_picker::TriggerPickerTransition;
+                        match transition {
+                            TriggerPickerTransition::NoChange => {}
+                            TriggerPickerTransition::Close => {
+                                self.menu_syntax_trigger_picker_state = Default::default();
+                            }
+                            TriggerPickerTransition::Open {
+                                snapshot,
+                                selected_row_id,
+                            }
+                            | TriggerPickerTransition::Update {
+                                snapshot,
+                                selected_row_id,
+                            } => {
+                                self.menu_syntax_trigger_picker_state =
+                                    crate::menu_syntax_trigger_picker::MenuSyntaxTriggerPickerState {
+                                        snapshot: Some(snapshot), selected_row_id, visible_start: 0,
+                                    };
+                            }
+                        }
                     }
                 } else {
                     self.menu_syntax_trigger_picker_state = Default::default();
@@ -351,11 +351,7 @@ impl ScriptListApp {
                     self.menu_syntax_trigger_picker_suppressed_filter = Some(text.clone());
                 }
 
-                self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_trigger_picker_replace",
-                    cx,
-                );
+                self.flush_pending_main_menu_query(cx);
                 if let Some(filter) = filter_accept_hint_filter {
                     self.arm_menu_syntax_filter_accept_hint(&filter);
                     self.invalidate_main_window_preflight();
@@ -365,11 +361,7 @@ impl ScriptListApp {
             }
             TriggerPickerIntentOutcome::Close => {
                 self.menu_syntax_trigger_picker_state = Default::default();
-                self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_trigger_picker_close",
-                    cx,
-                );
+                self.flush_pending_main_menu_query(cx);
                 cx.notify();
             }
             TriggerPickerIntentOutcome::OpenCaptures { .. }
@@ -378,11 +370,7 @@ impl ScriptListApp {
                 // For now, treat as a close so the picker dismisses instead
                 // of lingering with a stale snapshot.
                 self.menu_syntax_trigger_picker_state = Default::default();
-                self.invalidate_grouped_cache();
-                self.reconcile_script_list_after_filter_change(
-                    "menu_syntax_trigger_picker_close_deferred",
-                    cx,
-                );
+                self.flush_pending_main_menu_query(cx);
                 cx.notify();
             }
             TriggerPickerIntentOutcome::CreateHandler { target } => {
@@ -421,6 +409,7 @@ impl ScriptListApp {
                     }
                 }
                 self.menu_syntax_trigger_picker_state = Default::default();
+                self.flush_pending_main_menu_query(cx);
                 cx.notify();
             }
             TriggerPickerIntentOutcome::AiScaffoldHandler {
@@ -485,25 +474,19 @@ impl ScriptListApp {
     }
 
     pub(crate) fn selected_menu_syntax_trigger_row_id_from_main_list(&mut self) -> Option<String> {
-        self.menu_syntax_trigger_row_id_from_main_list_index(self.selected_index)
-    }
-
-    pub(crate) fn menu_syntax_trigger_row_id_from_main_list_index(
-        &mut self,
-        grouped_index: usize,
-    ) -> Option<String> {
-        let (grouped, flat) = self.get_grouped_results_cached();
-        let crate::list_item::GroupedListItem::Item(flat_index) = grouped.get(grouped_index)?
+        let crate::ResolvedMainMenuSelection::SearchResult {
+            result: crate::scripts::SearchResult::SpineProjection(row),
+            ..
+        } = self.resolved_main_menu_selected_subject()?
         else {
             return None;
         };
-        let Some(crate::scripts::SearchResult::SpineProjection(row)) = flat.get(*flat_index) else {
-            return None;
-        };
-        row.id
-            .as_ref()
-            .strip_prefix("menu-syntax-trigger:")
-            .map(str::to_string)
+        match &row.action {
+            crate::spine::SpineListAction::AcceptMenuSyntaxTrigger { row_id } => {
+                Some(row_id.to_string())
+            }
+            _ => None,
+        }
     }
 
     fn sync_menu_syntax_form_selection_from_trigger_row(&mut self, row_id: Option<&str>) {
@@ -519,6 +502,7 @@ impl ScriptListApp {
         self.menu_syntax_form_suggestion_field_id = None;
         self.menu_syntax_form_suggestion_selected_index = None;
         self.menu_syntax_trigger_picker_state = Default::default();
+        self.flush_pending_main_menu_query(cx);
         cx.notify();
     }
 
@@ -679,6 +663,41 @@ impl ScriptListApp {
                 _ => {}
             }
         }
+        if matches!(self.current_view, crate::AppView::ScriptList)
+            && !self.menu_syntax_trigger_picker_state_is_form_suggestion()
+        {
+            self.flush_pending_main_menu_query(cx);
+        }
+        let main_list_activation = self.menu_syntax_trigger_picker_owns_main_keyboard()
+            && !self.menu_syntax_trigger_picker_state_is_form_suggestion()
+            && matches!(
+                intent,
+                crate::menu_syntax::InlinePickerKeyIntent::Accept
+                    | crate::menu_syntax::InlinePickerKeyIntent::Apply
+                    | crate::menu_syntax::InlinePickerKeyIntent::SecondaryAction
+                    | crate::menu_syntax::InlinePickerKeyIntent::CreateAction
+            );
+        let observation = if main_list_activation {
+            self.set_main_menu_dispatch_observation(None);
+            let Some(subject) = self.resolved_main_menu_selected_subject() else {
+                return false;
+            };
+            let crate::ResolvedMainMenuSelection::SearchResult { row, .. } = subject else {
+                return false;
+            };
+            if !row.eligibility.activatable {
+                return false;
+            }
+            Some(crate::MainMenuDispatchObservation {
+                query: self.root_search.query_stamp(),
+                stable_key: row.stable_key.clone(),
+                content_fingerprint: row.content_fingerprint.clone(),
+                status: "dispatchRequested",
+                reason: None,
+            })
+        } else {
+            None
+        };
 
         let Some(snapshot) = self
             .menu_syntax_trigger_picker_state
@@ -689,16 +708,21 @@ impl ScriptListApp {
             return false;
         };
 
-        let selected_row_id = self
-            .selected_menu_syntax_trigger_row_id_from_main_list()
-            .or_else(|| {
-                self.menu_syntax_trigger_picker_state
-                    .selected_row_id
-                    .clone()
-            });
+        let selected_row_id = self.selected_menu_syntax_trigger_row_id_from_main_list();
+        if main_list_activation && selected_row_id.is_none() {
+            return false;
+        }
+        let selected_row_id = selected_row_id.or_else(|| {
+            self.menu_syntax_trigger_picker_state
+                .selected_row_id
+                .clone()
+        });
         let selected_index = selected_row_id
             .as_deref()
             .and_then(|id| snapshot.rows.iter().position(|row| row.id == id));
+        if main_list_activation && selected_index.is_none() {
+            return false;
+        }
 
         let raw_filter_text = self.filter_text.clone();
         let outcome =
@@ -707,6 +731,34 @@ impl ScriptListApp {
         match outcome {
             crate::menu_syntax::TriggerPickerIntentOutcome::SelectionChanged { new_index } => {
                 let next_row_id = snapshot.rows.get(new_index).map(|row| row.id.clone());
+                if self.menu_syntax_trigger_picker_owns_main_keyboard()
+                    && !self.menu_syntax_trigger_picker_state_is_form_suggestion()
+                {
+                    let Some(id) = next_row_id.as_deref() else {
+                        return false;
+                    };
+                    let Some(index) = self.main_menu_committed_rows().iter().find_map(|row| {
+                        (row.eligibility.selectable
+                            && row.stable_key.strip_prefix("menu-syntax-trigger:") == Some(id))
+                        .then_some(row.grouped_index)
+                    }) else {
+                        return false;
+                    };
+                    if !self.select_main_menu_row(
+                        index,
+                        crate::MainMenuSelectionOrigin::Keyboard,
+                        cx,
+                    ) {
+                        return false;
+                    }
+                    self.reveal_main_list_selection_above_footer(
+                        "menu_syntax_trigger_picker_selection",
+                    );
+                    self.schedule_main_list_selection_reveal_above_footer(
+                        "menu_syntax_trigger_picker_selection",
+                        cx,
+                    );
+                }
                 self.menu_syntax_trigger_picker_state.visible_start =
                     crate::menu_syntax_trigger_picker::trigger_picker_visible_start_for_selection(
                         self.menu_syntax_trigger_picker_state.visible_start,
@@ -725,6 +777,9 @@ impl ScriptListApp {
             crate::menu_syntax::TriggerPickerIntentOutcome::Ignored => false,
             other => {
                 self.dispatch_menu_syntax_trigger_picker_outcome(None, other, Some(window), cx);
+                if let Some(observation) = observation {
+                    self.set_main_menu_dispatch_observation(Some(observation));
+                }
                 true
             }
         }

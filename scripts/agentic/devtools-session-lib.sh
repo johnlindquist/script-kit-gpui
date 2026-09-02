@@ -6,6 +6,17 @@ DEVTOOLS_SESSION_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEVTOOLS_SESSION_BINARY="${SCRIPT_KIT_GPUI_BINARY:-${DEVTOOLS_SESSION_REPO_ROOT}/target/debug/script-kit-gpui}"
 DEVTOOLS_SESSION_START_TS="${SECONDS:-0}"
 
+resolve_session_artifact() {
+  [[ -n "${SCRIPT_KIT_ARTIFACT_REFERENCE:-}" ]] || return 0
+  local verified
+  verified="$(bun "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/build-artifact.ts" verify-reference "$DEVTOOLS_SESSION_REPO_ROOT" "$SCRIPT_KIT_ARTIFACT_REFERENCE")" || return
+  if [[ -n "${SCRIPT_KIT_GPUI_BINARY:-}" && "$SCRIPT_KIT_GPUI_BINARY" != "$verified" ]]; then
+    echo 'session artifact disagrees with explicit binary' >&2; return 78
+  fi
+  DEVTOOLS_SESSION_BINARY="$verified"
+  export SCRIPT_KIT_GPUI_BINARY="$verified"
+}
+
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' '
 }

@@ -249,6 +249,8 @@ pub(crate) fn replace_registered_focused_text(
     options: super::mutation::TextMutationOptions,
     now_ms: u128,
 ) -> Result<super::mutation::TextMutationResult, super::FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| super::FocusedTextError::Platform(error.to_string()))?;
     let target = registered_target(session_id, options, now_ms)?;
     if set_whole_text_direct(target.element, text).is_err() {
         paste_replace_fallback(&target, text)?;
@@ -275,6 +277,8 @@ pub(crate) fn append_registered_focused_text(
     options: super::mutation::TextMutationOptions,
     now_ms: u128,
 ) -> Result<super::mutation::TextMutationResult, super::FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| super::FocusedTextError::Platform(error.to_string()))?;
     let target = registered_target(session_id, options, now_ms)?;
     let current = match whole_text(target.element) {
         Ok(current) => current,
@@ -358,6 +362,7 @@ fn prune_stale_sessions_locked(
 /// the user came from.
 #[cfg(target_os = "macos")]
 pub(crate) fn focused_ui_element_for_pid(pid: i32) -> Result<OwnedAxElement> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let app = unsafe { AXUIElementCreateApplication(pid) };
     let app = OwnedAxElement::from_create_rule(app)?;
     let value = copy_attribute(app.as_ptr(), AX_FOCUSED_UI_ELEMENT)?;
@@ -366,6 +371,7 @@ pub(crate) fn focused_ui_element_for_pid(pid: i32) -> Result<OwnedAxElement> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn focused_ui_element_for_app(pid: Option<i32>) -> Result<OwnedAxElement> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let system = unsafe { AXUIElementCreateSystemWide() };
     let system = OwnedAxElement::from_create_rule(system)?;
     if let Ok(value) = copy_attribute(system.as_ptr(), AX_FOCUSED_UI_ELEMENT) {
@@ -463,6 +469,8 @@ pub(crate) fn set_whole_text_direct(
     element: AXUIElementRef,
     text: &str,
 ) -> Result<(), super::FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| super::FocusedTextError::Platform(error.to_string()))?;
     let value =
         create_cf_string(text).map_err(|err| super::FocusedTextError::Platform(err.to_string()))?;
     let attr = create_cf_string(AX_VALUE)
@@ -481,6 +489,8 @@ pub(crate) fn set_selected_text_range(
     element: AXUIElementRef,
     range: super::TextRangeUtf16,
 ) -> Result<(), super::FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| super::FocusedTextError::Platform(error.to_string()))?;
     let cf_range = CFRange {
         location: range.location as isize,
         length: range.length as isize,
@@ -636,6 +646,8 @@ fn refocus_registered_target_for_paste(
 
 #[cfg(target_os = "macos")]
 fn activate_application_for_pid(pid: i32) -> Result<(), super::FocusedTextError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)
+        .map_err(|error| super::FocusedTextError::Platform(error.to_string()))?;
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
 
@@ -811,6 +823,7 @@ fn element_rect(element: AXUIElementRef) -> Option<super::geometry::RectPx> {
 
 #[cfg(target_os = "macos")]
 fn copy_attribute(element: AXUIElementRef, attribute: &str) -> Result<CFTypeRef> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let attr = create_cf_string(attribute)?;
     let mut value: CFTypeRef = std::ptr::null();
     let result = unsafe { AXUIElementCopyAttributeValue(element, attr, &mut value) };
@@ -827,6 +840,7 @@ fn copy_parameterized_attribute(
     attribute: &str,
     parameter: CFTypeRef,
 ) -> Result<CFTypeRef> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let attr = create_cf_string(attribute)?;
     let mut value: CFTypeRef = std::ptr::null();
     let result =
@@ -875,7 +889,7 @@ fn cf_string_to_string_if_string(value: CFTypeRef) -> Option<String> {
         let ok = CFStringGetCString(
             value as CFStringRef,
             buffer.as_mut_ptr(),
-            buffer_size as i64,
+            buffer_size,
             K_CF_STRING_ENCODING_UTF8,
         );
         if !ok {

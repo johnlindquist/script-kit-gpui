@@ -2,6 +2,7 @@
 
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { filePath } from "./lib/privacy.ts";
+import { readReceiptDocument, resolveReceiptDetails } from "./lib/receipt-artifact.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -45,9 +46,6 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-async function readJson(path: string): Promise<JsonObject> {
-  return JSON.parse(await Bun.file(path).text()) as JsonObject;
-}
 
 function asObject(value: unknown): JsonObject {
   return typeof value === "object" && value !== null ? value as JsonObject : {};
@@ -203,8 +201,8 @@ function classify(assertions: JsonObject, args: Args, red: JsonObject, green: Js
 
 async function main() {
   const args = parseArgs(Bun.argv.slice(2));
-  const red = await readJson(args.red);
-  const green = await readJson(args.green);
+  const red = resolveReceiptDetails(readReceiptDocument(args.red), args.red);
+  const green = resolveReceiptDetails(readReceiptDocument(args.green), args.green);
   const redStack = primitiveStack(red);
   const greenStack = primitiveStack(green);
   const redTargetSelector = targetSelector(red);

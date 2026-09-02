@@ -97,6 +97,7 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=SCRIPT_KIT_TRACK_GIT_HEAD");
+    println!("cargo:rerun-if-env-changed=SCRIPT_KIT_PROVENANCE_GENERATION");
 
     // Trigger rebuild when SDK source changes (it's embedded via include_str!)
     println!("cargo:rerun-if-changed=scripts/kit-sdk.ts");

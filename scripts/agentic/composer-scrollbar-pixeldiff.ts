@@ -23,7 +23,7 @@ const driver = await Driver.launch({
 });
 
 try {
-  await driver.request({ type: "show" }, { expect: "externalCommandResult" }).catch(() => {});
+  await driver.request({ type: "show" }, { expect: "windowVisibilityAck" }).catch(() => {});
   await driver.request(
     { type: "openAgentChatKitchenSinkFixture" },
     { expect: "externalCommandResult", timeoutMs: 15_000 },

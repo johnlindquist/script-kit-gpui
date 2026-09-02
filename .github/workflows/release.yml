@@ -11,6 +11,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  RUST_TEST_THREADS: "2"
+  CMAKE_BUILD_PARALLEL_LEVEL: "1"
+  SDK_TEST_CONCURRENCY: "2"
   # Incremental Rust units bypass sccache; release runners reuse remote cache.
   CARGO_INCREMENTAL: "0"
   SCRIPT_KIT_NONINTERACTIVE: "1"
@@ -40,10 +44,11 @@ jobs:
     needs: validate-version
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
         with:
-          components: rustfmt
+          bun-version: 1.2.21
       - name: Validate format
         run: bash scripts/verify.sh --skip-bundle --only fmt
 
@@ -56,8 +61,11 @@ jobs:
       RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -76,10 +84,11 @@ jobs:
       RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
         with:
-          components: clippy
+          bun-version: 1.2.21
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -99,8 +108,8 @@ jobs:
       RUST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
@@ -159,7 +168,8 @@ jobs:
     needs: validate-version
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
@@ -173,16 +183,17 @@ jobs:
           SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-proof-evidence/consistency-catalog.json
         run: bash scripts/verify.sh --skip-bundle --only consistency-catalog
       - name: Build the exact non-GUI design token exporter
-        run: >-
-          env CARGO_BUILD_JOBS=2 ./scripts/agentic/agent-cargo.sh
-          build --jobs 2 --locked --bin export_design_tokens
+        run: |
+          mkdir -p .test-output/release
+          bun scripts/devtools/devtools.ts build-ops act exporter-build \
+            --artifact-out .test-output/release/exporter.reference.json
       - name: Prove generated design JSON and CSS match the authoritative exporter
         run: |
           bun scripts/devtools/generated-byte-compare.ts \
-            --binary target-agent/pools/agent-debug/debug/export_design_tokens \
-            --source-sha "$GITHUB_SHA" \
-            --out .artifacts/consistency/GOV-005/generated-byte-compare.json
-          cp .artifacts/consistency/GOV-005/generated-byte-compare.json \
+            --artifact .test-output/release/exporter.reference.json \
+            --source-policy clean-exact-head \
+            --out .test-output/release/generated-byte-compare.json
+          cp .test-output/release/generated-byte-compare.json \
             "$RUNNER_TEMP/release-proof-evidence/generated-design-contracts-proof.json"
           bun scripts/release-evidence.ts gate \
             --gate generated-design-contracts \
@@ -269,8 +280,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -295,7 +309,7 @@ jobs:
         run: cargo bundle --help >/dev/null
 
       - name: Build release bundle
-        run: cargo bundle --release --bin script-kit-gpui
+        run: cargo bundle --release --bin script-kit-gpui --features owned-ui-evaluation
 
       - name: Zip unsigned app bundle
         run: |
@@ -321,8 +335,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml at repo root pins the actual channel; this action installs whatever it asks for.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -336,6 +353,9 @@ jobs:
           key: pi-sidecar-${{ runner.os }}-${{ runner.arch }}-${{ env.PI_AGENT_RUST_REF }}-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: Prepare bundled Pi sidecar
+        env:
+          SCRIPT_KIT_NONINTERACTIVE: "0"
+          PI_AGENT_RUST_TARGET_DIR: ${{ runner.temp }}/pi_agent_rust-target
         run: bash scripts/prepare-pi-sidecar.sh
 
       - name: Verify Pi sidecar
@@ -364,6 +384,8 @@ jobs:
       - build-pi-sidecar
     steps:
       - uses: actions/checkout@v4
+      - name: Install root-pinned Rust toolchain
+        run: bash scripts/install-root-rust-toolchain.sh
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -409,6 +431,16 @@ jobs:
           mkdir -p target/pi-sidecar
           /usr/bin/ditto -x -k artifacts/pi/pi-sidecar.zip target/pi-sidecar
           chmod 0755 target/pi-sidecar/pi
+
+      - name: Build and install the exact pre-sign compile artifact
+        run: |
+          mkdir -p .test-output/release
+          bun scripts/devtools/devtools.ts build-ops act app-build \
+            --profile release --features owned-ui-evaluation \
+            --artifact-out .test-output/release/compile.reference.json
+          COMPILE_BINARY="$(bun scripts/agentic/build-artifact.ts verify-reference "$PWD" .test-output/release/compile.reference.json)"
+          cp "$COMPILE_BINARY" "target/release/bundle/osx/Script Kit.app/Contents/MacOS/script-kit-gpui"
+          chmod 0755 "target/release/bundle/osx/Script Kit.app/Contents/MacOS/script-kit-gpui"
 
       - name: Install Pi sidecar into bundle
         run: bash scripts/install-pi-sidecar-into-bundle.sh
@@ -519,13 +551,20 @@ jobs:
             --result "$ATTESTATION" \
             --output "$RUNNER_TEMP/release-evidence/packaged-signing.json"
 
+      - name: Publish immutable signed and stapled bundle derivation
+        run: |
+          bun scripts/devtools/devtools.ts build-ops act publish-signed-bundle \
+            --input .test-output/release/compile.reference.json \
+            --bundle "target/release/bundle/osx/Script Kit.app" \
+            --attestation "$RUNNER_TEMP/distribution-security-attestation.json" \
+            --artifact-out .test-output/release/signed.reference.json
+
       - name: Prove the exact signed packaged binary without showing a window
         run: |
           APP_PATH="target/release/bundle/osx/Script Kit.app"
           RECEIPT=".test-output/release/packaged-root-frame.json"
-          SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1 \
-            bun scripts/agentic/root-search-frame-stability.ts \
-            --binary "$APP_PATH/Contents/MacOS/script-kit-gpui" \
+          bun scripts/agentic/root-search-frame-stability.ts \
+            --artifact .test-output/release/signed.reference.json --packaged \
             --receipt "$RECEIPT"
           bun scripts/release-evidence.ts gate \
             --gate packaged-root-frame \

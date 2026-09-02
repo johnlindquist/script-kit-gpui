@@ -102,6 +102,8 @@ pub struct TextInputState {
     text: String,
     /// Selection state (anchor and cursor positions)
     selection: TextSelection,
+    /// Monotonic mutation epoch; cloned with the state, never restored by undo.
+    revision: u64,
     /// Previous edit snapshots (bounded; oldest entries are dropped first)
     undo_stack: VecDeque<TextSnapshot>,
     /// Snapshots that can be restored after an undo
@@ -119,6 +121,7 @@ impl TextInputState {
         Self {
             text: String::new(),
             selection: TextSelection::caret(0),
+            revision: 0,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
         }
@@ -131,6 +134,7 @@ impl TextInputState {
         Self {
             text,
             selection: TextSelection::caret(len), // Cursor at end
+            revision: 0,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
         }
@@ -140,6 +144,14 @@ impl TextInputState {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Revision of this state's text, caret, and selection.
+    ///
+    /// Effective edits and navigation advance it, including undo/redo; reads and
+    /// no-ops do not. Clones retain the current revision and then evolve independently.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn cursor(&self) -> usize {
@@ -211,7 +223,7 @@ impl TextInputState {
     /// Place the caret at a specific character index, clamped to the text length.
     pub fn set_cursor(&mut self, cursor: usize) {
         let clamped = cursor.min(self.text.chars().count());
-        self.selection = TextSelection::caret(clamped);
+        self.set_selection(TextSelection::caret(clamped));
     }
 
     pub fn clear(&mut self) {
@@ -385,13 +397,16 @@ impl TextInputState {
         if !extend_selection && !self.selection.is_empty() {
             // Collapse to start of selection
             let (start, _) = self.selection.range();
-            self.selection = TextSelection::caret(start);
+            self.set_selection(TextSelection::caret(start));
         } else if self.selection.cursor > 0 {
             let new_pos = self.selection.cursor - 1;
             if extend_selection {
-                self.selection.cursor = new_pos;
+                self.set_selection(TextSelection {
+                    anchor: self.selection.anchor,
+                    cursor: new_pos,
+                });
             } else {
-                self.selection = TextSelection::caret(new_pos);
+                self.set_selection(TextSelection::caret(new_pos));
             }
         }
     }
@@ -402,13 +417,16 @@ impl TextInputState {
         if !extend_selection && !self.selection.is_empty() {
             // Collapse to end of selection
             let (_, end) = self.selection.range();
-            self.selection = TextSelection::caret(end);
+            self.set_selection(TextSelection::caret(end));
         } else if self.selection.cursor < len {
             let new_pos = self.selection.cursor + 1;
             if extend_selection {
-                self.selection.cursor = new_pos;
+                self.set_selection(TextSelection {
+                    anchor: self.selection.anchor,
+                    cursor: new_pos,
+                });
             } else {
-                self.selection = TextSelection::caret(new_pos);
+                self.set_selection(TextSelection::caret(new_pos));
             }
         }
     }
@@ -416,9 +434,12 @@ impl TextInputState {
     /// Move cursor to start of line, optionally extending selection
     pub fn move_to_start(&mut self, extend_selection: bool) {
         if extend_selection {
-            self.selection.cursor = 0;
+            self.set_selection(TextSelection {
+                anchor: self.selection.anchor,
+                cursor: 0,
+            });
         } else {
-            self.selection = TextSelection::caret(0);
+            self.set_selection(TextSelection::caret(0));
         }
     }
 
@@ -426,9 +447,12 @@ impl TextInputState {
     pub fn move_to_end(&mut self, extend_selection: bool) {
         let len = self.text.chars().count();
         if extend_selection {
-            self.selection.cursor = len;
+            self.set_selection(TextSelection {
+                anchor: self.selection.anchor,
+                cursor: len,
+            });
         } else {
-            self.selection = TextSelection::caret(len);
+            self.set_selection(TextSelection::caret(len));
         }
     }
 
@@ -436,9 +460,12 @@ impl TextInputState {
     pub fn move_word_left(&mut self, extend_selection: bool) {
         let new_pos = self.find_word_boundary_left();
         if extend_selection {
-            self.selection.cursor = new_pos;
+            self.set_selection(TextSelection {
+                anchor: self.selection.anchor,
+                cursor: new_pos,
+            });
         } else {
-            self.selection = TextSelection::caret(new_pos);
+            self.set_selection(TextSelection::caret(new_pos));
         }
     }
 
@@ -446,19 +473,22 @@ impl TextInputState {
     pub fn move_word_right(&mut self, extend_selection: bool) {
         let new_pos = self.find_word_boundary_right();
         if extend_selection {
-            self.selection.cursor = new_pos;
+            self.set_selection(TextSelection {
+                anchor: self.selection.anchor,
+                cursor: new_pos,
+            });
         } else {
-            self.selection = TextSelection::caret(new_pos);
+            self.set_selection(TextSelection::caret(new_pos));
         }
     }
 
     /// Select all text
     pub fn select_all(&mut self) {
         let len = self.text.chars().count();
-        self.selection = TextSelection {
+        self.set_selection(TextSelection {
             anchor: 0,
             cursor: len,
-        };
+        });
     }
 
     // === Clipboard Operations ===
@@ -649,15 +679,34 @@ impl TextInputState {
         pos
     }
 
+    fn advance_revision(&mut self) {
+        // Never wrap to an old epoch and accidentally accept an ABA-stale destination.
+        assert!(self.revision < u64::MAX, "text input revision exhausted");
+        self.revision += 1;
+    }
+
+    fn set_selection(&mut self, selection: TextSelection) {
+        if self.selection != selection {
+            self.advance_revision();
+            self.selection = selection;
+        }
+    }
+
     fn restore_snapshot(&mut self, snapshot: TextSnapshot) {
+        if self.text != snapshot.text || self.selection != snapshot.selection {
+            self.advance_revision();
+        }
         self.text = snapshot.text;
         self.selection = snapshot.selection;
     }
 
+    /// Begin an effective text/selection edit, after its no-op checks.
+    /// Compound edits record once, before their internal selection/deletion steps.
     fn record_edit_snapshot(&mut self) {
         let snapshot = TextSnapshot::capture(self);
         Self::push_snapshot(&mut self.undo_stack, snapshot);
         self.redo_stack.clear();
+        self.advance_revision();
     }
 
     fn push_snapshot(stack: &mut VecDeque<TextSnapshot>, snapshot: TextSnapshot) {

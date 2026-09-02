@@ -113,6 +113,8 @@ fn debounced_log_state() -> &'static DebouncedLogState {
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum KeyboardMonitorError {
+    #[error("{0}")]
+    PolicyRefused(crate::runtime_policy::EffectRefusal),
     #[error(
         "Accessibility permissions not granted. Please enable in System Preferences > Privacy & Security > Accessibility"
     )]
@@ -211,6 +213,11 @@ impl KeyboardMonitor {
     /// Returns true if the application has been granted accessibility permissions.
     /// If false, the monitor will fail to start.
     pub fn has_accessibility_permission() -> bool {
+        if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+            .is_err()
+        {
+            return false;
+        }
         accessibility::application_is_trusted()
     }
 
@@ -220,6 +227,11 @@ impl KeyboardMonitor {
     /// haven't been granted yet. Returns true if permissions are granted.
     #[allow(dead_code)]
     pub fn request_accessibility_permission() -> bool {
+        if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)
+            .is_err()
+        {
+            return false;
+        }
         accessibility::application_is_trusted_with_prompt()
     }
 
@@ -233,6 +245,8 @@ impl KeyboardMonitor {
     /// - `AlreadyRunning` - Monitor is already running
     /// - `EventTapCreationFailed` - Failed to create the event tap
     pub fn start(&mut self) -> Result<(), KeyboardMonitorError> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::GlobalMonitor)
+            .map_err(KeyboardMonitorError::PolicyRefused)?;
         // Check if already running
         if self.running.load(Ordering::SeqCst) {
             return Err(KeyboardMonitorError::AlreadyRunning);

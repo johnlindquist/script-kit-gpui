@@ -6,6 +6,8 @@
 
 pub mod gpui_runtime_bridge;
 pub mod native_window_capture;
+#[cfg(target_os = "macos")]
+pub(crate) mod owned_render_capture;
 pub mod runtime_bridge;
 pub mod see;
 pub mod types;

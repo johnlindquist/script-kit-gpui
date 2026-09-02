@@ -1807,43 +1807,62 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
         // when config.ts does not override the same launcher command.
         let mut script_count = 0;
 
-        let all_scripts = scripts::read_scripts();
-        for script in &all_scripts {
-            if let Some(ref shortcut) = script.shortcut {
-                let command_id = script.launcher_command_id();
-                if registered_commands.contains(&command_id)
-                    || registered_commands.contains(&script.source_command_id())
-                {
-                    continue;
-                }
-                let path = script.path.to_string_lossy().to_string();
-                if register_script_hotkey_internal(&manager_guard, &path, shortcut, &script.name)
-                    .is_some()
-                {
-                    script_count += 1;
+        match scripts::read_scripts() {
+            Ok(all_scripts) => {
+                for script in &all_scripts {
+                    if let Some(ref shortcut) = script.shortcut {
+                        let command_id = script.launcher_command_id();
+                        if registered_commands.contains(&command_id)
+                            || registered_commands.contains(&script.source_command_id())
+                        {
+                            continue;
+                        }
+                        let path = script.path.to_string_lossy().to_string();
+                        if register_script_hotkey_internal(
+                            &manager_guard,
+                            &path,
+                            shortcut,
+                            &script.name,
+                        )
+                        .is_some()
+                        {
+                            script_count += 1;
+                        }
+                    }
                 }
             }
+            Err(error) => tracing::error!(%error, "script_hotkey_catalogue_read_failed"),
         }
 
-        let all_scriptlets = scripts::load_scriptlets();
-        for scriptlet in &all_scriptlets {
-            if let Some(ref shortcut) = scriptlet.shortcut {
-                let command_id = scriptlet.launcher_command_id();
-                if registered_commands.contains(&command_id)
-                    || registered_commands.contains(&scriptlet.source_command_id())
-                {
-                    continue;
-                }
-                let path = scriptlet
-                    .file_path
-                    .clone()
-                    .unwrap_or_else(|| scriptlet.name.clone());
-                if register_script_hotkey_internal(&manager_guard, &path, shortcut, &scriptlet.name)
-                    .is_some()
-                {
-                    script_count += 1;
+        match scripts::load_scriptlets() {
+            Ok(catalogue) => {
+                let all_scriptlets = catalogue.into_scriptlets();
+                for scriptlet in &all_scriptlets {
+                    if let Some(ref shortcut) = scriptlet.shortcut {
+                        let command_id = scriptlet.launcher_command_id();
+                        if registered_commands.contains(&command_id)
+                            || registered_commands.contains(&scriptlet.source_command_id())
+                        {
+                            continue;
+                        }
+                        let path = scriptlet
+                            .file_path
+                            .clone()
+                            .unwrap_or_else(|| scriptlet.name.clone());
+                        if register_script_hotkey_internal(
+                            &manager_guard,
+                            &path,
+                            shortcut,
+                            &scriptlet.name,
+                        )
+                        .is_some()
+                        {
+                            script_count += 1;
+                        }
+                    }
                 }
             }
+            Err(error) => tracing::error!(%error, "scriptlet_hotkey_catalogue_read_failed"),
         }
 
         logging::log(

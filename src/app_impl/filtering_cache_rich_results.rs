@@ -555,7 +555,7 @@ pub(crate) fn build_rich_provider_json_rows(
                 score: i32::MAX.saturating_sub(rank as i32),
                 is_selectable: true,
                 action_label: Some(ss("Attach")),
-                action: SpineListAction::Noop,
+                action: SpineListAction::AttachContextResult { source: ss(prefix) },
             }));
             grouped.push(GroupedListItem::Item(idx));
         }

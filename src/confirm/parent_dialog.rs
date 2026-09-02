@@ -355,12 +355,40 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
         "parent_confirm_dialog_building"
     );
 
-    window.activate_window();
+    let host_policy = if window.is_owned_hidden() {
+        crate::runtime_policy::WindowHostPolicy::OwnedHidden
+    } else {
+        crate::runtime_policy::WindowHostPolicy::Interactive
+    };
+    if !host_policy.is_hidden() {
+        window.activate_window();
+    }
 
     let keep_open_while: Rc<dyn Fn() -> bool> = Rc::new(keep_open_while);
     let parent_bounds = window.bounds();
     let display_id = window.display(cx).map(|d| d.id());
     let parent_window_handle = window.window_handle();
+    let parent_info = match &explicit_parent_automation_id {
+        Some(id) => crate::windows::automation_window_by_id(id),
+        None => crate::windows::list_automation_windows()
+            .into_iter()
+            .find(|info| {
+                info.generation.is_some_and(|generation| {
+                    crate::windows::get_runtime_window_handle_for_generation(&info.id, generation)
+                        == Some(parent_window_handle)
+                })
+            }),
+    };
+    let Some(parent_info) = parent_info else {
+        tracing::error!("confirm_parent_identity_missing");
+        return;
+    };
+    let Some(parent_generation) = parent_info.generation else {
+        tracing::error!("confirm_parent_generation_missing");
+        return;
+    };
+    let parent_automation_id = parent_info.id;
+    let parent_id_for_result = parent_automation_id.clone();
 
     let (result_tx, result_rx) = async_channel::bounded::<ParentDialogResult>(1);
 
@@ -381,10 +409,13 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
             "Result task: waiting for confirm popup result..."
         );
 
-        let result = result_rx
-            .recv()
-            .await
-            .unwrap_or(ParentDialogResult::Dismiss);
+        let result = match result_rx.recv().await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%error, "confirm_result_channel_closed");
+                return;
+            }
+        };
 
         tracing::info!(
             target: "script_kit::confirm",
@@ -393,6 +424,13 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
             "Result task: received result from confirm popup"
         );
 
+        if crate::windows::get_runtime_window_handle_for_generation(
+            &parent_id_for_result,
+            parent_generation,
+        ) != Some(parent_window_handle)
+        {
+            return;
+        }
         let update_result = cx.update_window(parent_window_handle, move |_, parent_window, cx| {
             tracing::info!(
                 target: "script_kit::confirm",
@@ -401,7 +439,9 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
                 "Result task: re-activating parent window and calling callback"
             );
 
-            parent_window.activate_window();
+            if !host_policy.is_hidden() {
+                parent_window.activate_window();
+            }
 
             match result {
                 ParentDialogResult::Primary => on_confirm_for_task(parent_window, cx),
@@ -439,19 +479,18 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
         width: options.width,
     };
 
-    let parent_automation_id =
-        explicit_parent_automation_id.or_else(crate::windows::focused_automation_window_id);
     match open_confirm_popup_window(
         cx,
         ConfirmPopupParentWindow {
             handle: parent_window_handle,
             bounds: parent_bounds,
             display_id,
-            automation_id: parent_automation_id,
+            automation_id: Some(parent_automation_id),
         },
         popup_options,
         keep_open_while,
         result_tx,
+        host_policy,
     ) {
         Ok(_handle) => {
             tracing::info!(

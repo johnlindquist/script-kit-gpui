@@ -3631,7 +3631,7 @@ pub(crate) fn build_failed_scripts_document(
 /// response always reflects the current disk state. This is cheap relative
 /// to MCP request cadence — script loading already runs at startup.
 fn read_kit_failed_scripts_resource() -> Result<ResourceContent, String> {
-    let report = crate::scripts::read_scripts_report();
+    let report = crate::scripts::read_scripts_report().map_err(|error| error.to_string())?;
     let merged = crate::scripts::merge_registered_scriptlet_validation_issues(&report.validation);
     let doc = build_failed_scripts_document(&merged);
     let json = serde_json::to_string_pretty(&doc)

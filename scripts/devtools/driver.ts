@@ -54,7 +54,12 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { Subprocess } from "bun";
+import { randomUUID } from "node:crypto";
+import { inflateSync } from "node:zlib";
+import { spawnOwnedProcess, isNativeLifecycleCandidate, validateNativeLifecycle, type NativeLifecycleObservation, type OwnedProcess } from "../agentic/owned-process.ts";
+import { beginManagedTask, adoptSupervisorTask, updateManagedTask, finalizeManagedTask, createOwnedStagingDirectory, claimOutput, validateOutputTarget,
+  type ManagedTask, type OwnedCleanup } from "../agentic/artifact-lifecycle.ts";
+import { verifyImmutableArtifact, type ArtifactReference, type VerifiedArtifact } from "../agentic/build-artifact.ts";
 import {
   clipboardCaptureFixtureCommand,
   gpuiKeyDownCommand,
@@ -64,46 +69,15 @@ import {
   assertNoninteractiveDriverLaunch,
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveUnownedSessionCommand,
+  consumeOwnedEvaluationPermit, assertOwnedEvaluationCommand, ownedEvaluationEnvironment,
+  OWNED_EVALUATION_GUARDS, type OwnedEvaluationPermit, type OwnedEvaluationFacts,
 } from "./lib/operator-safety.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
-/**
- * Both build paths produce a runnable binary: ./dev.sh owns target/debug and
- * agent-cargo.sh owns the shared agent pool. Historically the driver silently
- * defaulted to target/debug, so an agent that had just built via agent-cargo
- * verified a stale dev.sh binary. With no explicit override we now pick the
- * freshest candidate by mtime and say so on stderr.
- */
-const BINARY_CANDIDATES = [
-  join(PROJECT_ROOT, "target/debug/script-kit-gpui"),
-  join(PROJECT_ROOT, "target-agent/pools/agent-debug/debug/script-kit-gpui"),
-];
-
+/** Ordinary human development is deterministic; proof requires an explicit reference. */
+const BINARY_CANDIDATES = [join(PROJECT_ROOT, "target/debug/script-kit-gpui")];
 function resolveDefaultBinary(): string {
-  const explicit = process.env.SCRIPT_KIT_GPUI_BINARY;
-  if (explicit) return explicit;
-
-  const found = BINARY_CANDIDATES.flatMap((path) => {
-    try {
-      return [{ path, mtimeMs: statSync(path).mtimeMs }];
-    } catch {
-      return [];
-    }
-  }).sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-  if (found.length === 0) return BINARY_CANDIDATES[0];
-  const chosen = found[0];
-  if (found.length > 1) {
-    const stale = found[1];
-    const ageGapSec = Math.round((chosen.mtimeMs - stale.mtimeMs) / 1000);
-    console.error(
-      `[driver] binary: ${chosen.path} (freshest of ${found.length} candidates; ` +
-        `${stale.path} is ${ageGapSec}s older). Pass binary:/SCRIPT_KIT_GPUI_BINARY to override.`,
-    );
-  } else {
-    console.error(`[driver] binary: ${chosen.path} (only candidate present)`);
-  }
-  return chosen.path;
+  return process.env.SCRIPT_KIT_GPUI_BINARY ?? BINARY_CANDIDATES[0]!;
 }
 const READY_MARKER_STARTUP = "STARTUP_READY ";
 const READY_MARKER_APP =
@@ -218,10 +192,12 @@ let launchCounter = 0;
 
 export interface DriverOptions {
   /**
-   * Path to the app binary. Defaults to SCRIPT_KIT_GPUI_BINARY, else the
-   * freshest (by mtime) of target/debug and the agent-cargo pool binary.
+   * Path to the ordinary app binary. Defaults to SCRIPT_KIT_GPUI_BINARY,
+   * otherwise target/debug. Evaluator launches only use a verified reference.
    */
   binary?: string;
+  immutableArtifact?: ArtifactReference;
+  ownedEvaluation?: OwnedEvaluationPermit;
   /**
    * Session label reported to the app (logs/protocol bus). Treated as a
    * label, not an address: the derived artifact directory is always
@@ -295,11 +271,126 @@ export interface DriverStats {
   readyWaitMs: number;
 }
 
+export const PROTOCOL_VERSION = 2;
+export const MAX_PROTOCOL_REQUEST_BYTES = 16 * 1024;
+export const MAX_PROTOCOL_RESPONSE_BYTES = 6 * 1024 * 1024;
+export const OWNED_RESPONSE_ENCODING = "zlib-json-base64-v1";
+export const OWNED_RESPONSE_CODEC = Object.freeze({
+  version: 1, encoding: OWNED_RESPONSE_ENCODING, requestField: "responseEncoding",
+  responseType: "encodedResponse", delivery: "always",
+  maxDecodedBytes: MAX_PROTOCOL_RESPONSE_BYTES, maxCompressedBytes: 4 * 1024 * 1024,
+} as const);
+const RESPONSE_ENCODING_FIELDS = ["type", "version", "encoding", "requestId", "protocolVersion", "responseType", "decodedBytes", "compressedBytes", "payload"];
+const RESPONSE_BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const RESPONSE_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+export const RESPONSE_TYPES: Readonly<Record<string, string>> = {
+  getState: "stateResult", getElements: "elementsResult", getLayoutInfo: "layoutInfoResult",
+  getLogs: "logsResult", listAutomationWindows: "automationWindowListResult",
+  inspectAutomationWindow: "automationInspectResult",
+  getAgentChatState: "agent_chatStateResult",
+  getAgentChatTestProbe: "agent_chatTestProbeResult", getAiReliabilityState: "aiReliabilityStateResult",
+  setAiReliabilityTestFixture: "aiReliabilityTestFixtureResult",
+  performAgentChatSetupAction: "agent_chatSetupActionResult",
+  waitFor: "waitForResult", batch: "batchResult",
+  simulateGpuiEvent: "simulateGpuiEventResult", captureScreenshot: "screenshotResult",
+  show: "windowVisibilityAck", hide: "windowVisibilityAck",
+  triggerAction: "triggerActionResult", design: "designResult", captureRenderWindow: "captureRenderWindowResult",
+  inspectContextPreparation: "contextPreparationProbeResult",
+  openFocusedTextAgentChatWithMockData: "focusedTextAgentChatFixtureOpenResult",
+  ...Object.fromEntries([
+    "simulateKey", "simulateClick", "setFilter", "setInput", "setAgentChatInput", "setAgentChatTestFixture",
+    "setAgentChatTranscriptScroll", "agentChatEscape", "openAgentChatKitchenSinkFixture", "openAgentChatDetachedFixture",
+    "openFocusedTextAgentChatWithPiData", "openAiWithMockData", "openAi", "simulateMainHotkeyGesture",
+    "openMiniAiWithMockData", "triggerBuiltin", "openNotes", "openAbout", "pushDictationResult",
+    "setMenuSyntaxFormField", "openDictationOverlayFixture", "openConfirmPrompt", "showAiCommandBar",
+    "injectClipboardCaptureFixture", "openCreationFeedback",
+  ].map(type => [type, "externalCommandResult"])),
+};
+
+export class DriverProtocolError extends Error {
+  constructor(readonly code: string, readonly requestId: string | null = null) {
+    super(code); this.name = "DriverProtocolError";
+  }
+}
+export class DriverCommandRefused extends DriverProtocolError {}
+export class DriverLifecycleError extends Error {
+  constructor(message: string, readonly cleanup: OwnedCleanup, options?: ErrorOptions) {
+    super(message, options); this.name = "DriverLifecycleError";
+  }
+}
+/** Normalize one response body; legacy records retain identity and bus metadata stays caller-validated. */
+export function normalizeProtocolResponse(envelope: Json): Json {
+  if (envelope?.type !== OWNED_RESPONSE_CODEC.responseType) return envelope;
+  const invalid = (code: string): never => { throw new DriverProtocolError(code, envelope.requestId); };
+  const fields = Object.keys(envelope);
+  if (fields.length !== RESPONSE_ENCODING_FIELDS.length || fields.some(key => !RESPONSE_ENCODING_FIELDS.includes(key)) ||
+      envelope.type !== OWNED_RESPONSE_CODEC.responseType || envelope.version !== OWNED_RESPONSE_CODEC.version ||
+      envelope.encoding !== OWNED_RESPONSE_ENCODING || envelope.protocolVersion !== PROTOCOL_VERSION ||
+      typeof envelope.requestId !== "string" || !envelope.requestId ||
+      typeof envelope.responseType !== "string" || !envelope.responseType || envelope.responseType === OWNED_RESPONSE_CODEC.responseType ||
+      !Number.isSafeInteger(envelope.decodedBytes) || envelope.decodedBytes <= 0 || envelope.decodedBytes > OWNED_RESPONSE_CODEC.maxDecodedBytes ||
+      !Number.isSafeInteger(envelope.compressedBytes) || envelope.compressedBytes <= 0 || envelope.compressedBytes > OWNED_RESPONSE_CODEC.maxCompressedBytes ||
+      typeof envelope.payload !== "string") invalid("response_encoding_invalid_header");
+  const payload = envelope.payload as string;
+  const padding = (3 - envelope.compressedBytes % 3) % 3;
+  // Check canonical padding and unused bits without allocating a second full base64 string.
+  if (payload.length !== Math.ceil(envelope.compressedBytes / 3) * 4 || /[^A-Za-z0-9+/=]/.test(payload) ||
+      payload.indexOf("=") !== (padding ? payload.length - padding : -1) ||
+      (padding !== 0 && (!payload.endsWith(padding === 2 ? "==" : "=") ||
+        (RESPONSE_BASE64_ALPHABET.indexOf(payload[payload.length - padding - 1]!) & (padding === 2 ? 15 : 3)) !== 0)))
+    invalid("response_encoding_invalid_base64");
+  const compressed = Buffer.from(payload, "base64");
+  if (compressed.length !== envelope.compressedBytes) invalid("response_encoding_invalid_base64");
+  let decoded: Buffer;
+  try {
+    // Node's declarations omit the info:true return shape. bytesWritten rejects trailing streams/data.
+    const inflated = inflateSync(compressed, { info: true, maxOutputLength: envelope.decodedBytes }) as unknown as {
+      buffer: Buffer; engine: { bytesWritten: number };
+    };
+    if (!Buffer.isBuffer(inflated.buffer) || inflated.engine?.bytesWritten !== compressed.length)
+      invalid("response_encoding_invalid_stream");
+    decoded = inflated.buffer;
+  } catch { return invalid("response_encoding_invalid_stream"); }
+  if (decoded.length !== envelope.decodedBytes) return invalid("response_encoding_length_mismatch");
+  let response: Json;
+  try { response = JSON.parse(RESPONSE_UTF8_DECODER.decode(decoded)); }
+  catch { return invalid("response_encoding_invalid_json"); }
+  if (!response || typeof response !== "object" || Array.isArray(response) ||
+      response.requestId !== envelope.requestId || response.protocolVersion !== envelope.protocolVersion ||
+      response.type !== envelope.responseType) return invalid("response_encoding_identity_mismatch");
+  return response;
+}
+
+export async function boundedObservation<T>(promise: Promise<T>, timeoutMs: number): Promise<
+  { completed: true; value: T } | { completed: false; error: unknown }
+> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(value => ({ completed: true as const, value }), error => ({ completed: false as const, error })),
+      new Promise<{ completed: false; error: Error }>(resolveTimeout => {
+        timer = setTimeout(() => resolveTimeout({ completed: false, error: new Error("observation_deadline") }), timeoutMs);
+      }),
+    ]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
+export function unknownOwnedCleanup(acquired: boolean): OwnedCleanup {
+  return { resourcesAcquired: acquired, processExited: !acquired, processGroupExited: !acquired,
+    streamsDrained: !acquired, logWriterClosed: !acquired, ownedWindowsClosed: acquired ? null : true,
+    referencesFinalized: !acquired, closed: !acquired,
+    survivors: acquired ? [{ kind: "process-group", identity: "unknown", observation: "unknown" }] : [],
+    failureCodes: acquired ? ["cleanup_unobserved"] : [] };
+}
+
 interface Pending {
   resolve: (value: Json) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
-  expectedType: string | null;
+  expectedType: string;
+  protocolVersion: number;
+  responseEncoding?: typeof OWNED_RESPONSE_ENCODING;
+  cancelCommand?: Json;
 }
 
 /**
@@ -324,6 +415,40 @@ export abstract class ProtocolCore {
   protected requestCounter = 0;
   protected defaultTimeoutMs: number;
   protected requestIdPrefix: string;
+  readonly protocolFaults: string[] = [];
+  private readonly issuedRequestIds = new Set<string>();
+  private readonly correlationNonce = randomUUID();
+  protected requestLimit = 100_000;
+  private responseEncoding?: typeof OWNED_RESPONSE_ENCODING;
+
+  /** Call only after the native catalog advertises the exact bounded codec contract. */
+  enableResponseEncoding(encoding: typeof OWNED_RESPONSE_ENCODING): void {
+    if (encoding !== OWNED_RESPONSE_ENCODING) throw new DriverProtocolError("response_encoding_invalid");
+    this.responseEncoding = encoding;
+  }
+
+  protected authorizeCommand(command: Json): void { assertNoninteractiveProtocolCommand(command); }
+  protected onTransportFailure(_error: Error): void {}
+  protected fault(code: string): void {
+    if (this.protocolFaults.length < 128) this.protocolFaults.push(code);
+  }
+
+  protected onNativeLifecycle(_envelope: Json): void { this.fault("unexpected_native_lifecycle"); }
+
+  private payload(command: Json): Json {
+    this.authorizeCommand(command);
+    const protocolVersion = command.protocolVersion ?? PROTOCOL_VERSION;
+    if (protocolVersion !== 1 && protocolVersion !== PROTOCOL_VERSION)
+      throw new DriverProtocolError("unsupported_protocol_version");
+    const explicitEncoding = Object.hasOwn(command, "responseEncoding");
+    const responseEncoding = explicitEncoding ? command.responseEncoding : this.responseEncoding;
+    if ((explicitEncoding || responseEncoding !== undefined) && responseEncoding !== OWNED_RESPONSE_ENCODING)
+      throw new DriverProtocolError("response_encoding_invalid");
+    const payload = { ...command, protocolVersion, ...(responseEncoding === undefined ? {} : { responseEncoding }) };
+    if (Buffer.byteLength(JSON.stringify(payload)) + 1 > MAX_PROTOCOL_REQUEST_BYTES)
+      throw new DriverProtocolError("stdin_line_too_long");
+    return payload;
+  }
 
   protected constructor(defaultTimeoutMs: number, requestIdPrefix = "drv") {
     this.defaultTimeoutMs = defaultTimeoutMs;
@@ -343,93 +468,129 @@ export abstract class ProtocolCore {
 
   /** Fire-and-forget: write one command line to the transport. */
   send(command: Json): void {
-    assertNoninteractiveProtocolCommand(command);
-    this.writeCommand(command);
+    this.writeCommand(this.payload(command));
   }
 
-  /**
-   * Send a command and resolve when the response carrying the same requestId
-   * arrives. Event-driven — no polling subprocesses. The optional `expect`
-   * is advisory only (any typed response settles the request; callers
-   * inspect `type` themselves).
-   */
-  request(
-    command: Json,
-    opts: { expect?: string; timeoutMs?: number } = {},
-  ): Promise<Json> {
-    assertNoninteractiveProtocolCommand(command);
-    const requestId: string =
-      typeof command.requestId === "string" && command.requestId.length > 0
-        ? command.requestId
-        : `${this.requestIdPrefix}-${process.pid}-${++this.requestCounter}`;
-    const { requestId: _callerRequestId, ...commandWithoutRequestId } = command;
-    const payload: Json = { requestId, ...commandWithoutRequestId };
+  /** Correlate one unique request with its exact terminal type and protocol version. */
+  request(command: Json, opts: { expect?: string; timeoutMs?: number } = {}): Promise<Json> {
+    const known = RESPONSE_TYPES[String(command.type)];
+    const expectedType = opts.expect ?? known;
+    if (!expectedType) throw new DriverProtocolError("expected_response_type_required");
+    if (known && opts.expect && known !== opts.expect)
+      throw new DriverProtocolError("expected_response_type_conflicts_with_protocol");
+    if (command.requestId !== undefined && (typeof command.requestId !== "string" || !command.requestId || command.requestId.length > 192))
+      throw new DriverProtocolError("invalid_request_id");
+    const requestId: string = command.requestId ?? `${this.requestIdPrefix}-${this.correlationNonce}-${++this.requestCounter}`;
+    if (this.issuedRequestIds.has(requestId)) throw new DriverProtocolError("request_id_reused", requestId);
+    if (this.issuedRequestIds.size >= this.requestLimit) throw new DriverProtocolError("request_budget_exhausted");
     const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
-
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600_000)
+      throw new DriverProtocolError("invalid_request_timeout", requestId);
+    let deadlineUnixMs: number | undefined;
+    if (command.type === "simulateGpuiEvent") {
+      deadlineUnixMs = Math.min(command.deadlineUnixMs ?? Number.MAX_SAFE_INTEGER, Date.now() + timeoutMs);
+      if (!Number.isSafeInteger(deadlineUnixMs) || deadlineUnixMs < 0)
+        throw new DriverProtocolError("invalid_dispatch_deadline", requestId);
+    }
+    const payload = this.payload({ ...command, requestId, ...(deadlineUnixMs === undefined ? {} : { deadlineUnixMs }) });
+    this.issuedRequestIds.add(requestId);
     return new Promise<Json>((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        rejectPromise(
-          new Error(
-            `Timeout (${timeoutMs}ms) waiting for response to requestId '${requestId}' (${payload.type})`,
-          ),
-        );
-      }, timeoutMs);
-      this.pending.set(requestId, {
-        resolve: resolvePromise,
-        reject: rejectPromise,
-        timer,
-        expectedType: opts.expect ?? null,
-      });
+      const pending: Pending = {
+        resolve: resolvePromise, reject: rejectPromise, expectedType, protocolVersion: PROTOCOL_VERSION,
+        responseEncoding: payload.responseEncoding,
+        cancelCommand: command.type === "simulateGpuiEvent"
+          ? { type: "cancelGpuiEvent", requestId, protocolVersion: PROTOCOL_VERSION } : undefined,
+        timer: setTimeout(() => {
+          if (this.pending.get(requestId) !== pending) return;
+          this.pending.delete(requestId);
+          // Cancellation only revokes an already-authorized action. It grants no input authority.
+          if (pending.cancelCommand) {
+            try { this.writeCommand(pending.cancelCommand); } catch { /* transport already unavailable */ }
+          }
+          const error = new DriverProtocolError("response_timeout", requestId);
+          this.onTransportFailure(error);
+          rejectPromise(error);
+        }, timeoutMs),
+      };
+      this.pending.set(requestId, pending);
       this.stats.requestsSent += 1;
-      try {
-        this.writeCommand(payload);
-      } catch (error) {
-        clearTimeout(timer);
-        this.pending.delete(requestId);
-        rejectPromise(
-          error instanceof Error ? error : new Error(String(error)),
-        );
+      try { this.writeCommand(payload); }
+      catch (cause) {
+        clearTimeout(pending.timer); this.pending.delete(requestId);
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        this.onTransportFailure(error); rejectPromise(error);
       }
     });
   }
 
-  protected handleResponse(parsed: Json): void {
+  protected handleResponse(envelope: Json): void {
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) { this.fault("non_object_response"); return; }
+    let parsed = envelope;
+    if (Object.hasOwn(envelope, "response")) {
+      if (isNativeLifecycleCandidate(envelope.response)) { this.onNativeLifecycle(envelope); return; }
+      const nested = envelope.response;
+      if (!nested || typeof nested !== "object" || Array.isArray(nested) ||
+          envelope.requestId !== nested.requestId ||
+          envelope.responseType !== (nested.type === OWNED_RESPONSE_CODEC.responseType ? nested.responseType : nested.type) ||
+          envelope.protocolVersion !== nested.protocolVersion) {
+        this.fault("nested_response_identity_mismatch"); return;
+      }
+      parsed = nested;
+    }
+    if (isNativeLifecycleCandidate(parsed)) { this.onNativeLifecycle(parsed); return; }
     const requestId = parsed.requestId;
-    if (typeof requestId !== "string") return;
+    if (typeof requestId !== "string" || !requestId) { this.fault("missing_response_request_id"); return; }
     const pending = this.pending.get(requestId);
-    if (!pending) {
-      this.stats.unmatchedResponses += 1;
+    if (!pending) { this.stats.unmatchedResponses += 1; return; }
+    try {
+      if (parsed.type === OWNED_RESPONSE_CODEC.responseType) {
+        if (pending.responseEncoding !== OWNED_RESPONSE_ENCODING) throw new DriverProtocolError("response_encoding_unrequested", requestId);
+        parsed = normalizeProtocolResponse(parsed);
+      } else if (pending.responseEncoding !== undefined) throw new DriverProtocolError("response_encoding_missing", requestId);
+    } catch (cause) {
+      const error = cause instanceof DriverProtocolError ? cause : new DriverProtocolError("response_encoding_invalid", requestId);
+      this.fault(error.code);
+      this.pending.delete(requestId); clearTimeout(pending.timer); pending.reject(error);
+      this.onTransportFailure(error);
       return;
     }
-    this.pending.delete(requestId);
-    clearTimeout(pending.timer);
+    if (isNativeLifecycleCandidate(parsed)) { this.onNativeLifecycle(parsed); return; }
+    if (parsed.protocolVersion !== pending.protocolVersion) { this.fault("response_protocol_version_mismatch"); return; }
+    const refusalCode = parsed.type === "externalCommandResult" && parsed.ok === false && typeof parsed.errorCode === "string"
+      ? parsed.errorCode
+      : parsed.type === "error" && typeof parsed.code === "string" && typeof parsed.message === "string"
+        ? parsed.code
+        : undefined;
+    if (parsed.type !== pending.expectedType && refusalCode === undefined) { this.fault("wrong_response_type"); return; }
+    // An acceptance ticket is never terminal proof. A later deferred completion may settle this request.
+    if (parsed.type === "simulateGpuiEventResult") {
+      if (parsed.dispatchScheduled === true) {
+        if (parsed.dispatchCompleted === true) this.fault("invalid_dispatch_completion");
+        return;
+      }
+      if (parsed.success === true) {
+        if (parsed.dispatchCompleted !== true || parsed.dispatchScheduled !== false ||
+            typeof parsed.wasDeferred !== "boolean" || parsed.activationProof !== "not_observed") {
+          this.fault("invalid_dispatch_completion"); return;
+        }
+      } else if (parsed.success !== false || parsed.dispatchCompleted !== false ||
+          parsed.dispatchScheduled !== false || typeof parsed.errorCode !== "string") {
+        this.fault("invalid_dispatch_completion"); return;
+      }
+    }
+    this.pending.delete(requestId); clearTimeout(pending.timer);
     this.stats.responsesMatched += 1;
-    this.matchedResponses.push({
-      requestId,
-      expectedType: pending.expectedType,
-      responseType:
-        typeof parsed.responseType === "string"
-          ? parsed.responseType
-          : typeof parsed.type === "string"
-            ? parsed.type
-            : null,
-    });
-    if (parsed.type === "externalCommandResult" && parsed.ok === false) {
-      const code =
-        typeof parsed.errorCode === "string" ? ` [${parsed.errorCode}]` : "";
-      const message =
-        typeof parsed.errorMessage === "string"
-          ? parsed.errorMessage
-          : "Protocol request failed";
-      pending.reject(new Error(`${message}${code}`));
-      return;
-    }
+    if (this.matchedResponses.length < this.requestLimit)
+      this.matchedResponses.push({ requestId, expectedType: pending.expectedType, responseType: parsed.type });
+    if (refusalCode !== undefined) { pending.reject(new DriverCommandRefused(refusalCode, requestId)); return; }
     pending.resolve(parsed);
   }
 
   protected failAllPending(error: Error): void {
     for (const [, pending] of this.pending) {
+      if (pending.cancelCommand) {
+        try { this.writeCommand(pending.cancelCommand); } catch { /* transport already unavailable */ }
+      }
       clearTimeout(pending.timer);
       pending.reject(error);
     }
@@ -735,8 +896,8 @@ export class Driver extends ProtocolCore {
   readonly sessionDir: string;
   readonly logPath: string;
 
-  private proc: Subprocess<"pipe", "pipe", "pipe">;
-  private logWriter: ReturnType<ReturnType<typeof Bun.file>["writer"]>;
+  private proc: OwnedProcess;
+  private logWriter: Bun.FileSink;
   private readyResolve: (() => void) | null = null;
   private exited = false;
   private exitError: Error | null = null;
@@ -745,9 +906,23 @@ export class Driver extends ProtocolCore {
   private closePromise: Promise<void> | null = null;
   private streamsDrained = false;
   private logWriterClosed = false;
+  private readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  private logBytes = 0;
+  private maxLogBytes = 8_388_608;
+  private permit?: OwnedEvaluationPermit;
+  private facts?: OwnedEvaluationFacts;
+  private task?: ManagedTask;
+  private cleanup: OwnedCleanup = unknownOwnedCleanup(true);
+  private windowsClosed: boolean | null = null;
+  private nativeObservation: NativeLifecycleObservation | null = null;
+  private nativeLifecycleFailure = false;
+  private inputClosed = false;
+  private readonly lifecycleSignal = Promise.withResolvers<void>();
+  verifiedArtifact?: VerifiedArtifact;
+  qualification: Json | null = null;
 
   private constructor(
-    proc: Subprocess<"pipe", "pipe", "pipe">,
+    proc: OwnedProcess,
     opts: Required<
       Pick<DriverOptions, "sessionName" | "sessionDir" | "defaultTimeoutMs">
     >,
@@ -760,157 +935,132 @@ export class Driver extends ProtocolCore {
     this.logWriter = Bun.file(this.logPath).writer();
   }
 
+  get observedReceivedOutputBytes(): number { return this.proc.observedReceivedOutputBytes; }
+  get maxOutputBytes(): number { return this.proc.maxOutputBytes; }
+
   /** Attach to a running session.sh session instead of launching a process. */
   static attach(options: AttachOptions = {}): Promise<AttachedDriver> {
     return AttachedDriver.attach(options);
   }
 
   static async launch(options: DriverOptions = {}): Promise<Driver> {
-    assertNoninteractiveDriverLaunch(options);
-    const binary = options.binary ?? resolveDefaultBinary();
-    if (!existsSync(binary)) {
-      throw new Error(
-        `Binary not found at ${binary} (candidates checked: ${BINARY_CANDIDATES.join(", ")}). ` +
-          `Build one with ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui`,
-      );
-    }
-
-    // Unique per launch — multiple drivers in one process, and parallel
-    // processes reusing the same sessionName, must never share artifacts.
-    const launchId = `${process.pid}-${++launchCounter}-${Date.now().toString(36)}`;
+    const facts = options.ownedEvaluation ? consumeOwnedEvaluationPermit(options.ownedEvaluation) : undefined;
+    if (facts && (options.binary || options.env || options.sessionDir || options.themeFixturePath || options.seedAgentAuth || options.sharedModels))
+      throw new DriverProtocolError("owned_evaluation_launch_override");
+    if (!facts) assertNoninteractiveDriverLaunch(options);
+    const artifact = facts?.artifact ?? (options.immutableArtifact ? verifyImmutableArtifact(PROJECT_ROOT, options.immutableArtifact,
+      { kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content" }) : undefined);
+    if (facts && options.immutableArtifact && (options.immutableArtifact.manifestPath !== facts.artifact.reference.manifestPath ||
+      options.immutableArtifact.manifestSha256 !== facts.artifact.reference.manifestSha256))
+      throw new DriverProtocolError("permit_artifact_mismatch");
+    if (artifact && options.binary && resolve(options.binary) !== artifact.executablePath)
+      throw new DriverProtocolError("artifact_binary_override");
+    const binary = artifact?.executablePath ?? options.binary ?? resolveDefaultBinary();
+    if (!existsSync(binary)) throw new Error(`Binary not found: ${binary}`);
+    const launchId = `${process.pid}-${++launchCounter}-${randomUUID()}`;
     const sessionName = options.sessionName ?? `driver-${launchId}`;
-    const sessionDir =
-      options.sessionDir ??
-      join(
-        "/tmp/sk-driver-sessions",
-        options.sessionName ? `${sessionName}-${launchId}` : sessionName,
-      );
-    if (existsSync(sessionDir)) {
-      throw new Error(
-        `Driver session directory must be fresh and absent: ${sessionDir}`,
-      );
-    }
-    mkdirSync(sessionDir, { recursive: true });
-
-    const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      SCRIPT_KIT_AI_LOG: "1",
-      SCRIPT_KIT_SHORTCUT_DEBUG: "1",
-      RUST_LOG: DEFAULT_RUST_LOG,
-      SCRIPT_KIT_AGENTIC_SESSION_NAME: sessionName,
-      SCRIPT_KIT_AGENTIC_SESSION_GENERATION: `driver-${Date.now()}`,
-      ...(options.env ?? {}),
-    };
-    if (options.protocolBusFile !== false) {
-      env.SCRIPT_KIT_AGENTIC_PROTOCOL_RESPONSES_PATH = join(
-        sessionDir,
-        "protocol-responses.ndjson",
-      );
-    }
-    if (options.sandboxHome) {
-      const home = join(sessionDir, "home");
-      const kitDir = join(home, ".scriptkit");
-      mkdirSync(kitDir, { recursive: true });
-      env.HOME = home;
-      env.SK_PATH = kitDir;
-      // Never inherit an agent runner's CODEX_HOME. The optional auth seeder
-      // owns this sandbox path; without seeding it stays unauthenticated.
-      env.CODEX_HOME = join(home, ".codex");
-      if (options.themeFixturePath) {
-        const themeFixturePath = resolve(options.themeFixturePath);
-        if (!existsSync(themeFixturePath)) {
-          throw new Error(`Theme fixture not found: ${themeFixturePath}`);
+    let driver: Driver | undefined;
+    let proc: OwnedProcess | undefined;
+    let task: ManagedTask | undefined;
+    let cleanup = unknownOwnedCleanup(false);
+    try {
+      const taskClaim = artifact ? claimOutput(validateOutputTarget({ repoRoot: PROJECT_ROOT,
+        candidate: facts ? join(facts.claim.root, `runtime-${launchId}`) : join("/tmp/sk-driver-sessions", `runtime-${launchId}`),
+        kind: "directory", probeId: "driver-runtime" })) : undefined;
+      if (taskClaim) task = beginManagedTask(taskClaim, "runtime-run", [artifact!.reference]);
+      const sessionDir = facts ? createOwnedStagingDirectory(taskClaim!, { name: "session" }) :
+        options.sessionDir ?? join("/tmp/sk-driver-sessions", `${sessionName}-${launchId}`);
+      if (!facts) {
+        if (existsSync(sessionDir)) throw new Error(`Driver session directory must be fresh: ${sessionDir}`);
+        mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+      }
+      const env: Record<string, string> = facts ? ownedEvaluationEnvironment(facts, sessionDir) : {
+        ...(process.env as Record<string, string>), SCRIPT_KIT_AI_LOG: "1", SCRIPT_KIT_SHORTCUT_DEBUG: "1",
+        RUST_LOG: DEFAULT_RUST_LOG, ...(options.env ?? {}),
+      };
+      env.SCRIPT_KIT_AGENTIC_SESSION_NAME = sessionName;
+      // The supervisor installs the authoritative session/process instance identifiers.
+      if (!facts && options.protocolBusFile !== false)
+        env.SCRIPT_KIT_AGENTIC_PROTOCOL_RESPONSES_PATH = join(sessionDir, "protocol-responses.ndjson");
+      if (!facts && options.sandboxHome) {
+        const home = join(sessionDir, "home");
+        const kitDir = join(home, ".scriptkit");
+        mkdirSync(kitDir, { recursive: true, mode: 0o700 });
+        env.HOME = home; env.SK_PATH = kitDir; env.CODEX_HOME = join(home, ".codex");
+        if (options.themeFixturePath) copyFileSync(resolve(options.themeFixturePath), join(kitDir, "theme.json"));
+        if (options.sharedModels !== false) {
+          const realModels = join(homedir(), ".scriptkit", "models");
+          mkdirSync(realModels, { recursive: true }); symlinkSync(realModels, join(kitDir, "models"));
         }
-        copyFileSync(themeFixturePath, join(kitDir, "theme.json"));
-      }
-      if (options.sharedModels !== false) {
-        // Every model path resolves under $SK_PATH/models (dictation
-        // Whisper/Parakeet, brain GGUF). Symlink the real cache so sandboxed
-        // launches never re-download 1-2GB per session; downloads triggered
-        // inside a sandbox land in the shared cache for future runs.
-        const realModels = join(homedir(), ".scriptkit", "models");
-        mkdirSync(realModels, { recursive: true });
-        symlinkSync(realModels, join(kitDir, "models"));
-      }
-      if (options.seedAgentAuth) {
-        const seed = Bun.spawnSync(
-          [
-            "bash",
-            join(PROJECT_ROOT, "scripts/agentic/seed-sandbox-home.sh"),
-            home,
-          ],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        if (seed.exitCode !== 0) {
-          throw new Error(
-            `seed-sandbox-home failed (exit ${seed.exitCode}): ${seed.stderr.toString().trim()}`,
-          );
+        if (options.seedAgentAuth) {
+          const seed = Bun.spawnSync(["bash", join(PROJECT_ROOT, "scripts/agentic/seed-sandbox-home.sh"), home], { stdout: "pipe", stderr: "pipe" });
+          if (seed.exitCode !== 0) throw new Error(`seed-sandbox-home failed: ${seed.stderr.toString()}`);
         }
-        console.error(`[driver] ${seed.stdout.toString().trim()}`);
       }
-    }
-
-    const proc = Bun.spawn([binary], {
-      cwd: PROJECT_ROOT,
-      env,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const driver = new Driver(proc, {
-      sessionName,
-      sessionDir,
-      defaultTimeoutMs: options.defaultTimeoutMs ?? 5000,
-    });
-
-    const readyPromise = new Promise<void>((resolveReady) => {
-      driver.readyResolve = resolveReady;
-    });
-    const consume = (stream: ReadableStream<Uint8Array>, isStdout: boolean) =>
-      driver.consumeStream(stream, isStdout).catch((error) => {
-        driver.streamError =
-          error instanceof Error ? error : new Error(String(error));
+      proc = await spawnOwnedProcess({ argv: facts ? [binary, "--owned-ui-evaluation"] : [binary], cwd: PROJECT_ROOT,
+        env, timeoutMs: facts ? facts.limits.maxLifetimeMs + 3000 : 3_600_000, maxOutputBytes: facts ? 64 * 1024 * 1024 : 128 * 1024 * 1024,
+        ...(facts ? { ownedNative: { launchNonce: facts.launchNonce, policySha256: facts.policySha256,
+          binarySha256: artifact!.manifest.binarySha256, manifestSha256: artifact!.reference.manifestSha256,
+          task: { repositoryRoot: PROJECT_ROOT, recordPath: task!.recordPath, identity: task!.identity, helperExecutable: process.execPath } } } : {}) });
+      cleanup = unknownOwnedCleanup(true);
+      driver = new Driver(proc, { sessionName, sessionDir, defaultTimeoutMs: options.defaultTimeoutMs ?? 5000 });
+      driver.permit = options.ownedEvaluation; driver.facts = facts; driver.task = task; driver.verifiedArtifact = artifact;
+      driver.requestLimit = facts?.limits.maxRequests ?? 100_000;
+      driver.maxLogBytes = facts?.limits.maxLogBytes ?? 8_388_608;
+      if (task) {
+        if (facts) adoptSupervisorTask(task, proc.identity);
+        updateManagedTask(task, { state: "running", ownedProcesses: [proc.identity], source: artifact!.manifest.source });
+      }
+      const active = driver;
+      const ready = new Promise<void>(resolveReady => { active.readyResolve = resolveReady; });
+      const consume = (stream: ReadableStream<Uint8Array>, stdout: boolean) => active.consumeStream(stream, stdout).catch(cause => {
+        active.streamError = cause instanceof Error ? cause : new Error(String(cause));
+        active.onTransportFailure(active.streamError);
       });
-    driver.streamConsumers = [
-      consume(proc.stdout, true),
-      consume(proc.stderr, false),
-    ];
-    proc.exited.then((code) => {
-      driver.exited = true;
-      driver.exitError = new Error(
-        `App process exited (code ${code}) — see ${driver.logPath}`,
-      );
-      driver.failAllPending(driver.exitError);
-      driver.readyResolve?.();
-    });
-
-    const readyStart = performance.now();
-    const readyTimeoutMs = options.readyTimeoutMs ?? 10_000;
-    const timedOut = await Promise.race([
-      readyPromise.then(() => false),
-      Bun.sleep(readyTimeoutMs).then(() => true),
-    ]);
-    driver.stats.readyWaitMs = Math.round(performance.now() - readyStart);
-    if (driver.exited) {
-      const startupError =
-        driver.exitError ?? new Error("App process exited during startup");
-      await driver.close();
-      throw startupError;
-    }
-    if (timedOut) {
-      // Marker not seen — fall back to a protocol probe before giving up.
-      try {
-        await driver.request({ type: "getState" }, { timeoutMs: 2000 });
-      } catch {
-        const startupError = new Error(
-          `App did not become ready within ${readyTimeoutMs}ms — see ${driver.logPath}`,
-        );
-        await driver.close();
-        throw startupError;
+      active.streamConsumers = [consume(proc.stdout, true), consume(proc.stderr, false)];
+      void proc.exited.then(async code => {
+        active.exited = true; active.exitError = new Error(`App process exited (${code})`);
+        // A terminal supervisor frame can overtake the consumer's queued native replies.
+        await boundedObservation(Promise.allSettled(active.streamConsumers), 1500);
+        active.failAllPending(active.exitError); active.readyResolve?.();
+      }, cause => active.onTransportFailure(cause instanceof Error ? cause : new Error(String(cause))));
+      const start = performance.now();
+      if (facts) {
+        const response = await active.request({ type: "design", command: { operation: "bootstrap",
+          launchNonce: facts.launchNonce, policySha256: facts.policySha256 } }, { timeoutMs: options.readyTimeoutMs ?? 10_000 });
+        const report = response.result;
+        const identity = report?.identity;
+        if (report?.operation !== "bootstrap" || report.ok !== true || report.launchNonce !== facts.launchNonce ||
+          report.policySha256 !== facts.policySha256 || !identity ||
+          identity.pid !== proc.pid || identity.processStartTime !== proc.identity.processStartTime ||
+          identity.processInstanceId !== proc.identity.processInstanceId || identity.sessionGeneration !== proc.identity.sessionGeneration ||
+          identity.binarySha256 !== artifact!.manifest.binarySha256 || identity.manifestSha256 !== artifact!.reference.manifestSha256 ||
+          OWNED_EVALUATION_GUARDS.some(guard => report.guards?.[guard] !== true) ||
+          Object.entries(facts.limits).some(([key, value]) => report.limits?.[key] !== value))
+          throw new DriverProtocolError("owned_evaluation_qualification_mismatch");
+        active.qualification = report;
+      } else {
+        const observation = await boundedObservation(ready, options.readyTimeoutMs ?? 10_000);
+        if (!observation.completed) {
+          try { await active.request({ type: "getState" }, { timeoutMs: 2000 }); }
+          catch (cause) { throw new Error(`App did not become ready within ${options.readyTimeoutMs ?? 10_000}ms`, { cause }); }
+        }
       }
+      active.stats.readyWaitMs = Math.round(performance.now() - start);
+      if (active.exited) throw active.exitError;
+      return active;
+    } catch (cause) {
+      if (driver) { await boundedObservation(driver.close(), 22_000); cleanup = driver.finalization; }
+      else if (proc) {
+        const observed = await boundedObservation(proc.close(), 18_000);
+        cleanup = observed.completed ? observed.value : unknownOwnedCleanup(true);
+      } else if (cause && typeof cause === "object" && "cleanup" in cause) cleanup = (cause as DriverLifecycleError).cleanup;
+      if (task && !driver) {
+        try { cleanup = finalizeManagedTask(task, cleanup).cleanup; }
+        catch { cleanup = { ...cleanup, closed: false, referencesFinalized: false, failureCodes: [...cleanup.failureCodes, "task_finalization_failed"] }; }
+      }
+      throw new DriverLifecycleError("Driver launch failed", cleanup, { cause });
     }
-    return driver;
   }
 
   /**
@@ -957,11 +1107,59 @@ export class Driver extends ProtocolCore {
   // --- transport -------------------------------------------------------------
 
   protected writeCommand(payload: Json): void {
-    if (this.exited) {
-      throw this.exitError ?? new Error("App process has exited");
-    }
+    if (this.exited || this.closePromise || this.inputClosed) throw this.exitError ?? new Error("Driver input closed");
     this.proc.stdin.write(`${JSON.stringify(payload)}\n`);
-    this.proc.stdin.flush();
+    void this.proc.stdin.flush().catch(cause => this.onTransportFailure(cause instanceof Error ? cause : new Error(String(cause))));
+  }
+
+  protected authorizeCommand(command: Json): void {
+    if (this.permit) assertOwnedEvaluationCommand(this.permit, command);
+    else super.authorizeCommand(command);
+  }
+
+  protected onTransportFailure(error: Error): void {
+    this.exitError = error;
+    this.failAllPending(error);
+    void this.close().catch(() => {}); // cleanup evidence remains on finalization
+  }
+
+  get processIdentity() { return this.proc.identity; }
+  get nativeLifecycle(): NativeLifecycleObservation | null { return this.nativeObservation ? structuredClone(this.nativeObservation) : null; }
+  /** Identity projection only; this is not the in-memory task mutation capability. */
+  get managedTask(): ManagedTask | null {
+    return this.task ? Object.freeze({ recordPath: this.task.recordPath, identity: this.task.identity }) : null;
+  }
+
+  protected onNativeLifecycle(envelope: Json): void {
+    try {
+      if (!this.facts || this.nativeObservation || this.nativeLifecycleFailure) throw new Error("native_lifecycle_unexpected_or_duplicate");
+      this.nativeObservation = validateNativeLifecycle(envelope, this.proc.identity, {
+        launchNonce: this.facts.launchNonce, policySha256: this.facts.policySha256,
+        binarySha256: this.facts.artifact.manifest.binarySha256, manifestSha256: this.facts.artifact.reference.manifestSha256,
+      });
+      this.windowsClosed = this.nativeObservation.result.ownedWindowsClosed;
+    } catch (error) {
+      this.nativeLifecycleFailure = true;
+      this.windowsClosed = false;
+      this.fault(error instanceof Error ? error.message : "native_lifecycle_invalid");
+    }
+    this.lifecycleSignal.resolve();
+  }
+
+  async awaitNativeLifecycle(timeoutMs = 5000): Promise<NativeLifecycleObservation> {
+    if (!this.facts) throw new DriverProtocolError("owned_native_launch_required");
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000) throw new DriverProtocolError("invalid_lifecycle_timeout");
+    const observed = await boundedObservation(this.lifecycleSignal.promise, timeoutMs);
+    if (!observed.completed || !this.nativeObservation || this.nativeLifecycleFailure) throw new DriverProtocolError("native_lifecycle_unproved");
+    return structuredClone(this.nativeObservation);
+  }
+
+  /** Close only the owned child's stdin; supervisor ownership and output draining remain live. */
+  async closeInput(timeoutMs = 5000): Promise<NativeLifecycleObservation> {
+    if (!this.facts) throw new DriverProtocolError("owned_native_launch_required");
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000) throw new DriverProtocolError("invalid_lifecycle_timeout");
+    if (!this.inputClosed) { this.inputClosed = true; this.proc.stdin.end(); }
+    return this.awaitNativeLifecycle(timeoutMs);
   }
 
   // --- lifecycle ---------------------------------------------------------------
@@ -975,17 +1173,7 @@ export class Driver extends ProtocolCore {
     return this.proc.pid;
   }
 
-  get finalization(): {
-    processExited: boolean;
-    streamsDrained: boolean;
-    logWriterClosed: boolean;
-  } {
-    return {
-      processExited: this.exited,
-      streamsDrained: this.streamsDrained,
-      logWriterClosed: this.logWriterClosed,
-    };
-  }
+  get finalization(): OwnedCleanup { return this.cleanup; }
 
   close(): Promise<void> {
     this.closePromise ??= this.closeInternal();
@@ -994,70 +1182,63 @@ export class Driver extends ProtocolCore {
 
   private async closeInternal(): Promise<void> {
     this.failAllPending(new Error("Driver closed"));
-    if (!this.exited) {
+    const processResult = await boundedObservation(this.proc.close(), 18_000);
+    let cleanup = processResult.completed ? processResult.value : unknownOwnedCleanup(true);
+    const drain = await boundedObservation(Promise.allSettled(this.streamConsumers), 1500);
+    this.streamsDrained = drain.completed && drain.value.every(result => result.status === "fulfilled") && !this.streamError;
+    if (!this.streamsDrained) await boundedObservation(Promise.allSettled(this.readers.map(reader => reader.cancel())), 500);
+    const flush = await boundedObservation(Promise.resolve().then(() => this.logWriter.flush()), 500);
+    const end = await boundedObservation(Promise.resolve().then(() => this.logWriter.end()), 500);
+    this.logWriterClosed = flush.completed && end.completed;
+    cleanup = { ...cleanup, streamsDrained: cleanup.streamsDrained && this.streamsDrained,
+      logWriterClosed: cleanup.logWriterClosed && this.logWriterClosed,
+      ownedWindowsClosed: this.facts ? this.windowsClosed : cleanup.ownedWindowsClosed,
+      failureCodes: [...cleanup.failureCodes, ...(!this.streamsDrained ? ["streams_not_drained"] : []),
+        ...(!this.logWriterClosed ? ["log_not_closed"] : []), ...(this.facts && this.windowsClosed !== true ? ["windows_not_observed_closed"] : []),
+        ...(this.nativeLifecycleFailure ? ["native_lifecycle_invalid"] : [])],
+    };
+    cleanup = { ...cleanup, closed: cleanup.closed && cleanup.streamsDrained && cleanup.logWriterClosed && (!this.facts || this.windowsClosed === true) };
+    this.cleanup = cleanup;
+    if (this.task) {
       try {
-        this.proc.kill();
-      } catch {
-        // already gone
+        if (this.nativeObservation) updateManagedTask(this.task, { result: { nativeLifecycle: this.nativeObservation } });
+        this.cleanup = finalizeManagedTask(this.task, { ...cleanup, referencesFinalized: this.facts ? cleanup.closed : true }).cleanup;
       }
-      await Promise.race([this.proc.exited, Bun.sleep(2000)]);
-      if (!this.exited) {
-        try {
-          this.proc.kill(9);
-        } catch {
-          // already gone
-        }
-        await Promise.race([this.proc.exited, Bun.sleep(1000)]);
-      }
+      catch { this.cleanup = { ...cleanup, closed: false, referencesFinalized: false, failureCodes: [...cleanup.failureCodes, "task_finalization_failed"] }; }
     }
-    if (!this.exited) {
-      throw new Error(
-        `Driver process ${this.proc.pid} survived TERM/KILL finalization`,
-      );
-    }
-    const outcomes = await Promise.allSettled(this.streamConsumers);
-    const rejected = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult =>
-        outcome.status === "rejected",
-    );
-    this.streamsDrained = rejected === undefined && this.streamError === null;
-    await this.logWriter.flush();
-    await this.logWriter.end();
-    this.logWriterClosed = true;
-    const streamFailure = this.streamError ?? rejected?.reason;
-    if (streamFailure) {
-      throw streamFailure instanceof Error
-        ? streamFailure
-        : new Error(String(streamFailure));
-    }
+    if (!this.cleanup.closed) throw new DriverLifecycleError("INVALID_CLEANUP", this.cleanup);
   }
 
   // --- internals -----------------------------------------------------------------
 
-  private async consumeStream(
-    stream: ReadableStream<Uint8Array>,
-    isStdout: boolean,
-  ): Promise<void> {
+  private async consumeStream(stream: ReadableStream<Uint8Array>, isStdout: boolean): Promise<void> {
     const decoder = new TextDecoder();
+    const reader = stream.getReader();
+    this.readers.push(reader);
     let buffer = "";
-    for await (const chunk of stream) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let newlineIndex = buffer.indexOf("\n");
-      while (newlineIndex >= 0) {
-        const line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        this.handleLine(line, isStdout);
-        newlineIndex = buffer.indexOf("\n");
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        buffer += decoder.decode(next.value, { stream: true });
+        let newline = buffer.indexOf("\n");
+        while (newline >= 0) {
+          this.handleLine(buffer.slice(0, newline), isStdout);
+          buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n");
+        }
+        if (Buffer.byteLength(buffer) > MAX_PROTOCOL_RESPONSE_BYTES) throw new DriverProtocolError("response_line_too_long");
       }
-    }
-    buffer += decoder.decode();
-    if (buffer.length > 0) {
-      this.handleLine(buffer, isStdout);
-    }
+      buffer += decoder.decode();
+      if (buffer.length) this.handleLine(buffer, isStdout);
+    } finally { reader.releaseLock(); }
   }
 
   private handleLine(line: string, isStdout: boolean): void {
-    this.logWriter.write(`${line}\n`);
+    const bytes = Buffer.byteLength(line) + 1;
+    if (bytes > MAX_PROTOCOL_RESPONSE_BYTES) throw new DriverProtocolError("response_line_too_long");
+    if (this.logBytes + bytes <= this.maxLogBytes) {
+      this.logWriter.write(`${line}\n`); this.logBytes += bytes;
+    }
 
     if (
       this.readyResolve &&
@@ -1076,7 +1257,7 @@ export class Driver extends ProtocolCore {
     try {
       parsed = JSON.parse(trimmed);
     } catch {
-      return;
+      throw new DriverProtocolError("malformed_json_response");
     }
     this.handleResponse(parsed);
   }

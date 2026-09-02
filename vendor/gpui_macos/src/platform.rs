@@ -163,8 +163,9 @@ pub(crate) struct MacPlatformState {
     text_system: Arc<dyn PlatformTextSystem>,
     renderer_context: renderer::Context,
     headless: bool,
-    general_pasteboard: Pasteboard,
-    find_pasteboard: Pasteboard,
+    general_pasteboard: Option<Pasteboard>,
+    find_pasteboard: Option<Pasteboard>,
+    owned_hidden: Option<Arc<gpui::OwnedHiddenGuard>>,
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
@@ -177,11 +178,15 @@ pub(crate) struct MacPlatformState {
     finish_launching: Option<Box<dyn FnOnce()>>,
     dock_menu: Option<id>,
     menus: Option<Vec<OwnedMenu>>,
-    keyboard_mapper: Rc<MacKeyboardMapper>,
+    keyboard_mapper: Rc<dyn PlatformKeyboardMapper>,
 }
 
 impl MacPlatform {
     pub fn new(headless: bool) -> Self {
+        assert!(
+            gpui::OwnedHiddenGuard::installed().is_none(),
+            "normal MacPlatform after owned policy installation"
+        );
         let dispatcher = Arc::new(MacDispatcher::new());
 
         #[cfg(feature = "font-kit")]
@@ -199,8 +204,9 @@ impl MacPlatform {
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
             renderer_context: renderer::Context::default(),
-            general_pasteboard: Pasteboard::general(),
-            find_pasteboard: Pasteboard::find(),
+            general_pasteboard: Some(Pasteboard::general()),
+            find_pasteboard: Some(Pasteboard::find()),
+            owned_hidden: None,
             reopen: None,
             quit: None,
             menu_command: None,
@@ -214,6 +220,42 @@ impl MacPlatform {
             on_thermal_state_change: None,
             menus: None,
             keyboard_mapper,
+        }))
+    }
+
+    /// Construct native rendering without pasteboards, global keyboard state, or OS dispatchers.
+    #[cfg(feature = "test-support")]
+    pub fn new_owned_hidden(
+        dispatcher: gpui::TestDispatcher,
+        guard: Arc<gpui::OwnedHiddenGuard>,
+    ) -> Self {
+        #[cfg(feature = "font-kit")]
+        let text_system = Arc::new(crate::MacTextSystem::new());
+        #[cfg(not(feature = "font-kit"))]
+        let text_system = Arc::new(gpui::NoopTextSystem::new());
+        let dispatcher = Arc::new(dispatcher);
+        Self(Mutex::new(MacPlatformState {
+            background_executor: BackgroundExecutor::new(dispatcher.clone()),
+            foreground_executor: ForegroundExecutor::new(dispatcher),
+            text_system,
+            renderer_context: renderer::Context::default(),
+            headless: true,
+            general_pasteboard: None,
+            find_pasteboard: None,
+            owned_hidden: Some(guard),
+            reopen: None,
+            on_keyboard_layout_change: None,
+            on_thermal_state_change: None,
+            quit: None,
+            menu_command: None,
+            validate_menu_command: None,
+            will_open_menu: None,
+            menu_actions: Vec::new(),
+            open_urls: None,
+            finish_launching: None,
+            dock_menu: None,
+            menus: None,
+            keyboard_mapper: Rc::new(gpui::DummyKeyboardMapper),
         }))
     }
 
@@ -452,6 +494,9 @@ impl MacPlatform {
 }
 
 impl Platform for MacPlatform {
+    fn owned_hidden_guard(&self) -> Option<Arc<gpui::OwnedHiddenGuard>> {
+        self.0.lock().owned_hidden.clone()
+    }
     fn background_executor(&self) -> BackgroundExecutor {
         self.0.lock().background_executor.clone()
     }
@@ -618,6 +663,10 @@ impl Platform for MacPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
+        let guard = self.owned_hidden_guard();
+        if let Some(guard) = &guard {
+            guard.validate_window(&options)?;
+        }
         let renderer_context = self.0.lock().renderer_context.clone();
         Ok(Box::new(MacWindow::open(
             handle,
@@ -625,7 +674,8 @@ impl Platform for MacPlatform {
             self.foreground_executor(),
             self.background_executor(),
             renderer_context,
-        )))
+            guard,
+        )?))
     }
 
     fn window_appearance(&self) -> WindowAppearance {
@@ -927,6 +977,9 @@ impl Platform for MacPlatform {
     }
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
+        if self.owned_hidden_guard().is_some() {
+            return Box::new(gpui::OwnedHiddenKeyboardLayout);
+        }
         Box::new(MacKeyboardLayout::new())
     }
 
@@ -1059,22 +1112,26 @@ impl Platform for MacPlatform {
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         let state = self.0.lock();
-        state.general_pasteboard.read()
+        state.general_pasteboard.as_ref().and_then(Pasteboard::read)
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         let state = self.0.lock();
-        state.general_pasteboard.write(item);
+        if let Some(pasteboard) = &state.general_pasteboard {
+            pasteboard.write(item);
+        }
     }
 
     fn read_from_find_pasteboard(&self) -> Option<ClipboardItem> {
         let state = self.0.lock();
-        state.find_pasteboard.read()
+        state.find_pasteboard.as_ref().and_then(Pasteboard::read)
     }
 
     fn write_to_find_pasteboard(&self, item: ClipboardItem) {
         let state = self.0.lock();
-        state.find_pasteboard.write(item);
+        if let Some(pasteboard) = &state.find_pasteboard {
+            pasteboard.write(item);
+        }
     }
 
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {

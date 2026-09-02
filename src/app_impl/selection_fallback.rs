@@ -1,16 +1,15 @@
 use super::*;
 
-#[cfg(test)]
-fn resolve_grouped_result_index(
-    grouped_items: &[GroupedListItem],
-    selected_index: usize,
-) -> Option<(usize, usize)> {
-    let coerced_index = crate::list_item::coerce_selection(grouped_items, selected_index)?;
-    match grouped_items.get(coerced_index) {
-        Some(GroupedListItem::Item(result_idx)) => Some((coerced_index, *result_idx)),
-        _ => None,
+#[derive(Debug)]
+struct MainMenuConfirmationPending;
+
+impl std::fmt::Display for MainMenuConfirmationPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("main_menu_confirmation_pending")
     }
 }
+
+impl std::error::Error for MainMenuConfirmationPending {}
 
 fn fallback_keeps_window_open(fallback: &crate::fallbacks::FallbackItem) -> bool {
     match fallback {
@@ -164,6 +163,7 @@ impl ScriptListApp {
     }
 
     fn record_blocked_script_list_submit(&mut self, route: &'static str) {
+        self.update_main_menu_dispatch_status("refused", Some(route));
         let value = self.filter_text.clone();
         tracing::info!(
             event = "script_list_submit_blocked",
@@ -182,51 +182,184 @@ impl ScriptListApp {
         self.record_submit_diagnostic("launcher", route, None, Some(value.as_str()), true);
     }
 
-    fn live_script_list_flat_selection_for_submit(&mut self) -> Option<(usize, usize)> {
-        if !matches!(self.current_view, AppView::ScriptList) {
-            return None;
+    fn update_main_menu_dispatch_status(
+        &mut self,
+        status: &'static str,
+        reason: Option<&'static str>,
+    ) {
+        if let Some(mut observation) = self.main_menu_dispatch_observation().cloned() {
+            observation.status = status;
+            observation.reason = reason;
+            self.set_main_menu_dispatch_observation(Some(observation));
         }
-
-        if self.filter_text != self.computed_filter_text {
-            self.record_blocked_script_list_submit("main_list_submit_blocked.stale_filter_domain");
-            return None;
-        }
-
-        self.get_grouped_results_cached();
-
-        if !self
-            .main_menu_result_caches
-            .has_grouped_results_for_filter_text(&self.computed_filter_text)
-        {
-            self.record_blocked_script_list_submit(
-                "main_list_submit_blocked.stale_grouped_cache_domain",
-            );
-            return None;
-        }
-
-        let Some((resolved_index, flat_result_index)) = self
-            .main_menu_result_caches
-            .flat_result_index_for_coerced_grouped_selection(self.selected_index)
-        else {
-            self.record_blocked_script_list_submit("main_list_submit_blocked.no_live_selected_row");
-            return None;
-        };
-
-        if resolved_index != self.selected_index {
-            self.selected_index = resolved_index;
-            self.rebuild_main_window_preflight_if_needed();
-        }
-
-        Some((resolved_index, flat_result_index))
     }
 
-    pub(crate) fn execute_selected(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_main_menu_selected_subject(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.set_main_menu_dispatch_observation(None);
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
+        let subject = self
+            .resolved_main_menu_selected_subject()
+            .ok_or_else(|| anyhow::anyhow!("main_menu_selected_subject_not_current"))?;
+        let row = match subject {
+            ResolvedMainMenuSelection::SearchResult { row, .. }
+            | ResolvedMainMenuSelection::Calculator { row, .. } => row,
+        };
+        anyhow::ensure!(row.eligibility.activatable, "main_menu_row_not_activatable");
+        if self.menu_syntax_trigger_picker_owns_main_keyboard()
+            || self.menu_syntax_object_selector_owns_main_keyboard()
+        {
+            let mut observation = MainMenuDispatchObservation {
+                query: self.root_search.query_stamp(),
+                stable_key: row.stable_key.clone(),
+                content_fingerprint: row.content_fingerprint.clone(),
+                status: "dispatchRequested",
+                reason: None,
+            };
+            let accepted = if self.menu_syntax_trigger_picker_owns_main_keyboard() {
+                let row_id = self
+                    .selected_menu_syntax_trigger_row_id_from_main_list()
+                    .ok_or_else(|| anyhow::anyhow!("main_menu_trigger_target_missing"))?;
+                self.accept_menu_syntax_trigger_picker_row(&row_id, None, cx)
+            } else {
+                let row_id = self
+                    .selected_menu_syntax_object_selector_row_id_from_main_list()
+                    .ok_or_else(|| anyhow::anyhow!("main_menu_object_target_missing"))?;
+                self.accept_menu_syntax_object_selector_row(&row_id, None, cx)
+            };
+            observation.status = if accepted { "completed" } else { "refused" };
+            observation.reason = (!accepted).then_some("main_menu_picker_accept_refused");
+            self.set_main_menu_dispatch_observation(Some(observation));
+            anyhow::ensure!(accepted, "main_menu_picker_accept_refused");
+            return Ok(());
+        }
+        match self.execute_selected(cx)? {
+            MainMenuDispatchResult::Dispatched => Ok(()),
+            MainMenuDispatchResult::PendingConfirmation => Err(MainMenuConfirmationPending.into()),
+        }
+    }
+
+    fn authorize_main_menu_selected_effect(&self) -> Result<(), &'static str> {
+        use crate::runtime_policy::ExternalEffect;
+        let subject = self
+            .resolved_main_menu_selected_subject()
+            .ok_or("main_menu_selected_subject_not_current")?;
+        let effect = match subject {
+            ResolvedMainMenuSelection::Calculator { row, .. } => {
+                if !row.eligibility.activatable {
+                    return Err("main_menu_row_not_activatable");
+                }
+                (!crate::runtime_policy::is_owned_evaluation())
+                    .then_some(ExternalEffect::SystemClipboard)
+            }
+            ResolvedMainMenuSelection::SearchResult { row, result } => {
+                if !row.eligibility.activatable {
+                    return Err("main_menu_row_not_activatable");
+                }
+                result.authorize_launcher_submit()?;
+                match result {
+                    scripts::SearchResult::Script(_) | scripts::SearchResult::Scriptlet(_) => {
+                        Some(ExternalEffect::Process)
+                    }
+                    scripts::SearchResult::App(_)
+                    | scripts::SearchResult::File(_)
+                    | scripts::SearchResult::BrowserHistory(_) => {
+                        Some(ExternalEffect::OpenExternal)
+                    }
+                    scripts::SearchResult::Window(_) | scripts::SearchResult::BrowserTab(_) => {
+                        Some(ExternalEffect::NativeInput)
+                    }
+                    scripts::SearchResult::Todo(_)
+                    | scripts::SearchResult::AiVault(_)
+                    | scripts::SearchResult::ClipboardHistory(_)
+                    | scripts::SearchResult::DictationHistory(_) => {
+                        Some(ExternalEffect::SystemClipboard)
+                    }
+                    scripts::SearchResult::Fallback(fallback) => match &fallback.fallback {
+                        crate::fallbacks::FallbackItem::Script(_) => Some(ExternalEffect::Process),
+                        crate::fallbacks::FallbackItem::Builtin(builtin) => match &builtin.action {
+                            crate::fallbacks::FallbackAction::RunInTerminal => {
+                                Some(ExternalEffect::Process)
+                            }
+                            crate::fallbacks::FallbackAction::CopyToClipboard
+                            | crate::fallbacks::FallbackAction::Calculate => {
+                                Some(ExternalEffect::SystemClipboard)
+                            }
+                            crate::fallbacks::FallbackAction::SearchUrl { .. }
+                            | crate::fallbacks::FallbackAction::OpenUrl
+                            | crate::fallbacks::FallbackAction::OpenFile => {
+                                Some(ExternalEffect::OpenExternal)
+                            }
+                            crate::fallbacks::FallbackAction::SendToAiHarness => {
+                                Some(ExternalEffect::Provider)
+                            }
+                            _ => None,
+                        },
+                    },
+                    _ => None,
+                }
+            }
+        };
+        if let Some(effect) = effect {
+            crate::runtime_policy::check(effect).map_err(|error| error.code)?;
+        }
+        Ok(())
+    }
+
+    fn live_script_list_flat_selection_for_submit(&mut self) -> Option<(usize, usize)> {
+        match self.resolved_main_menu_selected_subject() {
+            Some(ResolvedMainMenuSelection::SearchResult { row, .. })
+                if row.eligibility.activatable =>
+            {
+                let MainMenuRowSubject::SearchResult { flat_index } = row.subject else {
+                    return None;
+                };
+                Some((row.grouped_index, flat_index))
+            }
+            _ => {
+                self.record_blocked_script_list_submit(
+                    "main_list_submit_blocked.no_live_selected_row",
+                );
+                None
+            }
+        }
+    }
+
+    pub(crate) fn execute_selected(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<MainMenuDispatchResult> {
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
+        let observation = self.resolved_main_menu_selected_subject().map(|subject| {
+            let row = match subject {
+                ResolvedMainMenuSelection::SearchResult { row, .. }
+                | ResolvedMainMenuSelection::Calculator { row, .. } => row,
+            };
+            MainMenuDispatchObservation {
+                query: self.root_search.query_stamp(),
+                stable_key: row.stable_key.clone(),
+                content_fingerprint: row.content_fingerprint.clone(),
+                status: "dispatchRequested",
+                reason: None,
+            }
+        });
+        self.set_main_menu_dispatch_observation(observation.clone());
+        if !self.root_search.query_is_current() {
+            self.record_blocked_script_list_submit("main_menu_query_pending");
+            anyhow::bail!("main_menu_query_pending");
+        }
         if self.should_consume_script_list_enter_after_submit("execute_selected") {
             logging::log(
                 "KEY",
                 "Ignoring execute_selected: prompt submit already consumed this Enter",
             );
-            return;
+            anyhow::bail!("main_menu_enter_already_consumed");
         }
         if self.menu_syntax_trigger_picker_owns_main_keyboard()
             || crate::menu_syntax::active_filter_head_owns_main_list(&self.filter_text)
@@ -235,14 +368,14 @@ impl ScriptListApp {
                 "KEY",
                 "Ignoring execute_selected: menu-syntax owns main list",
             );
-            return;
+            anyhow::bail!("main_menu_input_owned_by_picker");
         }
         if self.should_consume_menu_syntax_filter_accept_submit("execute_selected") {
             logging::log(
                 "KEY",
                 "Ignoring execute_selected: accepted menu-syntax filter hint is active",
             );
-            return;
+            anyhow::bail!("main_menu_filter_hint_consumed");
         }
 
         if let Some(invocation) = self
@@ -259,7 +392,7 @@ impl ScriptListApp {
                 false,
             );
             self.execute_menu_syntax_command_invocation(invocation, cx);
-            return;
+            return Ok(MainMenuDispatchResult::Dispatched);
         }
 
         if let Some(invocation) = self
@@ -280,11 +413,12 @@ impl ScriptListApp {
             if let Some(handler) = ranked_handlers.first() {
                 if crate::menu_syntax::ranked_handler_is_user_authored(handler) {
                     self.execute_menu_syntax_capture_script(handler.script.clone(), invocation, cx);
-                    return;
+                    return Ok(MainMenuDispatchResult::Dispatched);
                 }
             }
             match self.try_execute_app_owned_menu_syntax_capture(&invocation, cx) {
-                AppOwnedCaptureOutcome::Handled | AppOwnedCaptureOutcome::Invalid => return,
+                AppOwnedCaptureOutcome::Handled => return Ok(MainMenuDispatchResult::Dispatched),
+                AppOwnedCaptureOutcome::Invalid => anyhow::bail!("main_menu_capture_invalid"),
                 AppOwnedCaptureOutcome::NotOwned => {}
             }
             if let Some(handler) = ranked_handlers.drain(..).next() {
@@ -295,8 +429,9 @@ impl ScriptListApp {
                     Some(HUD_MEDIUM_MS),
                     cx,
                 );
+                anyhow::bail!("main_menu_capture_handler_missing");
             }
-            return;
+            return Ok(MainMenuDispatchResult::Dispatched);
         }
 
         if self
@@ -308,7 +443,7 @@ impl ScriptListApp {
                 Some(HUD_MEDIUM_MS),
                 cx,
             );
-            return;
+            anyhow::bail!("main_menu_capture_input_missing");
         }
 
         if self
@@ -320,13 +455,45 @@ impl ScriptListApp {
                 Some(HUD_MEDIUM_MS),
                 cx,
             );
-            return;
+            anyhow::bail!("main_menu_command_input_missing");
         }
 
+        if let Err(reason) = self.authorize_main_menu_selected_effect() {
+            self.update_main_menu_dispatch_status("refused", Some(reason));
+            self.record_blocked_script_list_submit(reason);
+            anyhow::bail!(reason);
+        }
+        if let Some(ResolvedMainMenuSelection::Calculator { row, result }) =
+            self.resolved_main_menu_selected_subject()
+        {
+            anyhow::ensure!(row.eligibility.activatable, "main_menu_row_not_activatable");
+            let formatted_value = result.formatted.clone();
+            let receipt = crate::runtime_policy::route_text_copy(
+                crate::runtime_policy::owned_evaluation(),
+                &formatted_value,
+                |text| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
+                    Ok(())
+                },
+            )
+            .map_err(|error| {
+                self.update_main_menu_dispatch_status("refused", Some("calculator_copy_failed"));
+                anyhow::anyhow!("calculator_copy_failed: {error}")
+            })?;
+            self.show_hud(
+                receipt.feedback(format!("Copied: {}", formatted_value)),
+                Some(HUD_MEDIUM_MS),
+                cx,
+            );
+            self.close_and_reset_window(cx);
+            self.set_main_menu_dispatch_observation(observation);
+            self.update_main_menu_dispatch_status("completed", None);
+            return Ok(MainMenuDispatchResult::Dispatched);
+        }
         let history_query = (!self.filter_text.trim().is_empty()).then(|| self.filter_text.clone());
 
         let Some((_resolved_index, idx)) = self.live_script_list_flat_selection_for_submit() else {
-            return;
+            anyhow::bail!("main_menu_selected_subject_missing");
         };
         {
             let selected_result = self
@@ -341,47 +508,42 @@ impl ScriptListApp {
                         "launcher_command_refused_before_frecency_or_execution"
                     );
                     self.show_hud(reason.to_string(), Some(HUD_MEDIUM_MS), cx);
-                    return;
+                    self.record_blocked_script_list_submit(reason);
+                    anyhow::bail!(reason);
                 }
             }
 
-            if let Some(query) = history_query.as_deref() {
-                self.input_history.add_entry_with_selection(
-                    query,
-                    selected_result
-                        .as_ref()
-                        .and_then(|result| result.history_result_key()),
-                );
-                if let Err(e) = self.input_history.save() {
-                    tracing::warn!(
-                        error_sha256 = %crate::logging::log_private_user_value(&e.to_string()),
-                        "Failed to save input history"
-                    );
-                }
-                self.invalidate_grouped_cache();
-            }
-
-            if let Some(formatted_value) = self
-                .inline_calculator_for_result_index(idx)
-                .map(|calculator| calculator.formatted.clone())
+            let attachment_part = if self.is_in_attachment_portal()
+                && matches!(self.current_view, AppView::ScriptList)
             {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(formatted_value.clone()));
-                self.show_hud(
-                    format!("Copied: {}", formatted_value),
-                    Some(HUD_MEDIUM_MS),
-                    cx,
-                );
-                self.close_and_reset_window(cx);
-                return;
+                Some(
+                    self.build_attachment_portal_part_for_selected_script_list_result()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("main_menu_attachment_subject_unavailable")
+                        })?,
+                )
+            } else {
+                None
+            };
+            if let Some(query) = history_query.as_deref() {
+                self.commit_main_menu_results_refresh("launcher_input_history_recorded", None, cx, |app, _cx| {
+                    app.input_history.add_entry_with_selection(
+                        query,
+                        selected_result.as_ref().and_then(|result| result.history_result_key()),
+                    );
+                    if let Err(e) = app.input_history.save() {
+                        tracing::warn!(
+                            error_sha256 = %crate::logging::log_private_user_value(&e.to_string()),
+                            "Failed to save input history"
+                        );
+                    }
+                    true
+                });
             }
 
-            if self.is_in_attachment_portal() && matches!(self.current_view, AppView::ScriptList) {
-                if let Some(part) =
-                    self.build_attachment_portal_part_for_selected_script_list_result()
-                {
-                    self.close_attachment_portal_with_part(part, cx);
-                }
-                return;
+            if let Some(part) = attachment_part {
+                self.close_attachment_portal_with_part(part, cx);
+                return Ok(MainMenuDispatchResult::Dispatched);
             }
 
             if let Some(result) = selected_result {
@@ -468,9 +630,16 @@ impl ScriptListApp {
                     scripts::SearchResult::SpineProjection(_) => None,
                 };
                 if let Some(path) = frecency_path {
-                    self.frecency_store.record_use(&path);
-                    self.frecency_store.save().ok(); // Best-effort save
-                    self.invalidate_grouped_cache(); // Invalidate cache so next show reflects frecency
+                    self.commit_main_menu_results_refresh(
+                        "launcher_frecency_recorded",
+                        None,
+                        cx,
+                        |app, _cx| {
+                            app.frecency_store.record_use(&path);
+                            app.frecency_store.save().ok(); // Best-effort save
+                            true
+                        },
+                    );
                 }
 
                 // Log the action being performed using the same label path as the footer/preflight.
@@ -507,14 +676,17 @@ impl ScriptListApp {
                             .unwrap_or(true);
                     if !selected_handler_is_user_authored {
                         match self.try_execute_app_owned_menu_syntax_capture(&invocation, cx) {
-                            AppOwnedCaptureOutcome::Handled | AppOwnedCaptureOutcome::Invalid => {
-                                return;
+                            AppOwnedCaptureOutcome::Handled => {
+                                return Ok(MainMenuDispatchResult::Dispatched)
+                            }
+                            AppOwnedCaptureOutcome::Invalid => {
+                                anyhow::bail!("main_menu_capture_invalid")
                             }
                             AppOwnedCaptureOutcome::NotOwned => {}
                         }
                     }
                     self.execute_menu_syntax_capture_script(script, invocation, cx);
-                    return;
+                    return Ok(MainMenuDispatchResult::Dispatched);
                 }
 
                 self.mark_opened_from_main_menu("execute_selected");
@@ -546,13 +718,11 @@ impl ScriptListApp {
                                 pivot_filter_bytes = new_filter.len(),
                                 "Pivoting main-list capture-handler launch into ;target composer"
                             );
-                            self.filter_text = new_filter.clone();
-                            self.computed_filter_text = new_filter.clone();
+                            self.filter_text = new_filter;
                             self.pending_filter_sync = true;
-                            self.set_menu_syntax_mode_from_filter(&new_filter);
-                            self.invalidate_grouped_cache();
+                            self.flush_pending_main_menu_query(cx);
                             cx.notify();
-                            return;
+                            return Ok(MainMenuDispatchResult::Dispatched);
                         }
                         // Run 13 Pass 4 — symmetric pivot for `command.v1`
                         // handlers: pivot into the `!head ` command composer
@@ -573,13 +743,11 @@ impl ScriptListApp {
                                 pivot_filter_bytes = new_filter.len(),
                                 "Pivoting main-list command-handler launch into !head composer"
                             );
-                            self.filter_text = new_filter.clone();
-                            self.computed_filter_text = new_filter.clone();
+                            self.filter_text = new_filter;
                             self.pending_filter_sync = true;
-                            self.set_menu_syntax_mode_from_filter(&new_filter);
-                            self.invalidate_grouped_cache();
+                            self.flush_pending_main_menu_query(cx);
                             cx.notify();
-                            return;
+                            return Ok(MainMenuDispatchResult::Dispatched);
                         }
                         self.execute_interactive(&script_match.script, cx);
                     }
@@ -587,7 +755,23 @@ impl ScriptListApp {
                         self.execute_scriptlet(&scriptlet_match.scriptlet, cx);
                     }
                     scripts::SearchResult::BuiltIn(builtin_match) => {
-                        self.execute_builtin(&builtin_match.entry, cx);
+                        let outcome = self.execute_builtin(&builtin_match.entry, cx);
+                        self.set_main_menu_dispatch_observation(observation.clone());
+                        let Some(outcome) = outcome else {
+                            self.update_main_menu_dispatch_status(
+                                "pendingConfirmation",
+                                Some("main_menu_confirmation_pending"),
+                            );
+                            return Ok(MainMenuDispatchResult::PendingConfirmation);
+                        };
+                        if outcome.status != crate::action_helpers::ActionOutcomeStatus::Success {
+                            let reason = outcome
+                                .error_code
+                                .unwrap_or("main_menu_builtin_not_completed");
+                            self.update_main_menu_dispatch_status("refused", Some(reason));
+                            anyhow::bail!(reason);
+                        }
+                        self.update_main_menu_dispatch_status("completed", None);
                     }
                     scripts::SearchResult::App(app_match) => {
                         self.execute_app(&app_match.app, cx);
@@ -599,10 +783,25 @@ impl ScriptListApp {
                         self.execute_root_file_open(&file_match.file, cx);
                     }
                     scripts::SearchResult::Note(note_match) => {
-                        self.execute_root_note_open(note_match.hit.id, cx);
+                        let outcome = self.execute_root_note_open(note_match.hit.id, cx);
+                        self.set_main_menu_dispatch_observation(observation.clone());
+                        if let Err(reason) = outcome {
+                            self.update_main_menu_dispatch_status("refused", Some(reason));
+                            anyhow::bail!(reason);
+                        }
+                        self.update_main_menu_dispatch_status("completed", None);
                     }
                     scripts::SearchResult::BrainHit(brain_match) => {
-                        self.execute_root_brain_hit_open(&brain_match.hit, cx);
+                        let outcome = self.execute_root_brain_hit_open(&brain_match.hit, cx);
+                        self.set_main_menu_dispatch_observation(observation.clone());
+                        if let Err(reason) = outcome {
+                            self.update_main_menu_dispatch_status("refused", Some(reason));
+                            anyhow::bail!(reason);
+                        }
+                        // Other Brain routes enqueue work without observing its completion.
+                        if brain_match.hit.source == crate::brain::DocSource::Note {
+                            self.update_main_menu_dispatch_status("completed", None);
+                        }
                     }
                     scripts::SearchResult::BrainInboxItem(inbox_match) => {
                         self.execute_root_brain_inbox_open(inbox_match.item, cx);
@@ -654,7 +853,7 @@ impl ScriptListApp {
                                         flow_id = %flow_id,
                                         "Flow identity row lost its descriptor; cannot launch"
                                     );
-                                    return;
+                                    anyhow::bail!("main_menu_flow_descriptor_missing");
                                 };
                                 tracing::info!(
                                     event = "flow_session_launch_requested",
@@ -712,6 +911,7 @@ impl ScriptListApp {
                             ),
                             "Agent execution suppressed in main menu - use skills or Agent Chat"
                         );
+                        anyhow::bail!("main_menu_legacy_agent_not_activatable");
                     }
                     scripts::SearchResult::Fallback(fallback_match) => {
                         // Execute the fallback with the current filter text as input
@@ -721,31 +921,26 @@ impl ScriptListApp {
                         self.open_script_issues_view(cx);
                     }
                     scripts::SearchResult::SpineProjection(_) => {
-                        // Spine projection rows are not actionable from the main menu.
+                        anyhow::bail!("main_menu_spine_action_requires_live_window");
                     }
                 }
+                return Ok(MainMenuDispatchResult::Dispatched);
             }
         }
+        anyhow::bail!("main_menu_selected_subject_missing")
     }
 
     pub(crate) fn selected_main_list_search_result_owned(
         &mut self,
     ) -> Option<scripts::SearchResult> {
-        if !matches!(self.current_view, AppView::ScriptList) {
-            return None;
+        match self.resolved_main_menu_selected_subject()? {
+            ResolvedMainMenuSelection::SearchResult { row, result }
+                if row.eligibility.activatable =>
+            {
+                Some(result.clone())
+            }
+            _ => None,
         }
-
-        let (_resolved_index, result_idx) = self.live_script_list_flat_selection_for_submit()?;
-
-        if self
-            .inline_calculator_for_result_index(result_idx)
-            .is_some()
-        {
-            return None;
-        }
-
-        self.main_menu_result_caches
-            .cloned_search_result_for_flat_index(result_idx)
     }
 
     pub(crate) fn selected_root_file_result_owned(
@@ -761,12 +956,16 @@ impl ScriptListApp {
         &mut self,
         note_id: crate::notes::NoteId,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), &'static str> {
         match crate::notes::open_note_in_notes_window(cx, note_id) {
-            Ok(()) => self.hide_main_and_reset(cx),
+            Ok(()) => {
+                self.hide_main_and_reset(cx);
+                Ok(())
+            }
             Err(error) => {
                 logging::log("ERROR", &format!("Failed to open root note: {error}"));
                 self.show_hud("Failed to open note".to_string(), Some(HUD_MEDIUM_MS), cx);
+                Err("main_menu_note_open_failed")
             }
         }
     }
@@ -780,18 +979,21 @@ impl ScriptListApp {
         &mut self,
         hit: &crate::brain::RootBrainSearchHit,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), &'static str> {
         match hit.source {
-            crate::brain::DocSource::Note => match crate::notes::NoteId::parse(&hit.source_id) {
-                Some(note_id) => self.execute_root_note_open(note_id, cx),
-                None => {
-                    logging::log(
-                        "ERROR",
-                        &format!("Brain hit has invalid note id: {}", hit.source_id),
-                    );
-                    self.show_hud("Failed to open note".to_string(), Some(HUD_MEDIUM_MS), cx);
-                }
-            },
+            crate::brain::DocSource::Note => {
+                return match crate::notes::NoteId::parse(&hit.source_id) {
+                    Some(note_id) => self.execute_root_note_open(note_id, cx),
+                    None => {
+                        logging::log(
+                            "ERROR",
+                            &format!("Brain hit has invalid note id: {}", hit.source_id),
+                        );
+                        self.show_hud("Failed to open note".to_string(), Some(HUD_MEDIUM_MS), cx);
+                        Err("brain_note_id_invalid")
+                    }
+                };
+            }
             crate::brain::DocSource::ChatTurn => {
                 // source_id is "{thread_id}#{turn_index}"; resume by thread id.
                 let thread_id = hit
@@ -817,6 +1019,7 @@ impl ScriptListApp {
                 self.open_brain_memory_preview(hit, cx);
             }
         }
+        Ok(())
     }
 
     /// Open a read-only preview of a brain memory in the main window. Reuses
@@ -870,6 +1073,7 @@ impl ScriptListApp {
         );
         let entity = cx.new(|_| div_prompt);
         self.current_view = AppView::DivPrompt { id, entity };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None;
         self.pending_focus = Some(FocusTarget::AppRoot);
         resize_to_view_sync(ViewType::DivPrompt, 0);
@@ -1014,23 +1218,32 @@ impl ScriptListApp {
         Self::root_file_search_in_folder_query(&file)
     }
 
-    fn record_root_file_open_use(&mut self, file: &crate::file_search::FileResult) {
+    fn record_root_file_open_use(
+        &mut self,
+        file: &crate::file_search::FileResult,
+        cx: &mut Context<Self>,
+    ) {
         let keys = root_file_open_frecency_keys(file);
-        for key in [keys.file.as_deref(), keys.directory.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            self.frecency_store.record_use(key);
+        if keys.file.is_none() && keys.directory.is_none() {
+            return;
         }
-        if let Err(error) = self.frecency_store.save() {
-            tracing::warn!(
-                path_sha256 = %crate::logging::log_private_user_value(&file.path),
-                path_bytes = file.path.len(),
-                error_sha256 = %crate::logging::log_private_user_value(&error.to_string()),
-                "Failed to save root file frecency after open"
-            );
-        }
-        self.invalidate_grouped_cache();
+        self.commit_main_menu_results_refresh("root_file_open_recorded", None, cx, |app, _cx| {
+            for key in [keys.file.as_deref(), keys.directory.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                app.frecency_store.record_use(key);
+            }
+            if let Err(error) = app.frecency_store.save() {
+                tracing::warn!(
+                    path_sha256 = %crate::logging::log_private_user_value(&file.path),
+                    path_bytes = file.path.len(),
+                    error_sha256 = %crate::logging::log_private_user_value(&error.to_string()),
+                    "Failed to save root file frecency after open"
+                );
+            }
+            true
+        });
     }
 
     pub(crate) fn execute_root_file_open(
@@ -1063,7 +1276,7 @@ impl ScriptListApp {
             );
             return;
         }
-        self.record_root_file_open_use(file);
+        self.record_root_file_open_use(file, cx);
         self.close_and_reset_window(cx);
     }
 
@@ -1441,44 +1654,6 @@ impl ScriptListApp {
         }
     }
 
-    /// Execute the currently selected fallback command
-    /// This is called from keyboard handler, so we need to defer window access
-    pub fn execute_selected_fallback(&mut self, cx: &mut Context<Self>) {
-        if self.should_consume_script_list_enter_after_submit("execute_selected_fallback") {
-            logging::log(
-                "KEY",
-                "Ignoring execute_selected_fallback: prompt submit already consumed this Enter",
-            );
-            return;
-        }
-
-        if let Some(scripts::SearchResult::Fallback(fallback_match)) =
-            self.selected_main_list_search_result_owned()
-        {
-            let submitted_value = fallback_match.display_name();
-            self.record_submit_diagnostic(
-                "launcher_fallback",
-                "execute_selected_fallback.grouped",
-                None,
-                Some(submitted_value.as_str()),
-                false,
-            );
-            logging::log(
-                "EXEC",
-                &format!(
-                    "Executing selected grouped fallback: {}",
-                    fallback_match.display_name()
-                ),
-            );
-            self.execute_fallback_item(&fallback_match.fallback, cx);
-            return;
-        }
-
-        self.record_blocked_script_list_submit(
-            "execute_selected_fallback.no_live_grouped_fallback",
-        );
-    }
-
     /// Execute a built-in fallback action without window reference
     pub(crate) fn execute_builtin_fallback_inline(
         &mut self,
@@ -1638,7 +1813,7 @@ impl ScriptListApp {
                         return;
                     };
 
-                    self.execute_builtin_with_query(&entry, Some(input), cx);
+                    let _outcome = self.execute_builtin_with_query(&entry, Some(input), cx);
                 }
                 FallbackResult::SendToAiHarness { query } => {
                     logging::log(
@@ -1687,6 +1862,7 @@ impl ScriptListApp {
         );
 
         self.current_view = AppView::ScriptIssuesView { report };
+        self.note_main_route_changed();
         self.request_script_list_main_filter_focus(cx);
         cx.notify();
     }
@@ -1720,44 +1896,6 @@ fn root_file_open_frecency_keys(file: &crate::file_search::FileResult) -> RootFi
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_resolve_grouped_result_index_coerces_section_header_selection() {
-        let grouped_items = vec![
-            GroupedListItem::SectionHeader("Suggested".to_string(), None),
-            GroupedListItem::Item(3),
-            GroupedListItem::Item(4),
-        ];
-
-        assert_eq!(
-            resolve_grouped_result_index(&grouped_items, 0),
-            Some((1, 3))
-        );
-    }
-
-    #[test]
-    fn test_resolve_grouped_result_index_clamps_out_of_bounds_selection() {
-        let grouped_items = vec![
-            GroupedListItem::SectionHeader("Suggested".to_string(), None),
-            GroupedListItem::Item(8),
-            GroupedListItem::SectionHeader("Main".to_string(), None),
-        ];
-
-        assert_eq!(
-            resolve_grouped_result_index(&grouped_items, 100),
-            Some((1, 8))
-        );
-    }
-
-    #[test]
-    fn test_resolve_grouped_result_index_returns_none_for_header_only_rows() {
-        let grouped_items = vec![
-            GroupedListItem::SectionHeader("Suggested".to_string(), None),
-            GroupedListItem::SectionHeader("Main".to_string(), None),
-        ];
-
-        assert_eq!(resolve_grouped_result_index(&grouped_items, 0), None);
-    }
 
     #[test]
     fn test_fallback_keeps_window_open_for_send_to_ai() {

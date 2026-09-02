@@ -1426,7 +1426,7 @@ fn footer_icon_png_from_svg(svg: &str) -> Option<Vec<u8>> {
         &mut pixmap.as_mut(),
     );
     let rgba = pixmap.take();
-    if !rgba.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+    if !rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0) {
         return None;
     }
     let image = image::RgbaImage::from_raw(size, size, rgba)?;

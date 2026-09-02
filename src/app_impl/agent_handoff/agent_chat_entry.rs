@@ -420,14 +420,16 @@ impl AgentChatEntryRequest {
 struct AgentChatEntryBaseline {
     host: Option<&'static str>,
     thread_id: Option<String>,
-    message_count: usize,
-    context_count: usize,
+    accepted_turn: Option<u64>,
+    context_ids: Vec<crate::ai::staged_context::ContextItemId>,
 }
 
 struct AgentChatEntryObservedSnapshot {
     host: &'static str,
     thread_id: String,
     state: crate::protocol::AgentChatStateSnapshot,
+    accepted_submission: Option<(u64, String)>,
+    context_ids: Vec<crate::ai::staged_context::ContextItemId>,
 }
 
 #[derive(Clone, Debug)]
@@ -451,11 +453,14 @@ impl ScriptListApp {
             )
         };
         let view = entity.read(cx);
-        let thread_id = view.thread()?.read(cx).ui_thread_id().to_string();
+        let thread = view.thread()?.read(cx);
+        let thread_id = thread.ui_thread_id().to_string();
         Some(AgentChatEntryObservedSnapshot {
             host,
             thread_id,
             state: view.collect_agent_chat_state_snapshot(cx),
+            accepted_submission: thread.accepted_submission().map(|(id, text)| (id, text.to_string())),
+            context_ids: thread.staged_context_identities(),
         })
     }
 
@@ -465,8 +470,8 @@ impl ScriptListApp {
             |observed| AgentChatEntryBaseline {
                 host: Some(observed.host),
                 thread_id: Some(observed.thread_id),
-                message_count: observed.state.message_count,
-                context_count: observed.state.context_chip_count,
+                accepted_turn: observed.accepted_submission.map(|(id, _)| id),
+                context_ids: observed.context_ids,
             },
         )
     }
@@ -480,14 +485,13 @@ impl ScriptListApp {
         let observed = self.agent_chat_entry_snapshot(cx)?;
         let same_destination = plan.baseline.host == Some(observed.host)
             && plan.baseline.thread_id.as_deref() == Some(observed.thread_id.as_str());
-        let submitted = if same_destination {
-            observed.state.message_count > plan.baseline.message_count
-        } else {
-            observed.state.message_count > 0
-        };
+        let submitted = observed.accepted_submission.as_ref().is_some_and(|(turn, text)| {
+            (!same_destination || plan.baseline.accepted_turn != Some(*turn))
+                && plan.seed_text.as_deref().is_none_or(|seed| text == seed.trim())
+        });
         let text_staged = match plan.seed_text.as_deref() {
             None => true,
-            Some(seed)
+            Some(_)
                 if plan.verb == AgentChatEntryVerb::Ask
                     || plan.verb == AgentChatEntryVerb::Send =>
             {
@@ -495,7 +499,8 @@ impl ScriptListApp {
             }
             Some(seed) => observed.state.input_text == seed,
         };
-        let context_staged = observed.state.context_chip_count > plan.baseline.context_count;
+        let context_staged = observed.context_ids.iter()
+            .any(|id| !same_destination || !plan.baseline.context_ids.contains(id));
         let submission = if matches!(
             plan.verb,
             AgentChatEntryVerb::Ask | AgentChatEntryVerb::Send

@@ -853,41 +853,41 @@ impl ScriptListApp {
         focused_semantic_id: &'static str,
     ) -> serde_json::Value {
         let item_count = semantic_ids.len();
-        let selected_index = (!semantic_ids.is_empty())
-            .then_some(selected_index.min(item_count.saturating_sub(1)));
+        let selected_index =
+            (!semantic_ids.is_empty()).then_some(selected_index.min(item_count.saturating_sub(1)));
         let hovered_index = self.hovered_index.filter(|index| *index < item_count);
         let state = handle.0.borrow();
-        let (scroll_top_item, offset_in_item) = state.base_handle.logical_scroll_top();
-        let scroll_top_item = scroll_top_item.min(item_count.saturating_sub(1));
         let measured = state.last_item_size.filter(|_| item_count > 0);
         let row_height = measured
             .map(|size| size.contents.height.as_f32() / item_count as f32)
             .filter(|height| height.is_finite() && *height > 0.0);
         let viewport_height = measured.map(|size| size.item.height.as_f32().max(0.0));
         let content_height = measured.map(|size| size.contents.height.as_f32().max(0.0));
-        let scroll_top_offset_px =
-            row_height.map(|height| (-offset_in_item.as_f32()).clamp(0.0, height));
+        // UniformList tracks pixel offsets, not Div child bounds. The base
+        // handle's logical_scroll_top() therefore cannot identify its rows.
+        let scroll_top_px = measured.map(|_| (-state.base_handle.offset().y.as_f32()).max(0.0));
+        let logical_scroll_top = scroll_top_px
+            .zip(row_height)
+            .map(|(offset, height)| offset / height);
+        let scroll_top_item = logical_scroll_top
+            .map(|top| (top.floor() as usize).min(item_count.saturating_sub(1)))
+            .unwrap_or(0);
+        let scroll_top_offset_px = scroll_top_px
+            .zip(row_height)
+            .map(|(offset, height)| (offset - scroll_top_item as f32 * height).clamp(0.0, height));
         let scroll_top_offset_items = scroll_top_offset_px
             .zip(row_height)
             .map(|(offset, height)| (offset / height).clamp(0.0, 0.999_999));
-        let logical_scroll_top =
-            scroll_top_offset_items.map(|offset| scroll_top_item as f32 + offset);
-        let scroll_top_px = row_height
-            .zip(scroll_top_offset_px)
-            .map(|(height, offset)| scroll_top_item as f32 * height + offset);
-        let last_visible_index_exclusive = viewport_height
-            .zip(row_height)
-            .zip(scroll_top_offset_px)
-            .map(|((viewport, height), offset)| {
-                (scroll_top_item + ((viewport + offset) / height).ceil() as usize).min(item_count)
-            });
+        let last_visible_index_exclusive = viewport_height.zip(row_height).zip(scroll_top_px).map(
+            |((viewport, height), offset)| {
+                ((offset + viewport) / height).ceil().min(item_count as f32) as usize
+            },
+        );
         let first_visible_index = (!semantic_ids.is_empty()).then_some(scroll_top_item);
         let selected_row_top = selected_index
             .zip(row_height)
-            .zip(scroll_top_offset_px)
-            .map(|((selected, height), offset)| {
-                (selected as isize - scroll_top_item as isize) as f32 * height - offset
-            });
+            .zip(scroll_top_px)
+            .map(|((selected, height), offset)| selected as f32 * height - offset);
         let selected_row_within_safe_viewport = selected_row_top
             .zip(row_height)
             .zip(viewport_height)
@@ -935,8 +935,8 @@ impl ScriptListApp {
         focused_semantic_id: &'static str,
     ) -> serde_json::Value {
         let item_count = semantic_ids.len();
-        let selected_index = (!semantic_ids.is_empty())
-            .then_some(selected_index.min(item_count.saturating_sub(1)));
+        let selected_index =
+            (!semantic_ids.is_empty()).then_some(selected_index.min(item_count.saturating_sub(1)));
         let hovered_index = self.hovered_index.filter(|index| *index < item_count);
         let (scroll_top_item, offset_in_item) = handle.logical_scroll_top();
         let scroll_top_item = scroll_top_item.min(item_count.saturating_sub(1));
@@ -1001,11 +1001,55 @@ impl ScriptListApp {
         })
     }
 
-    /// One stable semantic/viewport schema for every native-scrolling builtin.
+    /// One stable semantic/viewport schema for native-scrolling builtins and prompts.
     /// Returns `None` for non-migrated or non-list surfaces so callers fail
     /// closed instead of projecting unrelated state onto this contract.
-    pub(crate) fn active_builtin_list_scroll_receipt(&self) -> Option<serde_json::Value> {
+    pub(crate) fn active_builtin_list_scroll_receipt(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<serde_json::Value> {
         match &self.current_view {
+            AppView::ArgPrompt { choices, .. } | AppView::MiniPrompt { choices, .. } => {
+                let ids = self
+                    .get_filtered_arg_choices(choices)
+                    .iter()
+                    .enumerate()
+                    .map(|(display_index, choice)| choice.generate_id(display_index))
+                    .collect();
+                let surface = if matches!(self.current_view, AppView::MiniPrompt { .. }) {
+                    "mini"
+                } else {
+                    "arg"
+                };
+                Some(self.active_uniform_list_scroll_receipt(
+                    surface,
+                    &self.arg_list_scroll_handle,
+                    ids,
+                    self.arg_selected_index,
+                    "input:filter",
+                ))
+            }
+            AppView::SelectPrompt { entity, .. } => {
+                let prompt = entity.read(cx);
+                let ids = prompt
+                    .filtered_choices
+                    .iter()
+                    .map(|&source_index| {
+                        let choice = &prompt.choices[source_index];
+                        choice
+                            .semantic_id
+                            .clone()
+                            .unwrap_or_else(|| choice.generate_id(source_index))
+                    })
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "select",
+                    &prompt.list_scroll_handle,
+                    ids,
+                    prompt.focused_index,
+                    "input:select-filter",
+                ))
+            }
             AppView::AppLauncherView {
                 filter,
                 selected_index,
@@ -1252,6 +1296,7 @@ impl ScriptListApp {
         source: crate::scrolling::list_interaction::ListViewportInputSource,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.note_main_menu_viewport_input(source);
         let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
             hovered_index: self.hovered_index,
             suppress_hover_until_pointer_move: self.list_suppress_hover_until_pointer_move,

@@ -94,6 +94,7 @@ pub fn check_screen_recording_permission() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn capture_frontmost_window_screenshot() -> anyhow::Result<(Vec<u8>, u32, u32, String, i32)> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     use cocoa::base::{id, nil};
     use cocoa::foundation::NSString;
     use objc::{class, msg_send, sel, sel_impl};
@@ -157,6 +158,15 @@ pub fn run_vision_ocr(_png_data: &[u8]) -> anyhow::Result<String> {
 }
 
 pub fn capture_visual_context(generation: u64) -> VisualContextCapture {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)
+    {
+        return VisualContextCapture {
+            state: VisualContextState::Unavailable(error.to_string()),
+            generation,
+            ..Default::default()
+        };
+    }
     if !check_screen_recording_permission() {
         return VisualContextCapture {
             state: VisualContextState::Unavailable(

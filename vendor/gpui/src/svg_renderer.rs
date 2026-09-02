@@ -151,7 +151,7 @@ impl SvgRenderer {
         bytes: &[u8],
         scale_factor: f32,
         to_brga: bool,
-    ) -> Result<Arc<RenderImage>, usvg::Error> {
+    ) -> Result<Arc<RenderImage>> {
         self.render_pixmap(
             bytes,
             SvgSize::ScaleFactor(scale_factor * SMOOTH_SVG_SCALE_FACTOR),
@@ -206,13 +206,124 @@ impl SvgRenderer {
         }
     }
 
-    fn render_pixmap(&self, bytes: &[u8], size: SvgSize) -> Result<Pixmap, usvg::Error> {
-        let tree = usvg::Tree::from_data(bytes, &self.usvg_options)?;
+    fn owned_tree(&self, bytes: &[u8], guard: &crate::OwnedHiddenGuard) -> Result<usvg::Tree> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let bytes = crate::owned_svg_bytes(bytes)?;
+        let failure = parking_lot::Mutex::new(None::<anyhow::Error>);
+        let resource_bytes = AtomicU64::new(bytes.len() as u64);
+        let resource_pixels = AtomicU64::new(0);
+        let default_data = usvg::ImageHrefResolver::default_data_resolver();
+        let resolve_data = |mime: &str, data: Arc<Vec<u8>>, options: &usvg::Options<'_>| {
+            if failure.lock().is_some() {
+                return None;
+            }
+            let result = (|| -> Result<Option<usvg::ImageKind>> {
+                let data = if data.starts_with(&[0x1f, 0x8b]) {
+                    Arc::new(crate::owned_svg_bytes(data.as_slice())?.into_owned())
+                } else {
+                    data
+                };
+                resource_bytes
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                        used.checked_add(data.len() as u64)
+                            .filter(|next| *next <= crate::OWNED_HIDDEN_MAX_RESOURCE_BYTES)
+                    })
+                    .map_err(|_| guard.refuse("svg_resource_byte_limit"))?;
+                if let Ok(format) = image::guess_format(&data) {
+                    let mut reader = image::ImageReader::with_format(
+                        std::io::Cursor::new(data.as_slice()),
+                        format,
+                    );
+                    reader.limits(crate::owned_image_limits());
+                    let (width, height) = reader.into_dimensions()?;
+                    let pixels = crate::validate_owned_image_size(width, height)?;
+                    resource_pixels
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                            used.checked_add(pixels)
+                                .filter(|next| *next <= crate::OWNED_HIDDEN_MAX_PIXELS)
+                        })
+                        .map_err(|_| guard.refuse("svg_resource_pixel_limit"))?;
+                }
+                Ok(default_data(mime, data, options))
+            })();
+            match result {
+                Ok(image) => image,
+                Err(error) => {
+                    let mut failure = failure.lock();
+                    if failure.is_none() {
+                        *failure = Some(error);
+                    }
+                    None
+                }
+            }
+        };
+        let options = usvg::Options {
+            fontdb: self.usvg_options.fontdb.clone(),
+            font_resolver: usvg::FontResolver {
+                select_font: Box::new(|font, db| {
+                    (self.usvg_options.font_resolver.select_font)(font, db)
+                }),
+                select_fallback: Box::new(|ch, fonts, db| {
+                    (self.usvg_options.font_resolver.select_fallback)(ch, fonts, db)
+                }),
+            },
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_data: Box::new(|mime, data, options| resolve_data(mime, data, options)),
+                resolve_string: Box::new(|href, options| {
+                    if failure.lock().is_some() {
+                        return None;
+                    }
+                    let result = if href.contains("://") {
+                        Err(guard.refuse("network_resource"))
+                    } else {
+                        guard.read_resource_path(&options.get_abs_path(std::path::Path::new(href)))
+                    };
+                    match result {
+                        Ok(data) => resolve_data("text/plain", Arc::new(data), options),
+                        Err(error) => {
+                            let mut failure = failure.lock();
+                            if failure.is_none() {
+                                *failure = Some(error);
+                            }
+                            None
+                        }
+                    }
+                }),
+            },
+            ..Default::default()
+        };
+        let tree = usvg::Tree::from_str(std::str::from_utf8(&bytes)?, &options);
+        if let Some(error) = failure.lock().take() {
+            return Err(error);
+        }
+        Ok(tree?)
+    }
+
+    fn render_pixmap(&self, bytes: &[u8], size: SvgSize) -> Result<Pixmap> {
+        let tree = if let Some(guard) = crate::OwnedHiddenGuard::installed() {
+            self.owned_tree(bytes, guard)?
+        } else {
+            usvg::Tree::from_data(bytes, &self.usvg_options)?
+        };
         let svg_size = tree.size();
         let scale = match size {
             SvgSize::Size(size) => size.width.0 as f32 / svg_size.width(),
             SvgSize::ScaleFactor(scale) => scale,
         };
+        if crate::OwnedHiddenGuard::installed().is_some() {
+            let width = svg_size.width() * scale;
+            let height = svg_size.height() * scale;
+            anyhow::ensure!(
+                width.is_finite()
+                    && height.is_finite()
+                    && width >= 1.0
+                    && height >= 1.0
+                    && width <= crate::OWNED_HIDDEN_MAX_PIXELS as f32
+                    && height <= crate::OWNED_HIDDEN_MAX_PIXELS as f32,
+                "owned_svg_pixel_limit"
+            );
+            crate::validate_owned_image_size(width as u32, height as u32)?;
+        }
 
         // Render the SVG to a pixmap with the specified width and height.
         let mut pixmap = resvg::tiny_skia::Pixmap::new(
@@ -232,6 +343,30 @@ impl SvgRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_svg_refusal_fails_the_whole_load_instead_of_omitting_the_image() {
+        let renderer = SvgRenderer::new(Arc::new(()));
+        let guard = crate::OwnedHiddenGuard::default();
+        let local = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="/unapproved-image.png" width="10" height="10"/><image href="https://example.invalid/must-not-run.png" width="10" height="10"/></svg>"#;
+        let error = renderer.owned_tree(local, &guard).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resource_path_validator_missing")
+        );
+        let network = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="https://example.invalid/image.png" width="10" height="10"/></svg>"#;
+        assert!(
+            renderer
+                .owned_tree(network, &guard)
+                .unwrap_err()
+                .to_string()
+                .contains("network_resource")
+        );
+        let embedded = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+        assert!(renderer.owned_tree(embedded, &guard).is_ok());
+        assert_eq!(guard.observation().refused_operations, 2);
+    }
 
     const IBM_PLEX_REGULAR: &[u8] =
         include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");

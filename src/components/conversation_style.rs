@@ -30,6 +30,7 @@
 //!   rounding/cast behavior (0x7F borders, 0x14 diff tints, the decimal-50
 //!   error background, send-state bytes) has exactly one owner.
 
+use crate::theme::{pack_rgb_alpha, AlphaByte};
 // ── Style definition ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,7 +62,7 @@ pub struct ConversationActionStyle {
     pub button_opacity: f32,
     pub button_hover_opacity: f32,
     /// Hover surface tint alpha over `text.primary`.
-    pub button_hover_bg_alpha: f32,
+    pub button_hover_bg_alpha: AlphaByte,
     pub icon_size: f32,
     /// Streaming activity dot painted at the control's bottom-right corner.
     pub activity_dot_size: f32,
@@ -78,7 +79,7 @@ pub struct ConversationTranscriptStyle {
     pub response_start_margin_top: f32,
     pub turn_margin_top: f32,
     pub turn_padding_top: f32,
-    pub turn_divider_alpha: f32,
+    pub turn_divider_alpha: AlphaByte,
     pub focused_preview_padding_x: f32,
     pub focused_preview_padding_bottom: f32,
 }
@@ -94,13 +95,13 @@ pub struct ConversationMarkdownStyle {
     pub code_block_padding_x: f32,
     pub code_block_padding_y: f32,
     pub code_block_radius: f32,
-    pub code_block_bg_alpha: f32,
-    pub code_block_border_alpha: f32,
+    pub code_block_bg_alpha: AlphaByte,
+    pub code_block_border_alpha: AlphaByte,
     pub blockquote_padding_x: f32,
     pub blockquote_padding_y: f32,
     pub blockquote_radius: f32,
-    pub blockquote_bg_alpha: f32,
-    pub blockquote_border_alpha: f32,
+    pub blockquote_bg_alpha: AlphaByte,
+    pub blockquote_border_alpha: AlphaByte,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,7 +110,7 @@ pub struct ConversationMessageStyle {
     pub padding_y: f32,
     pub dense_padding_y: f32,
     pub radius: f32,
-    pub bg_alpha: f32,
+    pub bg_alpha: AlphaByte,
     /// Applied ONLY under the RoleSplit transcript presentation; Standard
     /// paints full-width rows (variant-limited source fact, not dead).
     pub max_width: f32,
@@ -124,8 +125,8 @@ pub struct ConversationCollapsibleStyle {
     pub thought_header_opacity: f32,
     pub tool_header_opacity: f32,
     pub status_opacity: f32,
-    pub thought_border_alpha: f32,
-    pub tool_border_alpha: f32,
+    pub thought_border_alpha: AlphaByte,
+    pub tool_border_alpha: AlphaByte,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -136,8 +137,8 @@ pub struct ConversationErrorStyle {
     /// NOTE: authored as DECIMAL 50 (= 0x32) while sibling alphas are
     /// hex-authored — recorded as the `agentChat.error.bgAlphaUnits`
     /// contract conflict, deliberately NOT normalized here.
-    pub bg_alpha: f32,
-    pub border_alpha: f32,
+    pub bg_alpha: AlphaByte,
+    pub border_alpha: AlphaByte,
     pub label_opacity: f32,
     pub hint_opacity: f32,
 }
@@ -147,7 +148,7 @@ pub struct ConversationSystemStyle {
     pub padding_x: f32,
     pub padding_y: f32,
     pub opacity: f32,
-    pub border_alpha: f32,
+    pub border_alpha: AlphaByte,
 }
 
 /// The production conversation base style. Checked-in design artifacts and
@@ -161,7 +162,7 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             response_start_margin_top: 4.0,
             turn_margin_top: 8.0,
             turn_padding_top: 8.0,
-            turn_divider_alpha: 0x18 as f32,
+            turn_divider_alpha: AlphaByte::authored(0x18),
             focused_preview_padding_x: 8.0,
             focused_preview_padding_bottom: 4.0,
         },
@@ -175,20 +176,20 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             code_block_padding_x: 7.0,
             code_block_padding_y: 4.0,
             code_block_radius: 5.0,
-            code_block_bg_alpha: 0xA0 as f32,
-            code_block_border_alpha: 0x40 as f32,
+            code_block_bg_alpha: AlphaByte::authored(0xA0),
+            code_block_border_alpha: AlphaByte::authored(0x40),
             blockquote_padding_x: 12.0,
             blockquote_padding_y: 6.0,
             blockquote_radius: 5.0,
-            blockquote_bg_alpha: 0x10 as f32,
-            blockquote_border_alpha: 0x40 as f32,
+            blockquote_bg_alpha: AlphaByte::authored(0x10),
+            blockquote_border_alpha: AlphaByte::authored(0x40),
         },
         user_message: ConversationMessageStyle {
             padding_x: 12.0,
             padding_y: 8.0,
             dense_padding_y: 3.0,
             radius: 8.0,
-            bg_alpha: 0x06 as f32,
+            bg_alpha: AlphaByte::authored(0x06),
             max_width: 520.0,
         },
         assistant_message: ConversationMessageStyle {
@@ -196,7 +197,7 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             padding_y: 4.0,
             dense_padding_y: 2.0,
             radius: 0.0,
-            bg_alpha: 0.0,
+            bg_alpha: AlphaByte::authored(0x00),
             max_width: 620.0,
         },
         collapsible: ConversationCollapsibleStyle {
@@ -207,15 +208,15 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             thought_header_opacity: 0.75,
             tool_header_opacity: 0.75,
             status_opacity: 0.50,
-            thought_border_alpha: 0x7f as f32,
-            tool_border_alpha: 0x7f as f32,
+            thought_border_alpha: AlphaByte::authored(0x7f),
+            tool_border_alpha: AlphaByte::authored(0x7f),
         },
         error: ConversationErrorStyle {
             padding_x: 12.0,
             padding_y: 8.0,
             radius: 8.0,
-            bg_alpha: 50.0,
-            border_alpha: 0x80 as f32,
+            bg_alpha: AlphaByte::authored(50),
+            border_alpha: AlphaByte::authored(0x80),
             label_opacity: 0.75,
             hint_opacity: 0.40,
         },
@@ -223,7 +224,7 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             padding_x: 12.0,
             padding_y: 4.0,
             opacity: 0.60,
-            border_alpha: 0x30 as f32,
+            border_alpha: AlphaByte::authored(0x30),
         },
         actions: ConversationActionStyle {
             button_size: 24.0,
@@ -233,7 +234,7 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             // Flow resolved its hover surface through
             // `theme::hover_overlay_bg(&theme, 0x28)`; the alpha is carried
             // here so both surfaces tint identically.
-            button_hover_bg_alpha: 0x28 as f32,
+            button_hover_bg_alpha: AlphaByte::authored(0x28),
             icon_size: 16.0,
             activity_dot_size: 7.0,
             activity_dot_inset: 1.0,
@@ -270,13 +271,13 @@ pub(crate) const CONVERSATION_PLACEHOLDER_FOLLOW_UP: &str = "Follow up\u{2026}";
 pub(crate) const CONVERSATION_SEND_SIZE: f32 = 24.0;
 pub(crate) const CONVERSATION_SEND_RADIUS: f32 = 6.0;
 /// idle + empty input: `text.primary @ 0x06`, opacity 0.30 (`↑`).
-pub(crate) const CONVERSATION_SEND_DISABLED_BG_ALPHA: f32 = 0x06 as f32;
+pub(crate) const CONVERSATION_SEND_DISABLED_BG_ALPHA: AlphaByte = AlphaByte::authored(0x06);
 pub(crate) const CONVERSATION_SEND_DISABLED_OPACITY: f32 = 0.30;
 /// idle + text: `accent @ 0x30`, opacity 0.90 (`↑`).
-pub(crate) const CONVERSATION_SEND_ENABLED_BG_ALPHA: f32 = 0x30 as f32;
+pub(crate) const CONVERSATION_SEND_ENABLED_BG_ALPHA: AlphaByte = AlphaByte::authored(0x30);
 pub(crate) const CONVERSATION_SEND_ENABLED_OPACITY: f32 = 0.90;
 /// streaming + text: `accent @ 0x24`, opacity 0.92 (queue `⇧`).
-pub(crate) const CONVERSATION_SEND_QUEUE_BG_ALPHA: f32 = 0x24 as f32;
+pub(crate) const CONVERSATION_SEND_QUEUE_BG_ALPHA: AlphaByte = AlphaByte::authored(0x24);
 pub(crate) const CONVERSATION_SEND_QUEUE_OPACITY: f32 = 0.92;
 /// streaming + empty: transparent, opacity 0.40 (activity dot `●`).
 pub(crate) const CONVERSATION_SEND_STREAMING_OPACITY: f32 = 0.40;
@@ -288,9 +289,9 @@ pub(crate) const CONVERSATION_BLOCK_BORDER_WIDTH: f32 = 2.0;
 /// Collapsible/tool header row gap (was `.gap_1()`).
 pub(crate) const CONVERSATION_BLOCK_HEADER_GAP: f32 = 4.0;
 /// Tool status glyph alpha for pending tools (`text.primary @ 0x80`).
-pub(crate) const CONVERSATION_TOOL_STATUS_PENDING_ALPHA: f32 = 0x80 as f32;
+pub(crate) const CONVERSATION_TOOL_STATUS_PENDING_ALPHA: AlphaByte = AlphaByte::authored(0x80);
 /// Added/removed diff row background tint alpha (`success/error @ 0x14`).
-pub(crate) const CONVERSATION_DIFF_TINT_ALPHA: f32 = 0x14 as f32;
+pub(crate) const CONVERSATION_DIFF_TINT_ALPHA: AlphaByte = AlphaByte::authored(0x14);
 /// Context (unchanged) diff row opacity.
 pub(crate) const CONVERSATION_DIFF_CONTEXT_OPACITY: f32 = 0.55;
 /// Synthetic activity tail row: pulsing accent dot diameter.
@@ -298,23 +299,7 @@ pub(crate) const CONVERSATION_ACTIVITY_DOT_SIZE: f32 = 7.0;
 /// Activity row dot ↔ label gap.
 pub(crate) const CONVERSATION_ACTIVITY_GAP: f32 = 8.0;
 /// Activity row "Thinking…" label alpha (`text.primary @ 0xB0`).
-pub(crate) const CONVERSATION_ACTIVITY_LABEL_ALPHA: f32 = 0xB0 as f32;
-
-// ── Shared alpha packing ───────────────────────────────────────────────────
-
-/// Pack a `0xRRGGBB` theme color with an authored f32 alpha byte. The f32
-/// arity is TRANSITIONAL (GOV-003): the conversation style fields above are
-/// authored alpha BYTES stored as `f32` only because their field-type flip to
-/// [`crate::theme::AlphaByte`] is blocked on the design-contract integration
-/// owner (`src/design_contract/**` reads them with `as f64` casts and
-/// `format!`; see INT-DESIGN-CONTRACT-GEO008-GOV003). The quantization/cast
-/// itself is now owned by the typed packer: this wrapper converts through
-/// [`crate::theme::AlphaByte::from_authored_f32`], which preserves the
-/// historical `alpha.round() as u32` cast byte-for-byte and debug-asserts
-/// the byte domain. Delete this wrapper when the field flip lands.
-pub(crate) fn pack_rgb_alpha(rgb: u32, alpha: f32) -> u32 {
-    crate::theme::alpha::pack_rgb_alpha(rgb, crate::theme::AlphaByte::from_authored_f32(alpha))
-}
+pub(crate) const CONVERSATION_ACTIVITY_LABEL_ALPHA: AlphaByte = AlphaByte::authored(0xB0);
 
 // ── Pure resolvers (theme × authored alphas → painted RGBA bytes) ─────────
 
@@ -481,21 +466,21 @@ mod conversation_style_contract_tests {
         let style = production_conversation_style();
         assert_eq!(style.transcript.row_padding_x, 16.0);
         assert_eq!(style.transcript.row_padding_bottom, 4.0);
-        assert_eq!(style.transcript.turn_divider_alpha, 0x18 as f32);
+        assert_eq!(style.transcript.turn_divider_alpha.get(), 0x18);
         assert_eq!(style.markdown.body_font_size, 14.0);
         assert_eq!(style.markdown.paragraph_gap, 0.28);
-        assert_eq!(style.markdown.code_block_bg_alpha, 0xA0 as f32);
-        assert_eq!(style.user_message.bg_alpha, 0x06 as f32);
-        assert_eq!(style.assistant_message.bg_alpha, 0.0);
+        assert_eq!(style.markdown.code_block_bg_alpha.get(), 0xA0);
+        assert_eq!(style.user_message.bg_alpha.get(), 0x06);
+        assert_eq!(style.assistant_message.bg_alpha.get(), 0);
         assert_eq!(style.assistant_message.radius, 0.0);
         // Separate thought/tool header opacities stay independently
         // addressable even while both equal 0.75.
         assert_eq!(style.collapsible.thought_header_opacity, 0.75);
         assert_eq!(style.collapsible.tool_header_opacity, 0.75);
-        assert_eq!(style.collapsible.thought_border_alpha, 0x7f as f32);
+        assert_eq!(style.collapsible.thought_border_alpha.get(), 0x7f);
         // The decimal-50 error bg alpha is a foot-gun, recorded as the
         // agentChat.error.bgAlphaUnits conflict — do not "fix" to hex here.
-        assert_eq!(style.error.bg_alpha, 50.0);
+        assert_eq!(style.error.bg_alpha.get(), 50);
     }
 
     /// GOV-003: the authored decimal-50 error byte stays EXACTLY 0x32
@@ -506,10 +491,7 @@ mod conversation_style_contract_tests {
     fn error_bg_alpha_is_the_authored_byte_0x32_never_a_normalized_opacity() {
         use crate::theme::AlphaByte;
         let style = production_conversation_style();
-        assert_eq!(
-            AlphaByte::from_authored_f32(style.error.bg_alpha).get(),
-            0x32
-        );
+        assert_eq!(style.error.bg_alpha.get(), 0x32);
         assert_eq!(AlphaByte::authored(0x32).get(), 0x32);
         // The negative control: feeding the authored decimal through the
         // normalized quantizer is NOT the same byte.

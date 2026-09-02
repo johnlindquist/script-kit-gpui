@@ -175,6 +175,9 @@ fn default_version() -> u32 {
 
 /// Get the path to the window state file: ~/.sk/kit/window-state.json
 pub fn get_state_file_path() -> PathBuf {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        return policy.root().join("window-state.json");
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".sk").join("kit").join("window-state.json")
 }
@@ -185,6 +188,9 @@ pub fn get_state_file_path() -> PathBuf {
 /// Load the entire window state file
 pub fn load_state_file() -> Option<WindowStateFile> {
     let path = get_state_file_path();
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(&path).ok()?;
+    }
     if !path.exists() {
         return None;
     }
@@ -211,6 +217,15 @@ pub fn load_state_file() -> Option<WindowStateFile> {
 /// Save the entire window state file (atomic write)
 pub fn save_state_file(state: &WindowStateFile) -> bool {
     let path = get_state_file_path();
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        if let Err(error) = policy.require_owned_path(&path) {
+            logging::log(
+                "WINDOW_STATE",
+                &format!("Window state write refused: {error}"),
+            );
+            return false;
+        }
+    }
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             logging::log(
@@ -230,7 +245,12 @@ pub fn save_state_file(state: &WindowStateFile) -> bool {
     // Atomic write via a UNIQUE temp file + rename. Window saves are not
     // serialized (multiple windows / instances can save concurrently), and a
     // fixed temp path let those interleave into a corrupt file.
-    if let Err(e) = crate::atomic_file::write_atomic(&path, json.as_bytes()) {
+    let written = if crate::runtime_policy::is_owned_evaluation() {
+        crate::atomic_file::write_private_atomic(&path, json.as_bytes())
+    } else {
+        crate::atomic_file::write_atomic(&path, json.as_bytes())
+    };
+    if let Err(e) = written {
         logging::log(
             "WINDOW_STATE",
             &format!("Failed to atomically write window state: {}", e),
@@ -238,6 +258,9 @@ pub fn save_state_file(state: &WindowStateFile) -> bool {
         return false;
     }
     logging::log("WINDOW_STATE", "Window state saved successfully");
+    if crate::runtime_policy::is_owned_evaluation() {
+        crate::runtime_policy::record_completed_fixture_effect();
+    }
     true
 }
 /// Load bounds for a specific window role
@@ -284,11 +307,23 @@ pub fn save_window_bounds(role: WindowRole, bounds: PersistedWindowBounds) {
 /// Reset all window positions (delete the state file)
 pub fn reset_all_positions() {
     let path = get_state_file_path();
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        if let Err(error) = policy.require_owned_path(&path) {
+            logging::log(
+                "WINDOW_STATE",
+                &format!("Window state reset refused: {error}"),
+            );
+            return;
+        }
+    }
     if path.exists() {
         if let Err(e) = fs::remove_file(&path) {
             logging::log("WINDOW_STATE", &format!("Failed to delete: {}", e));
         } else {
             logging::log("WINDOW_STATE", "All window positions reset to defaults");
+            if crate::runtime_policy::is_owned_evaluation() {
+                crate::runtime_policy::record_completed_fixture_effect();
+            }
         }
     }
 }

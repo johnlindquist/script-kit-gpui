@@ -29,15 +29,11 @@ import {
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../devtools/driver";
+import { runtimeArtifactFromEnvironment } from "../devtools/lib/runtime-task-proof.ts";
 import { tapMainHotkey } from "./day-page-open-helper";
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    resolve(
-      import.meta.dir,
-      "../../target-agent/artifacts/main-header-parity/script-kit-gpui",
-    ),
-);
+const artifact = runtimeArtifactFromEnvironment();
+const binary = resolve(process.env.SCRIPT_KIT_GPUI_BINARY ?? artifact.executablePath);
 const outputDir = resolve(
   process.env.PROBE_OUTPUT_DIR ??
     ".test-output/main-window-header-input-parity",
@@ -1580,6 +1576,7 @@ const receipt: Json = {
   schemaVersion: 2,
   probe: "main-window-header-input-parity",
   binary,
+  artifact: artifact.reference,
   binarySha256,
   binaryBytes,
   binaryMtimeMs,
@@ -1649,7 +1646,7 @@ try {
   if (binaryBytes === null || binaryBytes <= 0) {
     throw new Error(
       `Required Script Kit binary is missing or empty at ${binary}. ` +
-        "Build it with SCRIPT_KIT_AGENT_ARTIFACT_NAME=main-header-parity ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui, or set SCRIPT_KIT_GPUI_BINARY.",
+        "Build with build-ops act app-build --artifact-out and supply SCRIPT_KIT_ARTIFACT_REFERENCE.",
     );
   }
   check(
@@ -1689,6 +1686,7 @@ try {
 
   driver = await Driver.launch({
     binary,
+    immutableArtifact: artifact.reference,
     sandboxHome: true,
     sessionName: "main-window-header-input-parity",
     readyTimeoutMs: 30_000,

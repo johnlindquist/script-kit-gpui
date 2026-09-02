@@ -21,6 +21,14 @@ pub enum FallbackItem {
 }
 
 impl FallbackItem {
+    /// Source identity, independent of mutable fallback labels and templates.
+    pub(crate) fn source_selection_key(&self) -> String {
+        match self {
+            Self::Builtin(item) => format!("fallback/builtin/{}", item.id),
+            Self::Script(item) => format!("fallback/{}", item.script.source_command_id()),
+        }
+    }
+
     /// Get the display name for this fallback
     pub fn name(&self) -> &str {
         match self {
@@ -142,10 +150,12 @@ pub fn collect_fallbacks(input: &str, scripts: &[Arc<Script>]) -> Vec<FallbackIt
     }
 
     // 3. Sort by priority (lower = higher in list)
-    fallbacks.sort_by(|a, b| {
-        a.priority()
-            .cmp(&b.priority())
-            .then_with(|| a.label().cmp(b.label()))
+    fallbacks.sort_by_cached_key(|item| {
+        (
+            item.priority(),
+            item.label().to_owned(),
+            item.source_selection_key(),
+        )
     });
 
     fallbacks
@@ -176,6 +186,30 @@ pub fn collect_script_fallbacks(input: &str, scripts: &[Arc<Script>]) -> Vec<Fal
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn equal_label_script_fallbacks_have_source_owned_deterministic_order() {
+        let mut first = make_fallback_script("Search", Some("Use {input}"));
+        let mut second = first.clone();
+        Arc::make_mut(&mut first).path = "/scripts/a/search.ts".into();
+        Arc::make_mut(&mut second).path = "/scripts/b/search.ts".into();
+        let entries = [first, second];
+        let mut expected = None;
+        for order in [[0, 1], [1, 0]] {
+            let scripts: Vec<_> = order.into_iter().map(|i| entries[i].clone()).collect();
+            let keys: Vec<_> = collect_fallbacks("query", &scripts)
+                .iter()
+                .filter(|item| item.is_script())
+                .map(FallbackItem::source_selection_key)
+                .collect();
+            assert_eq!(keys.len(), 2);
+            assert!(keys[0] < keys[1]);
+            match &expected {
+                Some(expected) => assert_eq!(&keys, expected),
+                None => expected = Some(keys),
+            }
+        }
+    }
+
     use super::*;
     use crate::metadata_parser::TypedMetadata;
     use std::path::PathBuf;

@@ -12,9 +12,10 @@ function bundle() {
 }
 
 describe("generated design conflict lifecycle contracts", () => {
-  test("the checked-in generated artifact classifies all 34 production conflicts", () => {
+  test("the checked-in generated artifact classifies every current production conflict", () => {
     const receipt = inspectCheckedInDesignConflicts();
     expect(receipt.pass).toBe(true);
+    expect(bundle().conflicts).toHaveLength(AUTHORIZED_CONFLICT_COUNT);
     expect(receipt.observedConflictCount).toBe(AUTHORIZED_CONFLICT_COUNT);
     expect(receipt.classifiedConflictCount).toBe(AUTHORIZED_CONFLICT_COUNT);
     expect(receipt.duplicateIds).toEqual([]);

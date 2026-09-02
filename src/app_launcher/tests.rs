@@ -5,7 +5,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     #[test]
     fn test_scan_applications_returns_apps() {
-        let apps = scan_applications();
+        let apps = scan_applications().expect("application scan");
 
         // Should find at least some apps on any macOS system
         assert!(
@@ -38,7 +38,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     #[test]
     fn test_app_info_has_required_fields() {
-        let apps = scan_applications();
+        let apps = scan_applications().expect("application scan");
 
         for app in apps.iter().take(10) {
             // Name should not be empty
@@ -59,7 +59,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     #[test]
     fn test_apps_sorted_alphabetically() {
-        let apps = scan_applications();
+        let apps = scan_applications().expect("application scan");
 
         // Verify apps are sorted by lowercase name
         for window in apps.windows(2) {
@@ -78,7 +78,7 @@ mod tests {
     fn test_extract_bundle_id_finder() {
         let finder_path = Path::new("/System/Applications/Finder.app");
         if finder_path.exists() {
-            let bundle_id = extract_bundle_id(finder_path);
+            let bundle_id = extract_bundle_id(finder_path).expect("read bundle identifier");
             assert_eq!(
                 bundle_id,
                 Some("com.apple.finder".to_string()),
@@ -89,8 +89,9 @@ mod tests {
 
     #[test]
     fn test_extract_bundle_id_nonexistent() {
-        let fake_path = Path::new("/nonexistent/Fake.app");
-        let bundle_id = extract_bundle_id(fake_path);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle_id =
+            extract_bundle_id(&temp.path().join("missing.app")).expect("missing optional metadata");
         assert!(
             bundle_id.is_none(),
             "Should return None for nonexistent app"
@@ -122,17 +123,20 @@ mod tests {
         let icon_path = resources.join("ExampleIcon.icns");
         std::fs::write(&icon_path, []).expect("write icon placeholder");
 
-        assert_eq!(resolve_bundle_icon_resource_path(&app), Some(icon_path));
+        assert_eq!(
+            resolve_bundle_icon_resource_path(&app).expect("read icon resource"),
+            Some(icon_path)
+        );
     }
 
     #[test]
     fn test_parse_app_bundle() {
         let finder_path = Path::new("/System/Applications/Finder.app");
         if finder_path.exists() {
-            let app_info = parse_app_bundle(finder_path);
+            let app_info = parse_app_bundle_with_icon(finder_path).expect("parse application");
             assert!(app_info.is_some(), "Should parse Finder.app");
 
-            let app = app_info.unwrap();
+            let (app, _) = app_info.unwrap();
             assert_eq!(app.name, "Finder");
             assert_eq!(app.path, finder_path);
             assert!(app.bundle_id.is_some());
@@ -148,11 +152,11 @@ mod tests {
             .join("UAD Meter & Control Panel.app");
         std::fs::create_dir_all(nested_app.join("Contents")).expect("create nested app");
 
-        let apps = scan_directory(temp.path()).expect("scan directory");
+        let apps =
+            collect_app_paths_from_roots(&[temp.path().to_path_buf()]).expect("scan directory");
 
         assert!(
-            apps.iter()
-                .any(|app| { app.name == "UAD Meter & Control Panel" && app.path == nested_app }),
+            apps.contains(&nested_app),
             "nested vendor .app bundles under Applications-style folders should be indexed"
         );
     }
@@ -165,11 +169,12 @@ mod tests {
         std::fs::create_dir_all(nested_inside_bundle.join("Contents"))
             .expect("create app internals");
 
-        let apps = scan_directory(temp.path()).expect("scan directory");
+        let apps =
+            collect_app_paths_from_roots(&[temp.path().to_path_buf()]).expect("scan directory");
 
-        assert!(apps.iter().any(|found| found.name == "Outer"));
+        assert!(apps.contains(&app));
         assert!(
-            apps.iter().all(|found| found.name != "Inner"),
+            !apps.contains(&nested_inside_bundle),
             "scanner should treat .app bundles as leaves and skip bundle internals"
         );
     }
@@ -177,7 +182,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     #[test]
     fn test_no_duplicate_apps() {
-        let apps = scan_applications();
+        let apps = scan_applications().expect("application scan");
         // Use a set to check for true duplicates
         let mut seen = std::collections::HashSet::new();
         let mut duplicates = Vec::new();
@@ -204,7 +209,7 @@ mod tests {
         // Test icon extraction for Calculator (always present on macOS)
         let calculator_path = Path::new("/System/Applications/Calculator.app");
         if calculator_path.exists() {
-            let icon = extract_app_icon(calculator_path);
+            let icon = extract_app_icon(calculator_path).expect("read application icon");
             assert!(icon.is_some(), "Should extract Calculator icon");
 
             if let Some(icon_data) = icon {
@@ -222,9 +227,8 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     #[test]
     fn test_app_has_icon() {
-        // Use fresh scan which does synchronous icon loading
-        // (scan_applications() defers icon decoding to background for performance)
-        let apps = scan_applications_fresh();
+        // Fresh scans read and decode icons before publishing the catalogue.
+        let apps = scan_applications_fresh().expect("fresh application scan");
 
         // Check that at least some apps have icons (most should)
         let apps_with_icons = apps.iter().filter(|a| a.icon.is_some()).count();
@@ -268,7 +272,7 @@ mod tests {
     fn test_load_apps_from_db_returns_apps_with_icons() {
         // First, ensure we have some apps in the database by doing a fresh scan
         // This populates the SQLite DB with apps including icon blobs
-        let fresh_apps = scan_applications_fresh();
+        let fresh_apps = scan_applications_fresh().expect("fresh application scan");
         assert!(!fresh_apps.is_empty(), "Should have apps after fresh scan");
 
         // Count how many apps have icons after fresh scan
@@ -279,7 +283,7 @@ mod tests {
         );
 
         // Now test that load_apps_from_db returns apps WITH icons decoded
-        let cached_apps = load_apps_from_db();
+        let cached_apps = load_apps_from_db().expect("load cached applications");
 
         // Verify we got apps
         assert!(!cached_apps.is_empty(), "Should load apps from DB");
@@ -336,11 +340,11 @@ mod tests {
         }
 
         // First call - may or may not hit cache
-        let icon1 = get_or_extract_icon(calculator_path);
+        let icon1 = get_or_extract_icon(calculator_path).expect("read application icon");
         assert!(icon1.is_some(), "Should extract Calculator icon");
 
         // Second call should hit cache
-        let icon2 = get_or_extract_icon(calculator_path);
+        let icon2 = get_or_extract_icon(calculator_path).expect("read cached application icon");
         assert!(icon2.is_some(), "Should load Calculator icon from cache");
 
         // Both should have the same content
@@ -431,10 +435,245 @@ mod tests {
     }
 
     #[test]
-    fn test_get_apps_db_stats() {
-        let (count, size) = get_apps_db_stats();
-        // Stats should be valid - size is usize so always >= 0
-        // Just verify the function returns without error
-        let _ = (count, size);
+    fn application_roots_distinguish_empty_absent_and_failed_reads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let empty = temp.path().join("empty");
+        fs::create_dir(&empty).expect("empty root");
+        assert!(collect_app_paths_from_roots(&[
+            empty.clone(),
+            temp.path().join("optional-missing")
+        ])
+        .expect("empty roots")
+        .is_empty());
+        let app = empty.join("Available.app");
+        fs::create_dir(&app).expect("valid bundle");
+        let invalid = temp.path().join("not-a-directory");
+        fs::write(&invalid, b"file").expect("invalid root");
+        let error = collect_app_paths_from_roots(&[empty, invalid])
+            .err()
+            .expect("partial scan must fail");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("IO error")
+                .kind(),
+            std::io::ErrorKind::NotADirectory
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_scan_does_not_ignore_a_nested_directory_disappearing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("Vendor").join("Nested.app")).expect("nested bundle");
+        let entries = fs::read_dir(&root).expect("open root");
+        fs::rename(&root, temp.path().join("moved")).expect("move root after opening");
+        let error = collect_app_entries(&root, entries, &mut Vec::new())
+            .err()
+            .expect("nested read failure");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("IO error")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn application_scan_failure_retains_last_good_and_empty_success_replaces_it() {
+        let cache = Mutex::new(AppCache::default());
+        let mut png = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut png),
+            &[20, 40, 60, 255],
+            1,
+            1,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("encode icon");
+        let icon = crate::list_item::decode_png_to_render_image_with_bgra_conversion(&png)
+            .expect("decode icon");
+        let app = AppInfo {
+            name: "Retained".into(),
+            path: PathBuf::from("retained.app"),
+            bundle_id: None,
+            icon: Some(icon.clone()),
+        };
+        complete_app_scan(&cache, Ok(vec![app])).expect("initial snapshot");
+        let error = complete_app_scan(&cache, Err(anyhow::anyhow!("native scan failed")))
+            .err()
+            .expect("source failure");
+        assert!(error.to_string().contains("native scan failed"));
+        assert!(
+            app_cache_snapshot(&cache).is_err(),
+            "a failed scan is not a successful cache read"
+        );
+        {
+            let cache = cache.lock().expect("cache");
+            let apps = cache.apps.as_ref().expect("retained snapshot");
+            assert_eq!(apps[0].path, PathBuf::from("retained.app"));
+            assert!(Arc::ptr_eq(
+                apps[0].icon.as_ref().expect("retained icon"),
+                &icon
+            ));
+        }
+        assert!(complete_app_scan(&cache, Ok(Vec::new()))
+            .expect("valid empty scan")
+            .is_empty());
+        assert!(app_cache_snapshot(&cache)
+            .expect("recovered cache")
+            .expect("completed empty snapshot")
+            .is_empty());
+    }
+
+    #[test]
+    fn cached_application_query_and_row_errors_are_not_empty_or_partial_success() {
+        let conn = Connection::open_in_memory().expect("database");
+        assert!(
+            load_apps_from_connection(&conn).is_err(),
+            "missing schema is a query failure"
+        );
+        init_apps_db(&conn).expect("schema");
+        assert!(load_apps_from_connection(&conn)
+            .expect("valid empty cache")
+            .is_empty());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let valid = temp.path().join("Valid.app");
+        fs::create_dir(&valid).expect("valid bundle");
+        conn.execute(
+            "INSERT INTO apps VALUES ('valid', 'A Valid', ?1, NULL, 0, 0)",
+            [valid.to_str().expect("path")],
+        )
+        .expect("valid cached app");
+        conn.execute(
+            "INSERT INTO apps VALUES ('broken', x'ff', 'broken.app', NULL, 0, 0)",
+            [],
+        )
+        .expect("malformed cached row");
+        assert!(
+            load_apps_from_connection(&conn).is_err(),
+            "a decoded prefix must not hide the failed row"
+        );
+    }
+
+    #[test]
+    fn cached_application_paths_only_treat_not_found_as_absent() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_apps_db(&conn).expect("schema");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("Missing.app");
+        conn.execute(
+            "INSERT INTO apps VALUES ('missing', 'Missing', ?1, NULL, 0, 0)",
+            [missing.to_str().expect("path")],
+        )
+        .expect("missing cached app");
+        assert!(load_apps_from_connection(&conn)
+            .expect("genuine absence")
+            .is_empty());
+        let file = temp.path().join("not-a-directory");
+        fs::write(&file, b"file").expect("file parent");
+        let broken = file.join("Broken.app");
+        conn.execute(
+            "INSERT INTO apps VALUES ('broken', 'Broken', ?1, NULL, 0, 0)",
+            [broken.to_str().expect("path")],
+        )
+        .expect("unreadable cached app");
+        assert!(
+            load_apps_from_connection(&conn).is_err(),
+            "metadata read failure must not become absence"
+        );
+    }
+
+    #[test]
+    fn application_cache_transaction_rolls_back_partial_updates_and_commits_empty() {
+        let mut conn = Connection::open_in_memory().expect("database");
+        init_apps_db(&conn).expect("schema");
+        conn.execute(
+            "INSERT INTO apps VALUES ('existing', 'Original', 'old.app', x'010203', 0, 0)",
+            [],
+        )
+        .expect("last good cache");
+        let entries = vec![
+            ScannedApp {
+                app: AppInfo {
+                    name: "New".into(),
+                    path: PathBuf::from("new.app"),
+                    bundle_id: Some("new".into()),
+                    icon: None,
+                },
+                icon_bytes: None,
+                mtime: 1,
+            },
+            ScannedApp {
+                app: AppInfo {
+                    name: "Conflict".into(),
+                    path: PathBuf::from("old.app"),
+                    bundle_id: Some("conflict".into()),
+                    icon: None,
+                },
+                icon_bytes: None,
+                mtime: 1,
+            },
+        ];
+        assert!(save_apps_to_db(&mut conn, &entries).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM apps", [], |row| row.get::<_, i64>(0))
+                .expect("count"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT icon_blob FROM apps WHERE bundle_id = 'existing'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0)
+            )
+            .expect("retained icon"),
+            vec![1, 2, 3]
+        );
+        save_apps_to_db(&mut conn, &[]).expect("valid empty scan");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM apps", [], |row| row.get::<_, i64>(0))
+                .expect("count"),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plist_errors_distinguish_missing_optional_key_from_spawn_and_read_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |stderr: &[u8]| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: stderr.to_vec(),
+            })
+        };
+        let missing_key = b"Print: Entry, \":CFBundleIdentifier\", Does Not Exist\n";
+        assert!(
+            decode_plist_output(output(missing_key), ":CFBundleIdentifier")
+                .expect("optional missing key")
+                .is_none()
+        );
+        assert!(decode_plist_output(
+            output(b"Error Reading File: Permission denied\n"),
+            ":CFBundleIdentifier"
+        )
+        .is_err());
+        assert!(decode_plist_output(
+            output(b"Error Reading File\nPrint: Entry, \":CFBundleIdentifier\", Does Not Exist\n"),
+            ":CFBundleIdentifier"
+        )
+        .is_err());
+        let missing_executable = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "PlistBuddy executable missing",
+        ));
+        assert!(
+            decode_plist_output(missing_executable, ":CFBundleIdentifier").is_err(),
+            "missing executable is not missing optional metadata"
+        );
     }
 }

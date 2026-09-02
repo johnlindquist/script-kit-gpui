@@ -8,7 +8,7 @@ impl ScriptListApp {
         kind: crate::ai::context_selector::types::ContextPortalKind,
         query: &str,
         placeholder: &str,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.active_attachment_portal_kind = Some(kind);
         self.filter_text = query.to_string();
@@ -20,6 +20,8 @@ impl ScriptListApp {
         self.selected_index = 0;
         self.opened_from_main_menu = true;
         self.invalidate_grouped_cache();
+        self.reset_main_menu_selection_intent();
+        self.flush_pending_main_menu_query(cx);
         self.sync_list_state();
         self.update_window_size();
     }
@@ -90,7 +92,6 @@ impl ScriptListApp {
         self.focused_input = focused_input;
         self.pending_focus = pending_focus;
         self.invalidate_grouped_cache();
-        self.sync_list_state();
 
         tracing::info!(
             target: "script_kit::agent_chat",
@@ -308,12 +309,8 @@ impl ScriptListApp {
         );
 
         self.filter_text = new_text.clone();
-        self.computed_filter_text = new_text.clone();
         self.pending_filter_sync = true;
         self.set_spine_parse_from_filter_and_cursor(&new_text, new_text.len());
-        self.maybe_start_spine_file_subsearch_for_current_projection(cx);
-        self.invalidate_grouped_cache();
-        self.sync_list_state();
     }
 
     pub(crate) fn active_attachment_portal_kind(
@@ -334,7 +331,12 @@ impl ScriptListApp {
                 label: script_match.script.name.clone(),
             }),
             scripts::SearchResult::Scriptlet(scriptlet_match) => {
-                let target = Self::tab_ai_target_from_search_result(self.selected_index, &result);
+                let crate::ResolvedMainMenuSelection::SearchResult { row, .. } =
+                    self.resolved_main_menu_selected_subject()?
+                else {
+                    return None;
+                };
+                let target = Self::tab_ai_target_from_search_result(row, &result);
                 let target = crate::ai::TabAiTargetContext {
                     metadata: Some(serde_json::json!({
                         "name": scriptlet_match.scriptlet.name,
@@ -610,6 +612,7 @@ impl ScriptListApp {
         // agent-chat machine never entered its portal state for this host.
         if let Some(segment_byte_range) = spine_segment {
             self.resolve_spine_mention_from_portal_part(segment_byte_range, &part, cx);
+            self.flush_pending_main_menu_query(cx);
             cx.notify();
             return;
         }
@@ -638,6 +641,9 @@ impl ScriptListApp {
                 cx.notify();
             });
         }
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
 
         cx.notify();
     }
@@ -663,6 +669,9 @@ impl ScriptListApp {
         );
 
         self.restore_attachment_portal_return_view(return_view.clone(), return_focus_target);
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.flush_pending_main_menu_query(cx);
+        }
 
         // ScriptList-hosted spine portal: the snapshot restore already put the
         // pre-portal `@file` filter text back; no agent-chat surface

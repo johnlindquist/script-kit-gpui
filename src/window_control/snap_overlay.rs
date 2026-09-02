@@ -2,18 +2,25 @@ use std::sync::Mutex;
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    div, point, px, rgba, size, App, AppContext as _, Context, IntoElement, ParentElement, Pixels,
-    Render, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions,
+    div, point, px, rgba, size, App, AppContext as _, Context, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Render, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions,
 };
 
 use super::display::get_native_display_descriptors;
 use super::snap_mode::SnapMode;
 use super::snap_session::{SnapOverlayModel, SnapOverlayScene, SnapOverlayTarget};
 use super::types::Bounds;
+use crate::runtime_policy::{ExternalEffect, WindowHostPolicy};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_SNAP_OVERLAY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(target_os = "macos")]
 unsafe fn configure_snap_overlay_window_native(window: cocoa::base::id) {
+    if crate::runtime_policy::check(ExternalEffect::NativeVisibility).is_err() {
+        return;
+    }
     use objc::{class, msg_send, sel, sel_impl};
 
     if window.is_null() {
@@ -138,11 +145,50 @@ fn close_overlay_windows(overlay_windows: Vec<OverlayDisplayWindow>, cx: &mut Ap
 #[derive(Default)]
 pub struct SnapOverlayView {
     model: Option<SnapOverlayModel>,
+    registration: Option<(String, u64)>,
+    data_revision: u64,
+    presentation_revision: u64,
+    applied_theme_revision: u64,
 }
 
 impl SnapOverlayView {
     pub fn new() -> Self {
-        Self { model: None }
+        Self {
+            model: None,
+            registration: None,
+            data_revision: 1,
+            presentation_revision: 1,
+            applied_theme_revision: 0,
+        }
+    }
+
+    pub(crate) fn model(&self) -> Option<&SnapOverlayModel> {
+        self.model.as_ref()
+    }
+    pub(crate) fn revision_facts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.data_revision,
+            self.data_revision,
+            self.presentation_revision,
+            self.applied_theme_revision,
+        )
+    }
+    pub(crate) fn close_owned(&mut self, window: &mut Window) -> Result<()> {
+        anyhow::ensure!(window.is_owned_hidden(), "snap_owned_host_required");
+        let (id, generation) = self
+            .registration
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("snap_registration_missing"))?;
+        anyhow::ensure!(
+            crate::windows::get_runtime_window_handle_for_generation(id, *generation)
+                == Some(window.window_handle()),
+            "snap_target_stale"
+        );
+        crate::windows::remove_runtime_window_instance(id, *generation);
+        self.registration = None;
+        self.model = None;
+        window.remove_window();
+        Ok(())
     }
 
     pub fn set_model(&mut self, model: Option<SnapOverlayModel>, cx: &mut Context<Self>) {
@@ -165,14 +211,108 @@ impl SnapOverlayView {
         );
 
         self.model = model;
+        self.data_revision = self.data_revision.saturating_add(1);
         cx.notify();
     }
 }
 
+impl Drop for SnapOverlayView {
+    fn drop(&mut self) {
+        if let Some((id, generation)) = &self.registration {
+            crate::windows::remove_runtime_window_instance(id, *generation);
+        }
+    }
+}
+
+/// Open the real Snap presentation, independently of desktop discovery and snapping effects.
+pub(crate) fn open_snap_overlay_window(
+    bounds: gpui::Bounds<Pixels>,
+    display_id: Option<gpui::DisplayId>,
+    host_policy: WindowHostPolicy,
+    cx: &mut App,
+) -> Result<WindowHandle<SnapOverlayView>> {
+    host_policy.validate()?;
+    let handle = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            display_id,
+            titlebar: None,
+            window_background: WindowBackgroundAppearance::Transparent,
+            focus: false,
+            show: false,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            ..Default::default()
+        },
+        |_, cx| cx.new(|_| SnapOverlayView::new()),
+    )?;
+    let mut configure = || -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if !host_policy.is_hidden() {
+            crate::runtime_policy::check(ExternalEffect::NativeVisibility)?;
+            handle.update(cx, |_, window, _| -> Result<()> {
+                let native = crate::components::inline_popup_window::inline_popup_ns_window(window)
+                    .ok_or_else(|| anyhow::anyhow!("snap_native_window_missing"))?;
+                // SAFETY: native is the exact newly-created live GPUI window.
+                unsafe {
+                    configure_snap_overlay_window_native(native);
+                }
+                Ok(())
+            })??;
+        }
+        let id = format!(
+            "snap-overlay:{}",
+            NEXT_SNAP_OVERLAY_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let info = crate::windows::register_runtime_window_instance(
+            crate::protocol::AutomationWindowInfo {
+                id: id.clone(),
+                kind: crate::protocol::AutomationWindowKind::SnapOverlay,
+                title: Some("Snap overlay".into()),
+                focused: false,
+                visible: !host_policy.is_hidden(),
+                semantic_surface: Some("snapOverlay".into()),
+                bounds: Some(crate::protocol::AutomationWindowBounds {
+                    x: f32::from(bounds.origin.x) as f64,
+                    y: f32::from(bounds.origin.y) as f64,
+                    width: f32::from(bounds.size.width) as f64,
+                    height: f32::from(bounds.size.height) as f64,
+                }),
+                parent_window_id: None,
+                parent_kind: None,
+                parent_window_generation: None,
+                pid: Some(std::process::id()),
+                generation: None,
+            },
+            handle.into(),
+            cx,
+        )?;
+        let generation = info
+            .generation
+            .ok_or_else(|| anyhow::anyhow!("snap_generation_missing"))?;
+        handle.update(cx, |view, _, _| view.registration = Some((id, generation)))?;
+        Ok(())
+    };
+    if let Err(error) = configure() {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        return Err(error);
+    }
+    Ok(handle)
+}
+
 impl Render for SnapOverlayView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let revision = crate::theme::service::theme_revision();
+        if self.applied_theme_revision != revision {
+            self.applied_theme_revision = revision;
+            self.presentation_revision = self.presentation_revision.saturating_add(1);
+        }
         let Some(ref model) = self.model else {
-            return div().size_full();
+            return div()
+                .debug_selector(|| "snap-overlay-root".to_string())
+                .size_full();
         };
 
         let display = model.display_bounds;
@@ -194,6 +334,7 @@ impl Render for SnapOverlayView {
         let scrim = if model.is_dominant { scrim } else { scrim / 2 };
 
         div()
+            .debug_selector(|| "snap-overlay-root".to_string())
             .absolute()
             .top(px(0.))
             .left(px(0.))
@@ -211,6 +352,7 @@ impl Render for SnapOverlayView {
                 let fill = 0x00000000;
 
                 div()
+                    .debug_selector(move || format!("snap:target:{:?}", target.tile))
                     .absolute()
                     .left(px(rel_x))
                     .top(px(rel_y))
@@ -232,6 +374,7 @@ impl Render for SnapOverlayView {
 ///
 /// Idempotent — returns immediately if windows are already open.
 pub fn ensure_snap_overlay_windows(cx: &mut App) -> Result<()> {
+    crate::runtime_policy::check(ExternalEffect::SystemDiscovery)?;
     let mut guard = super::snap_lock(&SNAP_OVERLAY_WINDOWS, "overlay")?;
 
     let native_displays = get_native_display_descriptors()
@@ -290,41 +433,13 @@ pub fn ensure_snap_overlay_windows(cx: &mut App) -> Result<()> {
             ),
         };
 
-        let handle = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(overlay_bounds)),
-                    display_id: Some(display_id),
-                    titlebar: None,
-                    window_background: WindowBackgroundAppearance::Transparent,
-                    focus: false,
-                    show: false,
-                    kind: WindowKind::PopUp,
-                    is_movable: false,
-                    ..Default::default()
-                },
-                |_window, cx| cx.new(|_| SnapOverlayView::new()),
-            )
-            .context("failed to open snap overlay window")?;
-
-        // Configure the native window as click-through, transparent, and non-restorable.
-        #[cfg(target_os = "macos")]
-        {
-            let _ = handle.update(cx, |_view, window, _cx| {
-                if let Ok(wh) = raw_window_handle::HasWindowHandle::window_handle(window) {
-                    if let raw_window_handle::RawWindowHandle::AppKit(appkit) = wh.as_raw() {
-                        use objc::{msg_send, sel, sel_impl};
-                        let ns_view = appkit.ns_view.as_ptr() as cocoa::base::id;
-                        // SAFETY: ns_view is a valid NSView from a just-created GPUI window.
-                        // We obtain the parent NSWindow via -[NSView window] on the main thread.
-                        unsafe {
-                            let ns_window: cocoa::base::id = msg_send![ns_view, window];
-                            configure_snap_overlay_window_native(ns_window);
-                        }
-                    }
-                }
-            });
-        }
+        let handle = open_snap_overlay_window(
+            overlay_bounds,
+            Some(display_id),
+            WindowHostPolicy::Interactive,
+            cx,
+        )
+        .context("failed to open snap overlay window")?;
 
         tracing::info!(
             target: "script_kit::snap_overlay",

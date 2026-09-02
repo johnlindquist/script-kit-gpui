@@ -573,53 +573,41 @@ fn sample_agent_chat_model(
 
 #[test]
 fn test_agent_chat_close_shortcut_is_only_advertised_for_detached_host() {
-    let shared = get_agent_chat_root_route_for_host(
-        &[],
-        None,
-        0,
-        &[],
-        &[],
-        default_agent_chat_command_facts(),
-        AgentChatActionsDialogHost::Shared,
-    );
-    let notes = get_agent_chat_root_route_for_host(
-        &[],
-        None,
-        0,
-        &[],
-        &[],
-        default_agent_chat_command_facts(),
-        AgentChatActionsDialogHost::Notes,
-    );
-    let detached = get_agent_chat_root_route_for_host(
-        &[],
-        None,
-        0,
-        &[],
-        &[],
-        default_agent_chat_command_facts(),
-        AgentChatActionsDialogHost::Detached,
-    );
+    for (host, expected_shortcut) in [
+        (AgentChatActionsDialogHost::Shared, None),
+        (AgentChatActionsDialogHost::Notes, None),
+        (AgentChatActionsDialogHost::Detached, Some("⌘W")),
+    ] {
+        for dismiss_installed in [false, true] {
+            let route = get_agent_chat_root_route_for_host(
+                &[],
+                None,
+                0,
+                &[],
+                &[],
+                crate::components::conversation_actions::AgentChatConversationCommandFacts {
+                    dismiss_installed,
+                    ..default_agent_chat_command_facts()
+                },
+                host,
+            );
+            let close = route
+                .actions
+                .iter()
+                .find(|action| action.id == "agent_chat_close");
 
-    let shared_close = shared
-        .actions
-        .iter()
-        .find(|action| action.id == "agent_chat_close")
-        .expect("shared agent_chat_close action should exist");
-    let notes_close = notes
-        .actions
-        .iter()
-        .find(|action| action.id == "agent_chat_close")
-        .expect("notes agent_chat_close action should exist");
-    let detached_close = detached
-        .actions
-        .iter()
-        .find(|action| action.id == "agent_chat_close")
-        .expect("detached agent_chat_close action should exist");
-
-    assert!(shared_close.shortcut.is_none());
-    assert!(notes_close.shortcut.is_none());
-    assert_eq!(detached_close.shortcut.as_deref(), Some("⌘W"));
+            if dismiss_installed {
+                let close = close.expect("installed dismiss handler must expose Close");
+                assert_eq!(close.shortcut.as_deref(), expected_shortcut, "{host:?}");
+                assert_eq!(close.disabled_reason(), None, "idle Close for {host:?}");
+            } else {
+                assert!(
+                    close.is_none(),
+                    "{host:?} must not advertise an unbound Close"
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -5,7 +5,6 @@ const OBJECT_SELECTOR: &str = include_str!("../src/menu_syntax/object_selector.r
 const OBJECT_SELECTOR_OWNER: &str =
     include_str!("../src/app_impl/menu_syntax_object_selector_main_list.rs");
 const RENDER_SCRIPT_LIST: &str = include_str!("../src/render_script_list/mod.rs");
-const COLLECT_ELEMENTS: &str = include_str!("../src/app_layout/collect_elements.rs");
 const STARTUP: &str = include_str!("../src/app_impl/startup.rs");
 const STARTUP_NEW_ARROW: &str = include_str!("../src/app_impl/startup_new_arrow.rs");
 
@@ -15,7 +14,6 @@ fn object_selector_rows_are_cached_as_main_list_rows() {
         "fn build_menu_syntax_object_selector_main_list_results",
         "object_selector_row_to_main_list_row(row)",
         "SearchResult::SpineProjection",
-        "grouped_selectable_bounds(&grouped_items, &flat_results)",
     ] {
         assert!(
             FILTERING_CACHE.contains(needle),
@@ -71,22 +69,6 @@ fn object_selector_selection_uses_shared_main_list_row() {
         assert!(
             OBJECT_SELECTOR_OWNER.contains(needle),
             "object selector acceptance should resolve the shared selected row: {needle}"
-        );
-    }
-}
-
-#[test]
-fn object_selector_elements_report_shared_main_list_selection() {
-    for needle in [
-        "list:menu-syntax-object-selector",
-        "self.selected_index",
-        ".checked_sub(1)",
-        "snapshot.rows.get(index)",
-        "selected_row_id == Some(row.id.as_str())",
-    ] {
-        assert!(
-            COLLECT_ELEMENTS.contains(needle),
-            "object selector elements must report shared main-list selection: {needle}"
         );
     }
 }

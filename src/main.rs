@@ -56,6 +56,7 @@ mod components;
 mod config;
 mod confirm;
 mod context_snapshot;
+mod design_evaluation;
 mod designs;
 mod dev_marker;
 mod dictation;
@@ -94,9 +95,11 @@ mod pasted_text;
 mod perf;
 mod platform;
 mod plugins;
+mod prompt_completion;
 mod prompts;
 mod protocol;
 mod protocol_stats;
+pub use script_kit_gpui::runtime_policy;
 mod scripts;
 mod scrolling;
 #[cfg(target_os = "macos")]
@@ -251,14 +254,14 @@ use crate::toast_manager::ToastManager;
 use editor::EditorPrompt;
 use prompts::{
     ContainerOptions, ContainerPadding, DivPrompt, DropPrompt, EnvPrompt, PathInfo, PathPrompt,
-    PathPromptEvent, SelectPrompt, TemplatePrompt,
+    SelectPrompt, TemplatePrompt,
 };
 use tray::{TrayManager, TrayMenuAction};
 use ui_foundation::get_vibrancy_background;
 use warning_banner::{WarningBanner, WarningBannerColors};
 use window_resize::{reset_resize_debounce, resize_to_view_sync, ViewType};
 
-use components::{FormFieldColors, PromptFooterColors, PromptFooterConfig};
+use components::{PromptFooterColors, PromptFooterConfig};
 use designs::{get_tokens, render_design_item, DesignVariant};
 use frecency::FrecencyStore;
 use list_item::{
@@ -307,8 +310,8 @@ fn main_window_visibility_transition_hook(visible: bool) {
 
 pub use script_kit_gpui::{
     agentic_protocol_bus, clear_main_state_restore_after_focus_loss,
-    consume_main_state_restore_after_focus_loss, emoji, emoji_usage, get_main_window_handle,
-    is_main_window_visible, main_window_visibility_generation,
+    clear_main_window_handle_if_matches, consume_main_state_restore_after_focus_loss, emoji,
+    emoji_usage, get_main_window_handle, is_main_window_visible, main_window_visibility_generation,
     mark_main_state_restore_after_focus_loss, request_show_main_window, set_main_window_handle,
     set_main_window_visible, terminal_history,
 };
@@ -330,7 +333,9 @@ include!("main_sections/prompt_messages.rs");
 include!("main_sections/app_state.rs");
 #[path = "main_sections/root_search_store.rs"]
 mod root_search_store;
-use root_search_store::RootSearchStore;
+use root_search_store::{
+    RootProviderPublicationPolicy, RootProviderTerminal, RootSearchQueryStamp, RootSearchStore,
+};
 include!("main_sections/day_page_markdown_refs.rs");
 include!("main_sections/day_page_spine.rs");
 include!("main_sections/day_page_layout.rs");
@@ -444,6 +449,13 @@ fn write_notes_run_exec_probe_receipt(
 include!("main_entry/app_run_setup_startup_helpers.rs");
 
 fn main() {
+    if let Some(result) = design_evaluation::run_if_requested() {
+        if result.is_err() {
+            eprintln!("owned_evaluation_failed");
+            std::process::exit(1);
+        }
+        return;
+    }
     script_kit_gpui::install_main_window_visibility_transition_hook(
         main_window_visibility_transition_hook,
     );

@@ -56,6 +56,7 @@ impl ScriptListApp {
         alt: bool,
         shift: bool,
     ) -> anyhow::Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
         let script_path = shortcut_config_script_path("update-config-shortcut.ts")?;
         let output = std::process::Command::new(shortcut_config_bun_path())
             .arg(script_path)
@@ -81,6 +82,7 @@ impl ScriptListApp {
     }
 
     pub(crate) fn remove_config_command_shortcut(&self, command_id: &str) -> anyhow::Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
         let script_path = shortcut_config_script_path("remove-config-shortcut.ts")?;
         let output = std::process::Command::new(shortcut_config_bun_path())
             .arg(script_path)
@@ -105,6 +107,13 @@ struct ShortcutRecorderPopupWindow {
     recorder: Entity<crate::components::shortcut_recorder::ShortcutRecorder>,
     app: WeakEntity<ScriptListApp>,
     focus_handle: FocusHandle,
+    generation: u64,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+    _recorder_subscription: Subscription,
+    _close_subscription: Option<Subscription>,
+    data_revision: u64,
+    last_semantic_value: Option<serde_json::Value>,
+    applied_theme_revision: Option<u64>,
 }
 
 impl ShortcutRecorderPopupWindow {
@@ -113,16 +122,17 @@ impl ShortcutRecorderPopupWindow {
         command_name: String,
         theme: std::sync::Arc<theme::Theme>,
         app: WeakEntity<ScriptListApp>,
+        host_policy: crate::runtime_policy::WindowHostPolicy,
         cx: &mut Context<Self>,
     ) -> Self {
         let recorder_theme = std::sync::Arc::clone(&theme);
         let recorder = cx.new(move |cx| {
             let conflict_command_id = command_id.clone();
-            crate::components::shortcut_recorder::ShortcutRecorder::new(cx, recorder_theme)
+            let recorder = crate::components::shortcut_recorder::ShortcutRecorder::new(cx, recorder_theme)
                 .with_detached_window(true)
                 .with_command_name(command_name)
-                .with_command_description(format!("ID: {}", command_id))
-                .with_conflict_checker(move |recorded| {
+                .with_command_description(format!("ID: {}", command_id));
+            if host_policy.is_hidden() { recorder } else { recorder.with_conflict_checker(move |recorded| {
                     crate::hotkeys::shortcut_conflict_for_recording(
                         &conflict_command_id,
                         &recorded.to_config_string(),
@@ -133,53 +143,71 @@ impl ShortcutRecorderPopupWindow {
                             shortcut: conflict.shortcut,
                         }
                     })
-                })
+                }) }
+        });
+        let initial_semantic_value = host_policy.is_hidden().then(|| shortcut_recorder_semantic_value(recorder.read(cx)));
+        let recorder_subscription = cx.observe(&recorder, |this, recorder, cx| {
+            if this.host_policy.is_hidden() {
+                let next = shortcut_recorder_semantic_value(recorder.read(cx));
+                if this.last_semantic_value.as_ref() != Some(&next) {
+                    this.last_semantic_value = Some(next);
+                    this.data_revision = this.data_revision.saturating_add(1);
+                }
+            }
+            let action = recorder.update(cx, |recorder, _| recorder.take_pending_action());
+            if let Some(action) = action {
+                let app = this.app.clone();
+                let generation = this.generation;
+                cx.spawn(async move |_this, cx| {
+                    cx.update(|cx| {
+                        if shortcut_fixture_handle("shortcut-recorder-popup", generation, None, cx).is_err() { return; }
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |app, cx| match action {
+                                crate::components::shortcut_recorder::RecorderAction::Save(recorded) => app.handle_shortcut_save(&recorded, cx),
+                                crate::components::shortcut_recorder::RecorderAction::Cancel => app.close_shortcut_recorder(cx),
+                            });
+                        } else {
+                            let _ = close_shortcut_recorder_instance(generation, cx);
+                        }
+                    });
+                }).detach();
+            }
         });
 
         Self {
             recorder,
             app,
             focus_handle: cx.focus_handle(),
+            generation: 0,
+            host_policy,
+            _recorder_subscription: recorder_subscription,
+            _close_subscription: None,
+            data_revision: 1,
+            last_semantic_value: initial_semantic_value,
+            applied_theme_revision: None,
         }
     }
 }
 
 impl Render for ShortcutRecorderPopupWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let published = crate::theme::get_theme_snapshot();
+        if self.applied_theme_revision != Some(published.revision) {
+            self.recorder.update(cx, |recorder, _| {
+                recorder.theme = published.theme.clone();
+                recorder.colors = crate::components::shortcut_recorder::ShortcutRecorderColors::from_theme(&published.theme);
+            });
+            self.applied_theme_revision = Some(published.revision);
+        }
         let recorder_fh = self.recorder.read(cx).focus_handle.clone();
         if !recorder_fh.is_focused(window) {
             window.focus(&recorder_fh, cx);
         }
 
-        let pending_action = self
-            .recorder
-            .update(cx, |recorder, _cx| recorder.take_pending_action());
-
-        if let Some(action) = pending_action {
-            let app = self.app.clone();
-            cx.spawn(async move |_this, cx| {
-                cx.update(|cx| {
-                    if let Some(app) = app.upgrade() {
-                        app.update(cx, |app, cx| match action {
-                            crate::components::shortcut_recorder::RecorderAction::Save(
-                                recorded,
-                            ) => {
-                                app.handle_shortcut_save(&recorded, cx);
-                            }
-                            crate::components::shortcut_recorder::RecorderAction::Cancel => {
-                                app.close_shortcut_recorder(cx);
-                            }
-                        });
-                    } else {
-                        close_shortcut_recorder_window(cx);
-                    }
-                });
-            })
-            .detach();
-        }
 
         div()
             .id("shortcut-recorder-window")
+            .debug_selector(|| "shortcut-recorder-window".into())
             .relative()
             .w_full()
             .h_full()
@@ -202,22 +230,42 @@ fn shortcut_recorder_window_bounds(parent_bounds: Bounds<Pixels>) -> Bounds<Pixe
 }
 
 fn close_shortcut_recorder_window(cx: &mut App) {
-    crate::windows::remove_automation_window("shortcut-recorder-popup");
-
-    if let Some(storage) = SHORTCUT_RECORDER_WINDOW.get() {
-        if let Ok(mut guard) = storage.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.update(cx, |_popup, window, cx| {
-                    crate::platform::dematerialize_then_remove_gpui_window(
-                        window,
-                        cx,
-                        "SHORTCUT",
-                        "Shortcut recorder popup",
-                    );
-                });
-            }
-        }
+    if let Some(generation) = crate::windows::automation_window_by_id("shortcut-recorder-popup").and_then(|info| info.generation) {
+        let _ = close_shortcut_recorder_instance(generation, cx);
     }
+}
+
+pub(crate) fn close_shortcut_recorder_instance(generation: u64, cx: &mut App) -> anyhow::Result<()> {
+    let expected = crate::windows::get_runtime_window_handle_for_generation("shortcut-recorder-popup", generation)
+        .ok_or_else(|| anyhow::anyhow!("shortcut_recorder_stale"))?;
+    let storage = SHORTCUT_RECORDER_WINDOW.get_or_init(|| Mutex::new(None));
+    let handle = {
+        let mut guard = storage.lock().map_err(|_| anyhow::anyhow!("shortcut_recorder_lock_poisoned"))?;
+        match *guard {
+            Some(handle) if AnyWindowHandle::from(handle) == expected => {
+                *guard = None;
+                handle
+            }
+            _ => anyhow::bail!("shortcut_recorder_stale"),
+        }
+    };
+    crate::windows::remove_runtime_window_instance("shortcut-recorder-popup", generation);
+    let app = handle.update(cx, |popup, window, cx| {
+        if popup.host_policy.is_hidden() { window.remove_window(); }
+        else { crate::platform::dematerialize_then_remove_gpui_window(window, cx, "SHORTCUT", "Shortcut recorder popup"); }
+        popup.app.clone()
+    })?;
+    if let Some(app) = app.upgrade() {
+        app.update(cx, |app, cx| {
+            app.shortcut_recorder_state = None;
+            app.shortcut_recorder_entity = None;
+            app.pending_focus = Some(FocusTarget::MainFilter);
+            app.focused_input = FocusedInput::MainFilter;
+            app.mark_main_presentation_changed();
+            cx.notify();
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn is_shortcut_recorder_window(window: &gpui::Window) -> bool {
@@ -282,10 +330,141 @@ fn attach_shortcut_recorder_to_parent_window(
     });
 }
 
+fn shortcut_recorder_semantic_value(recorder: &crate::components::shortcut_recorder::ShortcutRecorder) -> serde_json::Value {
+    serde_json::json!({
+        "shortcut": recorder.shortcut.to_config_string(), "recording": recorder.is_recording,
+        "canSave": recorder.can_save(), "conflict": recorder.conflict.as_ref().map(|conflict| &conflict.command_name),
+        "heldModifiers": [recorder.current_modifiers.platform, recorder.current_modifiers.control, recorder.current_modifiers.alt, recorder.current_modifiers.shift],
+        "focusedAction": format!("{:?}", recorder.focused_action),
+    })
+}
+
+pub(crate) struct ShortcutFixtureObservation {
+    pub data_revision: u64,
+    pub presentation_revision: u64,
+    pub applied_theme_revision: Option<u64>,
+    pub value: serde_json::Value,
+}
+
+fn shortcut_fixture_handle(id: &str, generation: u64, window: Option<&Window>, cx: &App) -> anyhow::Result<WindowHandle<ShortcutRecorderPopupWindow>> {
+    anyhow::ensure!(id == "shortcut-recorder-popup" && generation > 0, "not_shortcut_recorder");
+    let handle = SHORTCUT_RECORDER_WINDOW.get().and_then(|storage| storage.lock().ok().and_then(|guard| *guard))
+        .ok_or_else(|| anyhow::anyhow!("shortcut_recorder_missing"))?;
+    anyhow::ensure!(crate::windows::get_runtime_window_handle_for_generation(id, generation) == Some(handle.into()), "shortcut_recorder_stale");
+    let info = crate::windows::automation_window_by_id(id).ok_or_else(|| anyhow::anyhow!("shortcut_recorder_missing"))?;
+    anyhow::ensure!(info.generation == Some(generation) && crate::windows::automation_surface_collector::read_window_root(handle, window, cx, |popup, _| popup.generation)? == generation, "shortcut_recorder_stale");
+    let parent_id = info.parent_window_id.as_deref().ok_or_else(|| anyhow::anyhow!("shortcut_parent_missing"))?;
+    let parent_generation = info.parent_window_generation.ok_or_else(|| anyhow::anyhow!("shortcut_parent_generation_missing"))?;
+    anyhow::ensure!(crate::windows::get_runtime_window_handle_for_generation(parent_id, parent_generation).is_some(), "shortcut_parent_stale");
+    Ok(handle)
+}
+
+pub(crate) fn shortcut_fixture_observation(id: &str, generation: u64, window: Option<&Window>, cx: &App) -> anyhow::Result<ShortcutFixtureObservation> {
+    let handle = shortcut_fixture_handle(id, generation, window, cx)?;
+    crate::windows::automation_surface_collector::read_window_root(handle, window, cx, |popup, cx| {
+        ShortcutFixtureObservation { data_revision: popup.data_revision, presentation_revision: 1, applied_theme_revision: popup.applied_theme_revision, value: shortcut_recorder_semantic_value(popup.recorder.read(cx)) }
+    })
+}
+
+pub(crate) fn shortcut_fixture_elements(id: &str, generation: u64, cx: &App) -> anyhow::Result<Vec<crate::protocol::ElementInfo>> {
+    let handle = shortcut_fixture_handle(id, generation, None, cx)?;
+    Ok(handle.read(cx)?.recorder.read(cx).automation_elements())
+}
+
+pub(crate) fn shortcut_fixture_select(id: &str, generation: u64, semantic_id: &str, submit: bool, cx: &mut App) -> anyhow::Result<bool> {
+    crate::runtime_policy::WindowHostPolicy::OwnedHidden.validate()?;
+    if !submit {
+        return Err(crate::protocol::TransactionError {
+            code: crate::protocol::TransactionErrorCode::UnsupportedCommand,
+            message: "selection_only_unsupported".into(),
+            suggestion: Some("Use explicit submit:true to activate a recorder action".into()),
+        }.into());
+    }
+    let handle = shortcut_fixture_handle(id, generation, None, cx)?;
+    anyhow::ensure!(crate::windows::runtime_window_host_policy(id, generation)? == crate::runtime_policy::WindowHostPolicy::OwnedHidden
+        && handle.read(cx)?.host_policy == crate::runtime_policy::WindowHostPolicy::OwnedHidden, "shortcut_owned_host_required");
+    handle.update(cx, |popup, _, cx| {
+        popup.recorder.update(cx, |recorder, cx| recorder.activate_semantic_action(semantic_id, cx))
+            .map_err(anyhow::Error::msg)
+    })?
+}
+
+pub(crate) fn shortcut_fixture_layout(id: &str, generation: u64, cx: &mut App) -> anyhow::Result<crate::protocol::LayoutInfo> {
+    use crate::protocol::{LayoutComponentInfo, LayoutComponentType, LayoutInfo};
+    let handle = shortcut_fixture_handle(id, generation, None, cx)?;
+    handle.update(cx, |popup, window, cx| {
+        let frame = window.rendered_frame_generation();
+        anyhow::ensure!(frame > 0, "shortcut_layout_unavailable:unpainted");
+        let recorder = popup.recorder.read(cx);
+        let mut selectors = vec![
+            ("shortcut-recorder-window", LayoutComponentType::Panel, None),
+            ("shortcut-modal-content", LayoutComponentType::Container, Some("shortcut-recorder-window")),
+            ("shortcut-recorder-header", LayoutComponentType::Header, Some("shortcut-modal-content")),
+            ("shortcut-key-display", LayoutComponentType::Input, Some("shortcut-modal-content")),
+        ];
+        if recorder.conflict.is_some() {
+            selectors.push(("shortcut-conflict-warning", LayoutComponentType::Other, Some("shortcut-modal-content")));
+        }
+        if !recorder.capture_only {
+            selectors.extend([
+                ("shortcut-modal-action-row", LayoutComponentType::Container, Some("shortcut-modal-content")),
+                ("shortcut-save-button", LayoutComponentType::Button, Some("shortcut-modal-action-row")),
+                ("shortcut-clear-button", LayoutComponentType::Button, Some("shortcut-modal-action-row")),
+                ("shortcut-cancel-button", LayoutComponentType::Button, Some("shortcut-modal-action-row")),
+            ]);
+        }
+        let mut components = Vec::with_capacity(selectors.len());
+        for (selector, component_type, parent) in selectors {
+            let entry = window.debug_bounds_entries().iter().rev().find(|entry| entry.selector == selector)
+                .ok_or_else(|| anyhow::anyhow!("shortcut_layout_unavailable:{selector}"))?;
+            let bounds = entry.bounds;
+            let visible = entry.visible_bounds;
+            let clip = entry.clip_bounds;
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            anyhow::ensure!(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0, "shortcut_layout_unavailable:{selector}");
+            let mut component = LayoutComponentInfo::new(selector, component_type)
+                .with_bounds(f32::from(bounds.origin.x), f32::from(bounds.origin.y), width, height)
+                .with_measurement("paint-time", "window")
+                .with_measurement_frame(frame)
+                .with_paint_visibility(f32::from(visible.origin.x), f32::from(visible.origin.y), f32::from(visible.size.width), f32::from(visible.size.height), f32::from(clip.origin.x), f32::from(clip.origin.y), f32::from(clip.size.width), f32::from(clip.size.height));
+            if let Some(parent) = parent { component = component.with_parent(parent); }
+            components.push(component);
+        }
+        let viewport = window.viewport_size();
+        Ok(LayoutInfo { window_width: f32::from(viewport.width), window_height: f32::from(viewport.height), prompt_type: "shortcutRecorder".into(), components, timestamp: chrono::Utc::now().to_rfc3339(), ..Default::default() })
+    })?
+}
+
+pub(crate) fn mount_owned_shortcut_recorder(app: Entity<ScriptListApp>, parent: &crate::protocol::AutomationWindowInfo, parent_handle: AnyWindowHandle, cx: &mut App) -> anyhow::Result<crate::protocol::AutomationWindowInfo> {
+    let policy = crate::runtime_policy::WindowHostPolicy::OwnedHidden;
+    policy.validate()?;
+    let generation = parent.generation.ok_or_else(|| anyhow::anyhow!("shortcut_parent_generation_missing"))?;
+    anyhow::ensure!(parent.id == "main" && crate::windows::get_runtime_window_handle_for_generation(&parent.id, generation) == Some(parent_handle), "shortcut_parent_stale");
+    anyhow::ensure!(crate::windows::runtime_window_host_policy(&parent.id, generation)? == policy, "shortcut_parent_not_owned");
+    let (bounds, display_id) = parent_handle.update(cx, |_, window, cx| (window.bounds(), window.display(cx).map(|display| display.id())))?;
+    let command_id = "builtin/clipboard-history".to_string();
+    let command_name = "Clipboard History".to_string();
+    app.update(cx, |app, cx| {
+        app.shortcut_recorder_state = Some(ShortcutRecorderState { command_id: command_id.clone(), command_name: command_name.clone() });
+        app.shortcut_recorder_entity = None;
+        app.mark_main_presentation_changed();
+        cx.notify();
+    });
+    let theme = app.read(cx).theme.clone();
+    let opened = open_shortcut_recorder_window(cx, app.downgrade(), command_id, command_name, theme, ShortcutRecorderParentWindow { handle: parent_handle, bounds, display_id, info: parent.clone() }, policy);
+    if let Err(error) = opened {
+        app.update(cx, |app, cx| { app.shortcut_recorder_state = None; cx.notify(); });
+        return Err(error);
+    }
+    crate::windows::automation_window_by_id("shortcut-recorder-popup").ok_or_else(|| anyhow::anyhow!("shortcut_registration_missing"))
+}
+
 struct ShortcutRecorderParentWindow {
     handle: AnyWindowHandle,
     bounds: Bounds<Pixels>,
     display_id: Option<DisplayId>,
+    info: crate::protocol::AutomationWindowInfo,
 }
 
 /// Opens the shortcut recorder as a key popup because raw shortcut capture must
@@ -301,7 +480,11 @@ fn open_shortcut_recorder_window(
     command_name: String,
     theme: std::sync::Arc<theme::Theme>,
     parent: ShortcutRecorderParentWindow,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
 ) -> anyhow::Result<WindowHandle<ShortcutRecorderPopupWindow>> {
+    host_policy.validate()?;
+    let parent_generation = parent.info.generation.ok_or_else(|| anyhow::anyhow!("shortcut_parent_generation_missing"))?;
+    anyhow::ensure!(crate::windows::get_runtime_window_handle_for_generation(&parent.info.id, parent_generation) == Some(parent.handle), "shortcut_parent_stale");
     close_shortcut_recorder_window(cx);
 
     let window_background = if theme.is_vibrancy_enabled() {
@@ -313,6 +496,7 @@ fn open_shortcut_recorder_window(
     let bounds = shortcut_recorder_window_bounds(parent.bounds);
 
     let window_theme = std::sync::Arc::clone(&theme);
+    let app_for_close = app.clone();
     // Intentionally not Root-wrapped: this popup is fixed compact capture chrome.
     // Keep focus/root behavior unchanged unless capture dismissal is retested.
     let handle = cx.open_window(
@@ -320,8 +504,8 @@ fn open_shortcut_recorder_window(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
             window_background,
-            focus: true,
-            show: true,
+            focus: !host_policy.is_hidden(),
+            show: !host_policy.is_hidden(),
             kind: WindowKind::PopUp,
             is_movable: false,
             is_resizable: false,
@@ -331,15 +515,18 @@ fn open_shortcut_recorder_window(
         },
         move |_window, cx| {
             cx.new(|cx| {
-                ShortcutRecorderPopupWindow::new(command_id, command_name, window_theme, app, cx)
+                ShortcutRecorderPopupWindow::new(command_id, command_name, window_theme, app, host_policy, cx)
             })
         },
     )?;
 
     #[cfg(target_os = "macos")]
-    {
+    if !host_policy.is_hidden() {
+        let parent_id = parent.info.id.clone();
         let _ = handle.update(cx, move |_popup, window, cx| {
             window.defer(cx, move |window, cx| {
+                if crate::windows::get_runtime_window_handle_for_generation(&parent_id, parent_generation) != Some(parent.handle)
+                    || crate::windows::get_runtime_window_handle("shortcut-recorder-popup") != Some(window.window_handle()) { return; }
                 if let Some(ns_window) = shortcut_recorder_ns_window(window) {
                     unsafe {
                         crate::platform::configure_shortcut_recorder_popup_window(
@@ -358,28 +545,38 @@ fn open_shortcut_recorder_window(
         *guard = Some(handle);
     }
 
-    if let Some(parent_automation_id) = crate::windows::focused_automation_window_id() {
-        let popup_bounds = crate::protocol::AutomationWindowBounds {
-            x: f32::from(bounds.origin.x) as f64,
-            y: f32::from(bounds.origin.y) as f64,
-            width: f32::from(bounds.size.width) as f64,
-            height: f32::from(bounds.size.height) as f64,
-        };
-        if let Err(error) = crate::windows::register_attached_popup(
-            "shortcut-recorder-popup".to_string(),
-            crate::protocol::AutomationWindowKind::PromptPopup,
-            Some("Shortcut Recorder".to_string()),
-            Some("shortcutRecorder".to_string()),
-            Some(popup_bounds),
-            Some(parent_automation_id.as_str()),
-        ) {
-            tracing::warn!(
-                target: "script_kit::shortcut",
-                error = %error,
-                "Failed to register shortcut recorder popup"
-            );
+    let registered = crate::windows::register_runtime_window_instance(crate::protocol::AutomationWindowInfo {
+        id: "shortcut-recorder-popup".into(), kind: crate::protocol::AutomationWindowKind::PromptPopup,
+        title: Some("Shortcut Recorder".into()), semantic_surface: Some("shortcutRecorder".into()),
+        focused: false, visible: !host_policy.is_hidden(),
+        bounds: Some(crate::protocol::AutomationWindowBounds { x: f32::from(bounds.origin.x) as f64, y: f32::from(bounds.origin.y) as f64, width: f32::from(bounds.size.width) as f64, height: f32::from(bounds.size.height) as f64 }),
+        parent_window_id: Some(parent.info.id), parent_kind: Some(parent.info.kind), parent_window_generation: Some(parent_generation),
+        pid: Some(std::process::id()), generation: None,
+    }, handle.into(), cx);
+    let info = match registered {
+        Ok(info) => info,
+        Err(error) => {
+            if let Ok(mut guard) = storage.lock() { *guard = None; }
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            return Err(error);
         }
-    }
+    };
+    let generation = info.generation.ok_or_else(|| anyhow::anyhow!("shortcut_generation_missing"))?;
+    let subscription = cx.on_window_closed(move |cx, id| {
+        if id == handle.window_id() {
+            if crate::windows::remove_runtime_window_instance("shortcut-recorder-popup", generation) {
+                if let Some(app) = app_for_close.upgrade() {
+                    app.update(cx, |app, cx| { app.shortcut_recorder_state = None; app.shortcut_recorder_entity = None; app.pending_focus = Some(FocusTarget::MainFilter); app.mark_main_presentation_changed(); cx.notify(); });
+                }
+            }
+            if let Some(storage) = SHORTCUT_RECORDER_WINDOW.get() {
+                if let Ok(mut guard) = storage.lock() {
+                    if *guard == Some(handle) { *guard = None; }
+                }
+            }
+        }
+    });
+    handle.update(cx, |popup, _, _| { popup.generation = generation; popup._close_subscription = Some(subscription); })?;
 
     logging::log(
         "SHORTCUT",
@@ -594,6 +791,12 @@ export default {
         let parent_window_handle = window.window_handle();
         let parent_bounds = window.bounds();
         let display_id = window.display(cx).map(|display| display.id());
+        let Some(parent_info) = crate::windows::automation_window_by_id("main") else {
+            self.shortcut_recorder_state = None;
+            self.show_error_toast("Shortcut recorder requires a registered main parent".to_string(), cx);
+            return;
+        };
+        let host_policy = self.main_services.host_policy();
 
         cx.spawn(async move |this, cx| {
             cx.update(|cx| {
@@ -607,7 +810,9 @@ export default {
                         handle: parent_window_handle,
                         bounds: parent_bounds,
                         display_id,
+                        info: parent_info,
                     },
+                    host_policy,
                 ) {
                     tracing::error!(
                         target: "script_kit::shortcut",
@@ -642,10 +847,12 @@ export default {
             self.shortcut_recorder_entity = None;
             self.pending_focus = Some(FocusTarget::MainFilter);
             self.focused_input = FocusedInput::MainFilter;
+            let generation = crate::windows::automation_window_by_id("shortcut-recorder-popup").and_then(|info| info.generation);
+            let owned = self.main_services.host_policy().is_hidden();
             cx.spawn(async move |this, cx| {
                 cx.update(|cx| {
-                    close_shortcut_recorder_window(cx);
-                    crate::platform::show_main_window_without_activation();
+                    if let Some(generation) = generation { let _ = close_shortcut_recorder_instance(generation, cx); }
+                    if !owned { crate::platform::show_main_window_without_activation(); }
                 });
                 let _ = this.update(cx, |app, cx| {
                     app.pending_focus = Some(FocusTarget::MainFilter);
@@ -697,6 +904,13 @@ export default {
 
         let recorded_key = recorded.key.clone().unwrap_or_default();
         let shortcut_str = shortcut.to_canonical_string();
+        if let MainServices::OwnedFixtures(sources) = &mut self.main_services {
+            Arc::make_mut(sources).shortcut_overrides.insert(command_id, shortcut_str);
+            self.mark_main_data_changed();
+            crate::runtime_policy::record_completed_fixture_effect();
+            self.close_shortcut_recorder(cx);
+            return;
+        }
 
         if let Some(conflict) =
             crate::hotkeys::shortcut_conflict_for_recording(&command_id, &shortcut_str)

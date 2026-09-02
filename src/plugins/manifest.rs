@@ -12,7 +12,10 @@ const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 /// or the directory name when no manifest file exists.
 pub fn read_plugin_manifest(plugin_root: &Path) -> Result<PluginManifest> {
     let path = plugin_root.join(PLUGIN_MANIFEST_FILE);
-    if path.exists() {
+    if path
+        .try_exists()
+        .with_context(|| format!("Failed to inspect plugin manifest: {}", path.display()))?
+    {
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read plugin manifest: {}", path.display()))?;
         let manifest: PluginManifest = serde_json::from_str(&text)
@@ -31,7 +34,10 @@ pub fn synthesize_plugin_manifest(plugin_root: &Path) -> Result<PluginManifest> 
         .unwrap_or_else(|| "unknown".to_string());
 
     let package_json = plugin_root.join("package.json");
-    if package_json.exists() {
+    if package_json
+        .try_exists()
+        .with_context(|| format!("Failed to inspect package.json: {}", package_json.display()))?
+    {
         let text = fs::read_to_string(&package_json)
             .with_context(|| format!("Failed to read package.json: {}", package_json.display()))?;
         let value: Value = serde_json::from_str(&text)

@@ -1,5 +1,5 @@
 use super::*;
-use anyhow::{Context as AnyhowContext, Result, anyhow};
+use anyhow::{anyhow, Context as AnyhowContext, Result};
 
 #[derive(Debug, Clone, Copy, strum::Display, strum::EnumString)]
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
@@ -280,41 +280,29 @@ impl ScriptListApp {
         &mut self,
         id: String,
         value: Option<String>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        logging::log(
-            "UI",
-            &format!("Submitting response for {}: {:?}", id, value),
-        );
-
-        let response = Message::Submit { id, value };
-
-        if let Some(ref sender) = self.response_sender {
-            // Use try_send to avoid blocking UI thread
-            // If channel is full, the script isn't reading - log warning but don't freeze UI
-            match sender.try_send(response) {
-                Ok(()) => {
-                    logging::log("UI", "Response queued for script");
-                }
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    // Channel is full - script isn't reading stdin fast enough
-                    // This shouldn't happen in normal operation, log as warning
-                    logging::log(
-                        "WARN",
-                        "Response channel full - script may be stuck. Response dropped.",
-                    );
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    // Channel disconnected - script has exited
-                    logging::log("UI", "Response channel disconnected - script exited");
-                }
+        use crate::prompt_completion::{PromptCompletionBinding, PromptOutcome};
+        let binding = if let Some(binding) = &self.prompt_completion {
+            if binding.instance().id != id {
+                self.show_error_toast("stale_prompt_submission".to_string(), cx);
+                return;
             }
+            binding.clone()
         } else {
-            logging::log("UI", "No response sender available");
+            let binding = PromptCompletionBinding::sdk(id, self.response_sender.clone());
+            self.prompt_completion = Some(binding.clone());
+            binding
+        };
+        let outcome = value.map_or(PromptOutcome::Cancelled, |value| {
+            PromptOutcome::Submitted(crate::protocol::SubmitValue::Text(value))
+        });
+        if let Err(error) = binding.try_complete(outcome) {
+            self.show_error_toast(error.to_string(), cx);
+            return;
         }
-
-        // Return to waiting state (script will send next prompt or exit)
-        // Don't change view here - wait for next message from script
+        self.mark_main_data_changed();
+        cx.notify();
     }
 
     /// Get filtered choices for arg prompt (also handles mini/micro variants)
@@ -494,6 +482,7 @@ impl ScriptListApp {
                 id: "inline-ai-setup".to_string(),
                 entity,
             };
+            self.note_main_route_changed();
             self.focused_input = FocusedInput::None;
             self.pending_focus = Some(FocusTarget::ChatPrompt);
             resize_to_view_sync(
@@ -574,6 +563,7 @@ impl ScriptListApp {
             id: "inline-ai".to_string(),
             entity,
         };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None;
         self.pending_focus = Some(FocusTarget::ChatPrompt);
         resize_to_view_sync(
@@ -852,13 +842,9 @@ import "@scriptkit/sdk";
     #[test]
     fn test_ai_script_generation_system_prompt_defaults_to_main_menu_dimensions() {
         assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("main-menu-sized prompt flow"));
-        assert!(
-            AI_SCRIPT_GENERATION_SYSTEM_PROMPT
-                .contains("expanded split-view previews as rare exceptions")
-        );
-        assert!(
-            AI_SCRIPT_GENERATION_SYSTEM_PROMPT
-                .contains("Avoid `setPreview()`, `setPanel()`, and choice `preview` fields")
-        );
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT
+            .contains("expanded split-view previews as rare exceptions"));
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT
+            .contains("Avoid `setPreview()`, `setPanel()`, and choice `preview` fields"));
     }
 }

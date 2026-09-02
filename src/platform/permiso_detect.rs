@@ -8,6 +8,9 @@ pub enum PermissionStatus {
 
 #[cfg(target_os = "macos")]
 pub fn ax_is_trusted() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> bool;
@@ -27,6 +30,9 @@ pub fn ax_is_trusted() -> PermissionStatus {
 
 #[cfg(target_os = "macos")]
 pub fn screen_capture_authorized() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::ScreenCapture) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
@@ -46,6 +52,9 @@ pub fn screen_capture_authorized() -> PermissionStatus {
 
 #[cfg(target_os = "macos")]
 pub fn microphone_authorized() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::Device) {
+        return PermissionStatus::Unknown;
+    }
     use cocoa::base::{id, nil};
     use cocoa::foundation::NSString;
     use objc::{class, msg_send, sel, sel_impl};
@@ -85,6 +94,9 @@ pub fn microphone_authorized() -> PermissionStatus {
 
 #[cfg(target_os = "macos")]
 pub fn input_monitoring_authorized() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::GlobalMonitor) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightListenEventAccess() -> bool;
@@ -104,6 +116,9 @@ pub fn input_monitoring_authorized() -> PermissionStatus {
 
 #[cfg(target_os = "macos")]
 pub fn event_synthesizing_authorized() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeInput) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightPostEventAccess() -> bool;
@@ -126,6 +141,9 @@ pub fn event_synthesizing_authorized() -> PermissionStatus {
 /// and the user must grant via System Settings.
 #[cfg(target_os = "macos")]
 pub fn request_screen_capture_access() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGRequestScreenCaptureAccess() -> bool;
@@ -146,6 +164,9 @@ pub fn request_screen_capture_access() -> PermissionStatus {
 /// Trigger the one-time native macOS prompt for Input Monitoring.
 #[cfg(target_os = "macos")]
 pub fn request_input_monitoring_access() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGRequestListenEventAccess() -> bool;
@@ -167,6 +188,9 @@ pub fn request_input_monitoring_access() -> PermissionStatus {
 /// (the Accessibility-adjacent "control this computer" grant).
 #[cfg(target_os = "macos")]
 pub fn request_event_synthesizing_access() -> PermissionStatus {
+    if !super::native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeVisibility) {
+        return PermissionStatus::Unknown;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGRequestPostEventAccess() -> bool;

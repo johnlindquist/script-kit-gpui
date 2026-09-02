@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import {
   chmodSync,
@@ -27,10 +28,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 assertNoninteractiveVisualProbe("cons-flow-ux.flow-history");
 
 const repoRoot = resolve(import.meta.dir, "../../..");
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-c05/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const receiptDir = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ??
     ".artifacts/consistency/cons-flow-ux/c05-flow-archive-v1/runtime",
@@ -396,25 +394,23 @@ async function launch(
 ): Promise<Driver> {
   mkdirSync(home, { recursive: true });
   mkdirSync(join(home, ".scriptkit"), { recursive: true });
-  return Driver.launch({
-    binary,
-    sessionName: `cons-flow-c05-${name}`,
-    sandboxHome: false,
-    sharedModels: false,
-    env: {
-      HOME: home,
-      SK_PATH: join(home, ".scriptkit"),
-      CODEX_HOME: join(home, ".codex"),
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-      ...env,
-    },
-    readyTimeoutMs: 30_000,
-    defaultTimeoutMs: 15_000,
-  });
+  return Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+  sessionName: `cons-flow-c05-${name}`,
+  sandboxHome: false,
+  sharedModels: false,
+  env: {
+    HOME: home,
+    SK_PATH: join(home, ".scriptkit"),
+    CODEX_HOME: join(home, ".codex"),
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+    ...env,
+  },
+  readyTimeoutMs: 30_000,
+  defaultTimeoutMs: 15_000, });
 }
 
 async function closeOwned(

@@ -104,6 +104,7 @@ impl TextInjector {
     ///
     #[instrument(skip(self), fields(count))]
     pub fn delete_chars(&self, count: usize) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)?;
         if count == 0 {
             debug!("No characters to delete");
             return Ok(());
@@ -141,6 +142,7 @@ impl TextInjector {
     ///
     #[instrument(skip(self, text), fields(text_len = text.len()))]
     pub fn paste_text(&self, text: &str) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
         if text.is_empty() {
             debug!("Empty text, nothing to paste");
             return Ok(());
@@ -233,6 +235,7 @@ impl TextInjector {
 ///
 /// Sends both key down and key up events for the backspace key.
 fn simulate_backspace() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)?;
     use core_graphics::event::{CGEvent, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -265,6 +268,7 @@ fn simulate_backspace() -> Result<()> {
 ///
 /// Sends key down and key up events for 'v' with Command modifier.
 fn simulate_paste() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)?;
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 

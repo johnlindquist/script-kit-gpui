@@ -132,6 +132,15 @@ pub enum SpineListAction {
         segment_byte_range: Range<usize>,
         query: SharedString,
     },
+    AcceptMenuSyntaxTrigger {
+        row_id: SharedString,
+    },
+    AcceptMenuSyntaxObject {
+        row_id: SharedString,
+    },
+    AttachContextResult {
+        source: SharedString,
+    },
     Noop,
 }
 
@@ -144,6 +153,9 @@ impl SpineListRow {
                 SpineListAction::Noop => "No Action",
                 SpineListAction::OpenModeExit { .. } => "Open",
                 SpineListAction::OpenFileSearchPortal { .. } => "Browse",
+                SpineListAction::AcceptMenuSyntaxTrigger { .. } => "Accept",
+                SpineListAction::AcceptMenuSyntaxObject { .. } => "Insert",
+                SpineListAction::AttachContextResult { .. } => "Attach",
                 // One verb per Enter mechanic: rows that insert text and
                 // keep you typing say "Refine"; rows that resolve into a
                 // prompt segment say "Attach".

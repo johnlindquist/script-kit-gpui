@@ -77,6 +77,30 @@ impl TestDispatcher {
         while self.tick(false) {}
     }
 
+    /// Advance time without recursively draining tasks; each subsequent tick is budgetable.
+    pub fn advance_clock_without_running(&self, duration: Duration) {
+        self.scheduler.clock().advance(duration);
+    }
+
+    /// Execute no more than the requested number of scheduler steps (including timer wakes).
+    pub fn run_bounded(&self, max_steps: usize) -> usize {
+        let mut executed = 0;
+        while executed < max_steps && self.tick(false) {
+            executed += 1;
+        }
+        executed
+    }
+
+    /// Actual queued foreground/background runnables. Timers are reported separately as pending work.
+    pub fn pending_task_counts(&self) -> (usize, usize) {
+        self.scheduler.pending_task_counts()
+    }
+
+    /// Whether runnable or timer work remains in this scheduler.
+    pub fn has_pending_work(&self) -> bool {
+        self.scheduler.has_pending_tasks()
+    }
+
     pub fn allow_parking(&self) {
         self.scheduler.allow_parking();
     }
@@ -158,5 +182,53 @@ impl PlatformDispatcher for TestDispatcher {
         std::thread::spawn(move || {
             f();
         });
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+    use crate::BackgroundExecutor;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn self_waking_work_cannot_escape_step_budget() {
+        let dispatcher = TestDispatcher::new(0);
+        let executor = BackgroundExecutor::new(Arc::new(dispatcher.clone()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = polls.clone();
+        let task = executor.spawn(std::future::poll_fn(move |cx| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            cx.waker().wake_by_ref();
+            std::task::Poll::<()>::Pending
+        }));
+        assert_eq!(dispatcher.run_bounded(0), 0);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(dispatcher.run_bounded(7), 7);
+        assert_eq!(polls.load(Ordering::SeqCst), 7);
+        assert!(dispatcher.has_pending_work());
+        drop(task);
+    }
+
+    #[test]
+    fn advancing_clock_does_not_execute_timer_callbacks() {
+        let dispatcher = TestDispatcher::new(0);
+        let executor = BackgroundExecutor::new(Arc::new(dispatcher.clone()));
+        let completed = Arc::new(AtomicBool::new(false));
+        let observed = completed.clone();
+        let timer = executor.timer(Duration::from_millis(100));
+        let task = executor.spawn(async move {
+            timer.await;
+            observed.store(true, Ordering::SeqCst);
+        });
+        dispatcher.run_bounded(1);
+        dispatcher.advance_clock_without_running(Duration::from_millis(99));
+        dispatcher.run_bounded(8);
+        assert!(!completed.load(Ordering::SeqCst));
+        dispatcher.advance_clock_without_running(Duration::from_millis(1));
+        assert!(!completed.load(Ordering::SeqCst));
+        dispatcher.run_bounded(8);
+        assert!(completed.load(Ordering::SeqCst));
+        drop(task);
     }
 }

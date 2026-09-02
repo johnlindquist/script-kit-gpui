@@ -99,6 +99,9 @@ pub fn flow_catalog() -> Arc<FlowCatalog> {
 /// Resolve the mdflow binary, preferring `mdflow` over `md` (`md` may shadow
 /// other tools on some systems; the long name is unambiguous).
 pub fn mdflow_binary() -> Option<&'static str> {
+    if crate::runtime_policy::is_owned_evaluation() {
+        return None;
+    }
     // Success is cached forever; a miss is re-probed on every call so
     // installing mdflow while the app is open starts working immediately
     // (a cached "not found" was a permanent dead end until relaunch).
@@ -120,43 +123,87 @@ pub fn mdflow_binary() -> Option<&'static str> {
     found
 }
 
+struct CachedRosterEntry {
+    entry: RosterEntry,
+    generation: u64,
+}
+
 #[derive(Default)]
 pub struct FlowCatalog {
-    entries: Mutex<HashMap<String, RosterEntry>>,
-    notify: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    entries: Mutex<HashMap<String, CachedRosterEntry>>,
+    /// One worker and one latest source-change request per working directory.
+    refreshing: Mutex<HashMap<String, bool>>,
+    notify: Mutex<Option<Box<dyn Fn(&str, u64) + Send + Sync>>>,
 }
 
 impl FlowCatalog {
-    pub fn set_notify_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
+    pub fn install_owned_roster(
+        &self,
+        cwd: String,
+        flows: Vec<FlowDescriptor>,
+    ) -> anyhow::Result<()> {
+        let scope = crate::runtime_policy::owned_evaluation()
+            .ok_or_else(|| anyhow::anyhow!("owned_flow_required"))?;
+        scope.require_owned_path(std::path::Path::new(&cwd))?;
+        anyhow::ensure!(flows.len() <= 32, "flow_fixture_limit");
+        self.complete_refresh(
+            cwd,
+            RosterEntry {
+                status: RosterStatus::Ready,
+                flows: Arc::new(flows),
+                warnings: Vec::new(),
+                failure: None,
+                fetched_at: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn set_notify_hook(&self, hook: impl Fn(&str, u64) + Send + Sync + 'static) {
         *self.notify.lock() = Some(Box::new(hook));
     }
 
-    fn notify(&self) {
+    fn notify(&self, cwd: &str, generation: u64) {
         if let Some(hook) = self.notify.lock().as_ref() {
-            hook();
+            hook(cwd, generation);
         }
+    }
+
+    pub fn roster_generation_for(&self, cwd: &str) -> u64 {
+        self.entries
+            .lock()
+            .get(cwd)
+            .map_or(0, |cached| cached.generation)
     }
 
     /// Current entry for a cwd without blocking; kicks off a background
     /// refresh when missing or stale. Renderers call this every frame.
     pub fn roster_for(self: &Arc<Self>, cwd: &str) -> RosterEntry {
+        if crate::runtime_policy::is_owned_evaluation() {
+            return self
+                .entries
+                .lock()
+                .get(cwd)
+                .map(|cached| cached.entry.clone())
+                .unwrap_or_else(|| RosterEntry::empty(RosterStatus::Ready));
+        }
         let needs_refresh = {
             let entries = self.entries.lock();
-            entry_needs_refresh(entries.get(cwd))
+            entry_needs_refresh(entries.get(cwd).map(|cached| &cached.entry))
         };
         if needs_refresh {
-            self.spawn_refresh(cwd);
+            self.spawn_refresh(cwd, false);
         }
         self.entries
             .lock()
             .get(cwd)
-            .cloned()
+            .map(|cached| cached.entry.clone())
             .unwrap_or_else(|| RosterEntry::empty(RosterStatus::Loading))
     }
 
     /// Force refresh (cwd chip changed, manual reload action).
     pub fn refresh(self: &Arc<Self>, cwd: &str) {
-        self.spawn_refresh(cwd);
+        self.spawn_refresh(cwd, true);
     }
 
     /// Cheap staleness check without cloning the entry: spawns a background
@@ -167,47 +214,83 @@ impl FlowCatalog {
     pub fn poke(self: &Arc<Self>, cwd: &str) {
         let needs_refresh = {
             let entries = self.entries.lock();
-            entry_needs_refresh(entries.get(cwd))
+            entry_needs_refresh(entries.get(cwd).map(|cached| &cached.entry))
         };
         if needs_refresh {
-            self.spawn_refresh(cwd);
+            self.spawn_refresh(cwd, false);
         }
     }
 
-    fn spawn_refresh(self: &Arc<Self>, cwd: &str) {
+    fn spawn_refresh(self: &Arc<Self>, cwd: &str, source_changed: bool) {
+        if crate::runtime_policy::is_owned_evaluation() {
+            return;
+        }
         {
-            let mut entries = self.entries.lock();
-            let placeholder = entries
-                .entry(cwd.to_string())
-                .or_insert_with(|| RosterEntry::empty(RosterStatus::Loading));
-            if placeholder.status == RosterStatus::Loading && !placeholder.flows.is_empty() {
-                return; // refresh already in flight with previous data showing
+            let mut refreshing = self.refreshing.lock();
+            if let Some(desired) = refreshing.get_mut(cwd) {
+                *desired |= source_changed;
+                return;
             }
-            placeholder.status = RosterStatus::Loading;
+            refreshing.insert(cwd.to_string(), false);
+            self.entries
+                .lock()
+                .entry(cwd.to_string())
+                .or_insert_with(|| CachedRosterEntry {
+                    entry: RosterEntry::empty(RosterStatus::Loading),
+                    generation: 0,
+                })
+                .entry
+                .status = RosterStatus::Loading;
         }
 
-        // Unit tests run under GPUI's deterministic scheduler. An OS thread
-        // completing a roster fetch during an unrelated GPUI test makes that
-        // test nondeterministic, so keep test refreshes local and side-effect
-        // free. Fetch parsing and cache-completion behavior have direct unit
-        // coverage below; production retains the asynchronous process path.
+        // GPUI tests keep discovery synchronous under the deterministic scheduler.
         #[cfg(test)]
         {
-            self.complete_refresh(cwd.to_string(), RosterEntry::empty(RosterStatus::Ready));
+            let mut refreshing = self.refreshing.lock();
+            let generation = self.store_refresh(cwd, RosterEntry::empty(RosterStatus::Ready));
+            refreshing.remove(cwd);
+            drop(refreshing);
+            self.notify(cwd, generation);
             return;
         }
 
         #[cfg(not(test))]
         {
             let catalog = Arc::clone(self);
-            let cwd = cwd.to_string();
-            std::thread::Builder::new()
+            let work_cwd = cwd.to_string();
+            let spawned = std::thread::Builder::new()
                 .name("flow-roster-fetch".into())
-                .spawn(move || {
-                    let entry = fetch_roster_blocking(&cwd);
-                    catalog.complete_refresh(cwd, entry);
-                })
-                .ok();
+                .spawn(move || loop {
+                    let entry = fetch_roster_blocking(&work_cwd);
+                    let mut refreshing = catalog.refreshing.lock();
+                    if refreshing
+                        .get_mut(&work_cwd)
+                        .is_some_and(|desired| std::mem::take(desired))
+                    {
+                        // A newer source request supersedes this snapshot.
+                        // Re-read on the same worker; never stack another fetch.
+                        drop(refreshing);
+                        continue;
+                    }
+                    let generation = catalog.store_refresh(&work_cwd, entry);
+                    refreshing.remove(&work_cwd);
+                    drop(refreshing);
+                    catalog.notify(&work_cwd, generation);
+                    break;
+                });
+            if let Err(error) = spawned {
+                let entry =
+                    RosterEntry::failed(crate::ai::reliability::process_failure_with_detail(
+                        sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                        crate::ai::reliability::ProcessFailureFacts::SpawnFailed,
+                        &format!("flow roster worker could not start: {error}"),
+                    ));
+                let mut refreshing = self.refreshing.lock();
+                let generation = self.store_refresh(cwd, entry);
+                refreshing.remove(cwd);
+                drop(refreshing);
+                self.notify(cwd, generation);
+            }
         }
     }
 
@@ -217,14 +300,43 @@ impl FlowCatalog {
     /// generation, or the repaint reads the stale cache and the arrival is
     /// invisible until the next interaction.
     fn complete_refresh(&self, cwd: String, entry: RosterEntry) {
-        self.entries.lock().insert(cwd, entry);
-        ROSTER_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.notify();
+        let generation = self.store_refresh(&cwd, entry);
+        self.notify(&cwd, generation);
+    }
+
+    fn store_refresh(&self, cwd: &str, mut entry: RosterEntry) -> u64 {
+        let mut entries = self.entries.lock();
+        if matches!(entry.status, RosterStatus::Error | RosterStatus::Legacy) {
+            if let Some(previous) = entries.get(cwd) {
+                entry.flows = previous.entry.flows.clone();
+            }
+        }
+        let generation = ROSTER_GENERATION
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |generation| generation.checked_add(1),
+            )
+            .expect("flow catalogue generation exhausted")
+            + 1;
+        let cached = CachedRosterEntry { entry, generation };
+        if let Some(previous) = entries.get_mut(cwd) {
+            *previous = cached;
+        } else {
+            entries.insert(cwd.to_owned(), cached);
+        }
+        generation
     }
 
     #[cfg(test)]
     fn insert_for_test(&self, cwd: &str, entry: RosterEntry) {
-        self.entries.lock().insert(cwd.to_string(), entry);
+        self.entries.lock().insert(
+            cwd.to_string(),
+            CachedRosterEntry {
+                entry,
+                generation: 0,
+            },
+        );
     }
 
     #[cfg(test)]
@@ -384,6 +496,9 @@ fn parse_roster_output(stdout: &str) -> RosterEntry {
 /// (a project override of a packaged flow should win locally).
 pub fn desk_flows(roster: &RosterEntry) -> Vec<FlowDescriptor> {
     let mut flows: Vec<FlowDescriptor> = roster.flows.iter().cloned().collect();
+    if crate::runtime_policy::is_owned_evaluation() {
+        return flows;
+    }
     let roster_names: std::collections::HashSet<&str> =
         roster.flows.iter().map(|f| f.name.as_str()).collect();
     for flow in crate::flows::package_source::package_flows() {
@@ -529,15 +644,17 @@ mod tests {
         let catalog = FlowCatalog::default();
         let seen_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let hook_seen = Arc::clone(&seen_generation);
-        catalog.set_notify_hook(move || {
-            hook_seen.store(roster_generation(), std::sync::atomic::Ordering::SeqCst);
+        catalog.set_notify_hook(move |cwd, generation| {
+            assert_eq!(cwd, "/tmp/gen-cwd");
+            assert!(roster_generation() >= generation);
+            hook_seen.store(generation, std::sync::atomic::Ordering::SeqCst);
         });
         let before = roster_generation();
         catalog.complete_refresh(
             "/tmp/gen-cwd".to_string(),
             RosterEntry::empty(RosterStatus::Ready),
         );
-        let after = roster_generation();
+        let after = catalog.roster_generation_for("/tmp/gen-cwd");
         assert!(after > before, "landing a roster must bump the generation");
         assert_eq!(
             seen_generation.load(std::sync::atomic::Ordering::SeqCst),
@@ -548,12 +665,73 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_cwd_completion_keeps_the_current_cwd_revision_unchanged() {
+        let catalog = FlowCatalog::default();
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let received = notifications.clone();
+        catalog.set_notify_hook(move |cwd, generation| {
+            received.lock().push((cwd.to_owned(), generation));
+        });
+        catalog.complete_refresh(
+            "/tmp/current-cwd".into(),
+            RosterEntry::empty(RosterStatus::Ready),
+        );
+        let current_generation = catalog.roster_generation_for("/tmp/current-cwd");
+        catalog.complete_refresh(
+            "/tmp/other-cwd".into(),
+            RosterEntry::empty(RosterStatus::Ready),
+        );
+        let other_generation = catalog.roster_generation_for("/tmp/other-cwd");
+        assert_eq!(
+            catalog.roster_generation_for("/tmp/current-cwd"),
+            current_generation
+        );
+        assert!(other_generation > current_generation);
+        assert_eq!(
+            *notifications.lock(),
+            vec![
+                ("/tmp/current-cwd".to_owned(), current_generation),
+                ("/tmp/other-cwd".to_owned(), other_generation),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_or_unavailable_refresh_retains_last_good_but_successful_empty_clears() {
+        let catalog = FlowCatalog::default();
+        let mut ready = RosterEntry::empty(RosterStatus::Ready);
+        ready.flows = Arc::new(vec![descriptor("last-good", None)]);
+        catalog.complete_refresh("/tmp/retained-cwd".into(), ready);
+        for status in [RosterStatus::Error, RosterStatus::Legacy] {
+            catalog.complete_refresh("/tmp/retained-cwd".into(), RosterEntry::empty(status));
+            let entries = catalog.entries.lock();
+            let entry = &entries["/tmp/retained-cwd"].entry;
+            assert_eq!(entry.status, status);
+            assert_eq!(entry.flows.len(), 1);
+            assert_eq!(entry.flows[0].name, "last-good");
+        }
+        catalog.complete_refresh(
+            "/tmp/retained-cwd".into(),
+            RosterEntry::empty(RosterStatus::Ready),
+        );
+        assert!(catalog.entries.lock()["/tmp/retained-cwd"]
+            .entry
+            .flows
+            .is_empty());
+    }
+
+    #[test]
     fn catalog_returns_cached_entry_without_blocking() {
         let catalog = FlowCatalog::default();
         let mut entry = RosterEntry::empty(RosterStatus::Ready);
         entry.flows = Arc::new(vec![descriptor("cached", None)]);
         catalog.insert_for_test("/tmp/cwd", entry);
-        let got = catalog.entries.lock().get("/tmp/cwd").cloned().unwrap();
+        let got = catalog
+            .entries
+            .lock()
+            .get("/tmp/cwd")
+            .map(|cached| cached.entry.clone())
+            .unwrap();
         assert_eq!(got.flows.len(), 1);
     }
 }

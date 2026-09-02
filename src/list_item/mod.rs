@@ -2320,7 +2320,7 @@ fn decode_png_to_render_image_internal(
     // GPUI's internal image loading does this swap (see gpui/src/platform.rs)
     // We must do the same when creating RenderImage directly from image::Frame
     if convert_to_bgra {
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2); // Swap R and B: RGBA -> BGRA
         }
     }

@@ -128,7 +128,9 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
     productionSources: [
       "src/theme/alpha.rs",
       "src/theme/types.rs",
-      "scripts/devtools/alpha-byte-contract-harness.rs",
+      "scripts/agentic/agent-cargo.sh",
+      "scripts/agentic/build-artifact.ts",
+      "rust-toolchain.toml",
     ],
   },
   {
@@ -309,6 +311,10 @@ export function runSafeTaskProof(
       !(path.startsWith("src/") || path.startsWith("scripts/devtools/") ||
         path.startsWith("crates/sk-protocol/src/") ||
         path.startsWith("design/mockups/generated/") ||
+        (taskId === "GOV-003" &&
+          (path === "scripts/agentic/agent-cargo.sh" ||
+            path === "scripts/agentic/build-artifact.ts" ||
+            path === "rust-toolchain.toml")) ||
         (taskId === "GOV-006" &&
           (path === reviewedWorkflowOwner || path === "scripts/agentic/compiler-input-paths.txt"))) ||
       path.includes("..")

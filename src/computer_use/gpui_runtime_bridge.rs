@@ -21,6 +21,11 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::RwLock;
 use std::time::Duration;
 
+#[cfg(all(target_os = "macos", any(test, feature = "owned-ui-evaluation")))]
+pub use super::owned_render_capture::{
+    forget_owned_render_frame, publish_owned_render_frame, OwnedCompletedRenderFrame,
+};
+
 pub struct GpuiComputerUseRuntimeBridge {
     sender: RwLock<Option<async_channel::Sender<GpuiComputerUseRequest>>>,
     timeout: Duration,
@@ -579,8 +584,6 @@ pub fn capture_native_window_on_gpui_thread(
     use crate::computer_use::native_window_capture::{
         select_capture_candidate_for_native_window, NativeWindowCaptureSelectionError,
     };
-    use base64::Engine as _;
-    use sha2::{Digest, Sha256};
 
     tracing::info!(
         target: "script_kit::automation",
@@ -847,22 +850,7 @@ pub fn capture_native_window_on_gpui_thread(
         }
     };
 
-    let mut hasher = Sha256::new();
-    hasher.update(&captured.png_data);
-    let sha256 = format!("{:x}", hasher.finalize());
-    let png_base64 = request
-        .include_image
-        .then(|| base64::engine::general_purpose::STANDARD.encode(&captured.png_data));
-    let capture = ComputerUseNativeWindowCaptureInfo {
-        mime_type: "image/png",
-        width: captured.width,
-        height: captured.height,
-        byte_length: captured.png_data.len(),
-        sha256,
-        hi_dpi: request.hi_dpi,
-        pixel_audit: pixel_audit_from_platform(&captured.pixel_audit),
-        png_base64,
-    };
+    let capture = capture_info_from_png(&captured, request.hi_dpi, request.include_image);
 
     tracing::info!(
         target: "script_kit::automation",
@@ -916,7 +904,11 @@ fn capture_native_window_receipt(
 #[cfg(target_os = "macos")]
 pub fn capture_render_window_on_gpui_thread(
     request: &ComputerUseCaptureRenderWindowRequest,
+    cx: &mut gpui::App,
 ) -> Result<ComputerUseCaptureRenderWindowSnapshot, ComputerUseRuntimeError> {
+    if crate::runtime_policy::is_owned_evaluation() {
+        return Ok(super::owned_render_capture::capture(request, cx));
+    }
     Ok(ComputerUseCaptureRenderWindowSnapshot {
         schema_version: 1,
         source: "gpuiRenderReadback",
@@ -924,7 +916,10 @@ pub fn capture_render_window_on_gpui_thread(
         status: ComputerUseCaptureRenderWindowStatus::Unsupported,
         correlation_id: request.correlation_id.clone(),
         target: request.target.clone(),
+        frame_identity: None,
+        phase_durations_ms: Default::default(),
         capture: None,
+        pixel_probes: Vec::new(),
         error: Some(ComputerUseCaptureNativeWindowError {
             code: "gpui_readback_unavailable",
             message: "GPUI render readback is not implemented in this runtime".to_string(),
@@ -963,7 +958,9 @@ fn capture_error(
     }
 }
 
-fn pixel_audit_from_platform(audit: &crate::platform::PixelAudit) -> ComputerUseCapturePixelAudit {
+pub(super) fn pixel_audit_from_platform(
+    audit: &crate::platform::PixelAudit,
+) -> ComputerUseCapturePixelAudit {
     ComputerUseCapturePixelAudit {
         sampled: audit.sampled,
         non_black: audit.non_black,
@@ -971,6 +968,26 @@ fn pixel_audit_from_platform(audit: &crate::platform::PixelAudit) -> ComputerUse
         unique_bucket_count: audit.unique_bucket_count,
         mean_luma: audit.mean_luma,
         blank_like: audit.is_blank_like(),
+    }
+}
+
+pub(super) fn capture_info_from_png(
+    captured: &crate::platform::NativeWindowScreenshotCapture,
+    hi_dpi: bool,
+    include_image: bool,
+) -> ComputerUseNativeWindowCaptureInfo {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    ComputerUseNativeWindowCaptureInfo {
+        mime_type: "image/png",
+        width: captured.width,
+        height: captured.height,
+        byte_length: captured.png_data.len(),
+        sha256: format!("{:x}", Sha256::digest(&captured.png_data)),
+        hi_dpi,
+        pixel_audit: pixel_audit_from_platform(&captured.pixel_audit),
+        png_base64: include_image
+            .then(|| base64::engine::general_purpose::STANDARD.encode(&captured.png_data)),
     }
 }
 
@@ -1173,6 +1190,7 @@ pub fn capture_native_window_on_gpui_thread(
 #[cfg(not(target_os = "macos"))]
 pub fn capture_render_window_on_gpui_thread(
     request: &ComputerUseCaptureRenderWindowRequest,
+    _cx: &mut gpui::App,
 ) -> Result<ComputerUseCaptureRenderWindowSnapshot, ComputerUseRuntimeError> {
     Ok(ComputerUseCaptureRenderWindowSnapshot {
         schema_version: 1,
@@ -1181,7 +1199,10 @@ pub fn capture_render_window_on_gpui_thread(
         status: ComputerUseCaptureRenderWindowStatus::Unsupported,
         correlation_id: request.correlation_id.clone(),
         target: request.target.clone(),
+        frame_identity: None,
+        phase_durations_ms: Default::default(),
         capture: None,
+        pixel_probes: Vec::new(),
         error: Some(ComputerUseCaptureNativeWindowError {
             code: "unsupported_platform",
             message: "computer/capture_render_window is not supported on this platform".to_string(),

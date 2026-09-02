@@ -55,14 +55,6 @@ fn test_scriptlet_with_desc(name: &str, tool: &str, code: &str, desc: &str) -> S
 // ============================================
 
 #[test]
-fn test_load_scriptlets_returns_vec() {
-    // load_scriptlets should return a Vec even if directory doesn't exist
-    let scriptlets = load_scriptlets();
-    // Just verify it returns without panicking
-    let _ = scriptlets.len();
-}
-
-#[test]
 fn test_extract_kit_from_path_nested() {
     use std::path::Path;
     // kit_root is ~/.scriptkit, not home directory
@@ -100,10 +92,10 @@ fn test_build_scriptlet_file_path() {
 #[test]
 fn test_read_scriptlets_from_file_nonexistent() {
     use std::path::Path;
-    // Non-existent file should return empty vec
+    // An explicit failed file read is not a successful empty source.
     let path = Path::new("/nonexistent/path/to/file.md");
     let scriptlets = read_scriptlets_from_file(path);
-    assert!(scriptlets.is_empty());
+    assert!(scriptlets.is_err());
 }
 
 #[test]
@@ -111,7 +103,8 @@ fn test_read_scriptlets_from_file_not_markdown() {
     use std::path::Path;
     // Non-markdown file should return empty vec
     let path = Path::new("/some/path/to/file.ts");
-    let scriptlets = read_scriptlets_from_file(path);
+    let scriptlets =
+        read_scriptlets_from_file(path).expect("unsupported extension is not a source");
     assert!(scriptlets.is_empty());
 }
 

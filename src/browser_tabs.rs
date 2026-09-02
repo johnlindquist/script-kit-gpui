@@ -222,6 +222,7 @@ struct RootBrowserTabSnapshot {
 struct RootBrowserTabSnapshotState {
     snapshot: Option<RootBrowserTabSnapshot>,
     refresh_in_flight: bool,
+    refresh_needed: bool,
     generation: u64,
     last_refresh_error: Option<String>,
     last_attempt_at: Option<Instant>,
@@ -315,26 +316,22 @@ fn list_open_tabs_for_root_providers(
                         error_bytes = error.to_string().len(),
                         "check_browser_running_failed"
                     );
-                    Err(anyhow!("{}: {error}", browser.app_name))
+                    Err(error.context(browser.app_name))
                 }
             }
         })
         .collect();
 
+    combine_browser_tab_results(results)
+}
+
+fn combine_browser_tab_results(
+    results: Vec<Result<Vec<BrowserTabInfo>>>,
+) -> Result<Vec<BrowserTabInfo>> {
     let mut tabs = Vec::new();
-    let mut errors = Vec::new();
-
-    for res in results {
-        match res {
-            Ok(mut browser_tabs) => tabs.append(&mut browser_tabs),
-            Err(error) => errors.push(error.to_string()),
-        }
+    for result in results {
+        tabs.append(&mut result?);
     }
-
-    if tabs.is_empty() && !errors.is_empty() {
-        bail!("Failed to read browser tabs: {}", errors.join(" | "));
-    }
-
     Ok(tabs)
 }
 
@@ -608,12 +605,57 @@ fn cached_root_browser_tabs_snapshot(cache_ttl_ms: u64) -> Arc<Vec<BrowserTabInf
     let ttl = Duration::from_millis(cache_ttl_ms);
     if let Ok(cache) = ROOT_BROWSER_TAB_SNAPSHOT.try_lock() {
         if let Some(snapshot) = cache.snapshot.as_ref() {
-            let _expired = snapshot.captured_at.elapsed() > ttl;
+            let _expired = crate::runtime_policy::root_search_now()
+                .saturating_duration_since(snapshot.captured_at)
+                > ttl;
             return snapshot.tabs.clone();
         }
     }
 
     Arc::new(Vec::new())
+}
+
+fn root_browser_tabs_cache_is_fresh(
+    cache: &RootBrowserTabSnapshotState,
+    now: Instant,
+    ttl: Duration,
+) -> bool {
+    !cache.refresh_needed
+        && cache
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| now.saturating_duration_since(snapshot.captured_at) <= ttl)
+}
+
+fn fresh_root_browser_tabs_cache_status(
+    cache: &RootBrowserTabSnapshotState,
+    now: Instant,
+    ttl: Duration,
+) -> Option<RootPassiveSnapshotStatus> {
+    if cache.refresh_in_flight
+        || cache.last_refresh_error.is_some()
+        || !root_browser_tabs_cache_is_fresh(cache, now, ttl)
+    {
+        return None;
+    }
+    Some(RootPassiveSnapshotStatus {
+        generation: cache.generation,
+        refreshing: false,
+        cached_count: cache.snapshot.as_ref()?.tabs.len(),
+    })
+}
+
+/// Positive current snapshot evidence; missing, contested, stale, or failed
+/// caches are unknown rather than an invented empty successful snapshot.
+pub(crate) fn root_browser_tabs_fresh_cache_status(
+    cache_ttl_ms: u64,
+) -> Option<RootPassiveSnapshotStatus> {
+    let cache = ROOT_BROWSER_TAB_SNAPSHOT.try_lock().ok()?;
+    fresh_root_browser_tabs_cache_status(
+        &cache,
+        crate::runtime_policy::root_search_now(),
+        Duration::from_millis(cache_ttl_ms),
+    )
 }
 
 #[allow(dead_code)]
@@ -663,11 +705,8 @@ pub(crate) fn try_begin_root_browser_tabs_refresh(
     let Ok(mut cache) = ROOT_BROWSER_TAB_SNAPSHOT.try_lock() else {
         return None;
     };
-    let now = Instant::now();
-    let is_fresh = cache
-        .snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.captured_at.elapsed() <= ttl);
+    let now = crate::runtime_policy::root_search_now();
+    let is_fresh = root_browser_tabs_cache_is_fresh(&cache, now, ttl);
     let too_soon = cache
         .last_attempt_at
         .is_some_and(|last| now.duration_since(last) < ROOT_BROWSER_TABS_MIN_REFRESH_INTERVAL);
@@ -675,14 +714,17 @@ pub(crate) fn try_begin_root_browser_tabs_refresh(
     if is_fresh || cache.refresh_in_flight || too_soon || in_backoff {
         return None;
     }
+    let generation = cache.generation.checked_add(1)?;
     cache.refresh_in_flight = true;
     cache.last_attempt_at = Some(now);
-    cache.generation = cache.generation.wrapping_add(1);
-    let generation = cache.generation;
+    cache.generation = generation;
     let cache_age_ms = cache
         .snapshot
         .as_ref()
-        .map(|snapshot| snapshot.captured_at.elapsed().as_millis() as u64)
+        .map(|snapshot| {
+            now.saturating_duration_since(snapshot.captured_at)
+                .as_millis() as u64
+        })
         .unwrap_or(0);
     let row_count = cache
         .snapshot
@@ -702,7 +744,7 @@ pub(crate) fn try_begin_root_browser_tabs_refresh(
 
     Some(RootBrowserTabsRefresh {
         generation,
-        started_at: now,
+        started_at: Instant::now(),
     })
 }
 
@@ -710,7 +752,59 @@ pub(crate) fn try_begin_root_browser_tabs_refresh(
 pub(crate) fn refresh_root_browser_tabs_snapshot(
     providers: Vec<crate::config::BrowserTabProvider>,
 ) -> Result<Vec<BrowserTabInfo>> {
+    anyhow::ensure!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     list_open_tabs_for_root_providers(&providers)
+}
+
+pub(crate) fn owned_root_browser_tabs_snapshot(
+    result: Result<Vec<BrowserTabInfo>>,
+) -> Result<Vec<BrowserTabInfo>> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    result
+}
+
+pub(crate) fn reset_owned_root_browser_tabs() -> Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = ROOT_BROWSER_TAB_SNAPSHOT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser_tabs_cache_poisoned"))?;
+    let generation = cache
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("browser_tabs_generation_exhausted"))?;
+    *cache = RootBrowserTabSnapshotState {
+        generation,
+        ..Default::default()
+    };
+    Ok(())
+}
+
+pub(crate) fn invalidate_owned_root_browser_tabs_freshness() -> Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = ROOT_BROWSER_TAB_SNAPSHOT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser_tabs_cache_poisoned"))?;
+    cache.generation = cache
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("browser_tabs_generation_exhausted"))?;
+    cache.refresh_in_flight = false;
+    cache.refresh_needed = true;
+    cache.last_attempt_at = None;
+    cache.next_refresh_after = None;
+    Ok(())
 }
 
 fn discard_root_browser_tabs_refresh_from_state(
@@ -722,7 +816,7 @@ fn discard_root_browser_tabs_refresh_from_state(
     }
 
     cache.refresh_in_flight = false;
-    cache.generation = cache.generation.wrapping_add(1);
+    cache.generation = cache.generation.saturating_add(1);
     // This attempt belonged to the canceled query, not the next one. Keep a
     // genuine failure backoff, but do not impose its five-second start throttle.
     cache.last_attempt_at = None;
@@ -747,7 +841,7 @@ pub(crate) fn finish_root_browser_tabs_refresh(
     let Ok(mut cache) = ROOT_BROWSER_TAB_SNAPSHOT.lock() else {
         return false;
     };
-    if cache.generation != refresh.generation {
+    if cache.generation != refresh.generation || !cache.refresh_in_flight {
         return false;
     }
 
@@ -755,19 +849,22 @@ pub(crate) fn finish_root_browser_tabs_refresh(
         Ok(tabs) => {
             let row_count = tabs.len();
             cache.snapshot = Some(RootBrowserTabSnapshot {
-                captured_at: Instant::now(),
+                captured_at: crate::runtime_policy::root_search_now(),
                 tabs: Arc::new(tabs.clone()),
             });
+            cache.refresh_needed = false;
             cache.last_refresh_error = None;
-            cache.last_success_at = Some(Instant::now());
+            cache.last_success_at = Some(crate::runtime_policy::root_search_now());
             cache.next_refresh_after = None;
             cache.failure_count = 0;
 
-            let urls: Vec<String> = tabs.iter().map(|t| t.url.to_string()).collect();
-            std::thread::spawn(move || {
-                let needing = crate::favicons::domains_needing_favicons(&urls);
-                crate::favicons::fetch_favicons_blocking(&needing);
-            });
+            if !crate::runtime_policy::is_owned_evaluation() {
+                let urls: Vec<String> = tabs.iter().map(|t| t.url.to_string()).collect();
+                std::thread::spawn(move || {
+                    let needing = crate::favicons::domains_needing_favicons(&urls);
+                    crate::favicons::fetch_favicons_blocking(&needing);
+                });
+            }
 
             tracing::info!(
                 source = "browser_tabs",
@@ -780,7 +877,7 @@ pub(crate) fn finish_root_browser_tabs_refresh(
         Err(error) => {
             cache.failure_count = cache.failure_count.saturating_add(1);
             let backoff = root_browser_tabs_failure_backoff(cache.failure_count);
-            cache.next_refresh_after = Some(Instant::now() + backoff);
+            cache.next_refresh_after = Some(crate::runtime_policy::root_search_now() + backoff);
             cache.last_refresh_error = Some(error.to_string());
             tracing::warn!(
                 source = "browser_tabs",
@@ -794,7 +891,7 @@ pub(crate) fn finish_root_browser_tabs_refresh(
         }
     }
     cache.refresh_in_flight = false;
-    cache.generation = cache.generation.wrapping_add(1);
+    cache.generation = cache.generation.saturating_add(1);
     true
 }
 
@@ -1284,6 +1381,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owned_tab_snapshots_and_resets_require_runtime_authority() {
+        assert!(owned_root_browser_tabs_snapshot(Ok(Vec::new())).is_err());
+        assert!(reset_owned_root_browser_tabs().is_err());
+        assert!(invalidate_owned_root_browser_tabs_freshness().is_err());
+    }
+
+    #[test]
+    fn browser_tab_read_failure_is_not_partial_success_or_empty_success() {
+        let tab = BrowserTabInfo {
+            browser_name: "Safari".into(),
+            browser_bundle_id: "com.apple.Safari".into(),
+            window_index: 1,
+            tab_index: 1,
+            title: "last good".into(),
+            url: "https://example.com".into(),
+        };
+        let result = combine_browser_tab_results(vec![
+            Ok(vec![tab]),
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+        ]);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(combine_browser_tab_results(vec![Ok(Vec::new())])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn browser_query_diagnostics_retain_only_sizes_not_private_query_text() {
         let private_query = "private-browser-query-canary-🔒";
         let diagnostic = browser_query_diagnostic(private_query);
@@ -1515,6 +1646,37 @@ mod tests {
         assert!(search_root_browser_tabs_meta_direct("private query", options).is_empty());
         assert_eq!(root_browser_tabs_snapshot_status(), before);
         assert!(!root_browser_tabs_snapshot_status().refreshing);
+    }
+
+    #[test]
+    fn fresh_browser_tabs_cache_evidence_requires_present_idle_successful_snapshot() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(1);
+        let mut cache = RootBrowserTabSnapshotState::default();
+        assert!(fresh_root_browser_tabs_cache_status(&cache, now, ttl).is_none());
+        cache.snapshot = Some(RootBrowserTabSnapshot {
+            captured_at: now,
+            tabs: Arc::new(Vec::new()),
+        });
+        cache.generation = 7;
+        let status = fresh_root_browser_tabs_cache_status(&cache, now + ttl, ttl)
+            .expect("a present empty snapshot is valid through its TTL boundary");
+        assert_eq!(status.generation, 7);
+        assert_eq!(status.cached_count, 0);
+        assert!(fresh_root_browser_tabs_cache_status(
+            &cache,
+            now + ttl + Duration::from_nanos(1),
+            ttl
+        )
+        .is_none());
+        cache.refresh_in_flight = true;
+        assert!(fresh_root_browser_tabs_cache_status(&cache, now, ttl).is_none());
+        cache.refresh_in_flight = false;
+        cache.refresh_needed = true;
+        assert!(fresh_root_browser_tabs_cache_status(&cache, now, ttl).is_none());
+        cache.refresh_needed = false;
+        cache.last_refresh_error = Some("read failed".into());
+        assert!(fresh_root_browser_tabs_cache_status(&cache, now, ttl).is_none());
     }
 
     #[test]

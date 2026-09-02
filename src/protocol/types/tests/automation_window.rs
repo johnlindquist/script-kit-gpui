@@ -101,16 +101,10 @@ fn automation_window_target_title_contains() {
 
 #[test]
 fn automation_window_kind_all_variants_round_trip() {
-    let kinds = vec![
-        (AutomationWindowKind::Main, "main"),
-        (AutomationWindowKind::Notes, "notes"),
-        (AutomationWindowKind::AgentChatDetached, "agentChatDetached"),
-        (AutomationWindowKind::Dictation, "dictation"),
-        (AutomationWindowKind::ActionsDialog, "actionsDialog"),
-        (AutomationWindowKind::PromptPopup, "promptPopup"),
-        (AutomationWindowKind::Hud, "hud"),
-    ];
-    for (kind, expected_str) in kinds {
+    use strum::IntoEnumIterator;
+
+    for kind in AutomationWindowKind::iter() {
+        let expected_str = kind.as_camel_case();
         let json = serde_json::to_string(&kind).expect("serialize kind");
         assert_eq!(json, format!("\"{}\"", expected_str), "kind {:?}", kind);
         let back: AutomationWindowKind = serde_json::from_str(&json).expect("deserialize kind");
@@ -133,6 +127,7 @@ fn automation_window_info_round_trip() {
         semantic_surface: Some("notes".into()),
         bounds: None,
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: Some(1234),
         generation: None,
@@ -153,6 +148,7 @@ fn automation_window_generation_round_trips_serde() {
         semantic_surface: Some("promptPopup".into()),
         bounds: None,
         parent_window_id: Some("main".into()),
+        parent_window_generation: None,
         parent_kind: Some(AutomationWindowKind::Main),
         pid: Some(1234),
         generation: Some(17),
@@ -192,6 +188,7 @@ fn automation_window_info_with_bounds() {
             height: 600.0,
         }),
         parent_window_id: None,
+        parent_window_generation: None,
         parent_kind: None,
         pid: Some(1234),
         generation: None,
@@ -354,6 +351,7 @@ fn simulate_gpui_event_scroll_wheel_request_round_trip() {
             request_id,
             target,
             event,
+            ..
         } => {
             assert_eq!(request_id, "gpui-scroll-1");
             assert_eq!(target, Some(AutomationWindowTarget::Main));
@@ -390,6 +388,7 @@ fn simulate_gpui_event_request_round_trip() {
             request_id,
             target,
             event,
+            ..
         } => {
             assert_eq!(request_id, "gpui-1");
             assert!(target.is_some());
@@ -435,6 +434,7 @@ fn automation_window_list_result_round_trip() {
                 semantic_surface: Some("scriptList".into()),
                 bounds: None,
                 parent_window_id: None,
+                parent_window_generation: None,
                 parent_kind: None,
                 pid: Some(1001),
                 generation: None,
@@ -448,6 +448,7 @@ fn automation_window_list_result_round_trip() {
                 semantic_surface: Some("agentChatChat".into()),
                 bounds: None,
                 parent_window_id: None,
+                parent_window_generation: None,
                 parent_kind: None,
                 pid: Some(1001),
                 generation: None,

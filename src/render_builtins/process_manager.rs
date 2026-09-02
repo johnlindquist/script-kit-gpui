@@ -68,7 +68,7 @@ impl ScriptListApp {
 
     fn trigger_process_manager_stop_all(&mut self, cx: &mut Context<Self>) {
         let entry = Self::process_manager_stop_all_entry();
-        self.execute_builtin(&entry, cx);
+        let _outcome = self.execute_builtin(&entry, cx);
     }
 
     fn process_manager_filter_matches(
@@ -183,11 +183,7 @@ impl ScriptListApp {
         if let AppView::ProcessManagerView { selected_index, .. } = &mut self.current_view {
             *selected_index = restore.selected_index;
         }
-        restore_dynamic_uniform_list_viewport(
-            &self.process_list_scroll_handle,
-            &snapshot,
-            restore,
-        );
+        restore_dynamic_uniform_list_viewport(&self.process_list_scroll_handle, &snapshot, restore);
         if reveal_repaired_selection && !restore.selected_key_survived && !new_keys.is_empty() {
             self.process_list_scroll_handle
                 .scroll_to_item(restore.selected_index, ScrollStrategy::Nearest);
@@ -370,8 +366,8 @@ impl ScriptListApp {
                     cx.stop_propagation();
                 } else if is_key_down(key) {
                     if current_filtered_len > 0 {
-                        let next = (current_selected + 1)
-                            .min(current_filtered_len.saturating_sub(1));
+                        let next =
+                            (current_selected + 1).min(current_filtered_len.saturating_sub(1));
                         if let AppView::ProcessManagerView { selected_index, .. } =
                             &mut this.current_view
                         {
@@ -507,9 +503,9 @@ impl ScriptListApp {
                                                     selected_index,
                                                     ..
                                                 } = &mut this.current_view
-                                            {
-                                                *selected_index = ix;
-                                            }
+                                                {
+                                                    *selected_index = ix;
+                                                }
                                                 this.process_list_scroll_handle
                                                     .scroll_to_item(ix, ScrollStrategy::Nearest);
                                                 this.note_list_pointer_click(ix, cx);
@@ -642,17 +638,17 @@ impl ScriptListApp {
                     "Stop All",
                     stop_all_button_colors,
                 )
-                    .variant(crate::components::ButtonVariant::Ghost)
-                    .shortcut("⌘↵")
-                    .on_click(Box::new(move |_event, _window, cx| {
-                        cx.stop_propagation();
-                        if let Some(app) = stop_all_button_entity.upgrade() {
-                            app.update(cx, |this, cx| {
-                                this.trigger_process_manager_stop_all(cx);
-                            });
-                        }
-                    }))
-                    .into_any_element(),
+                .variant(crate::components::ButtonVariant::Ghost)
+                .shortcut("⌘↵")
+                .on_click(Box::new(move |_event, _window, cx| {
+                    cx.stop_propagation();
+                    if let Some(app) = stop_all_button_entity.upgrade() {
+                        app.update(cx, |this, cx| {
+                            this.trigger_process_manager_stop_all(cx);
+                        });
+                    }
+                }))
+                .into_any_element(),
             );
         }
         let footer = self.main_window_footer_slot(crate::components::render_simple_hint_strip(

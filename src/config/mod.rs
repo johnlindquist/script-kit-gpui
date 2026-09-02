@@ -45,6 +45,7 @@ pub use types::{
 };
 
 // Re-export loader
+pub(crate) use loader::with_user_preference_write_lock;
 #[allow(unused_imports)]
 pub use loader::{
     current_config_fingerprint_receipt, load_config, load_user_preferences, save_user_preferences,

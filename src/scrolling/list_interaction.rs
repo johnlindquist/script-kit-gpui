@@ -37,6 +37,134 @@ impl ListViewportInputSource {
     }
 }
 
+/// Launcher intent is independent from the selected row's changing rank.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MainMenuSelectionIntent {
+    #[default]
+    AutomaticTop,
+    AutomaticAnchor {
+        stable_key: String,
+    },
+    ExplicitAnchor {
+        stable_key: String,
+    },
+}
+
+impl MainMenuSelectionIntent {
+    pub(crate) fn reconcile<'a>(
+        &mut self,
+        rows: impl Iterator<Item = (usize, &'a str, bool)>,
+    ) -> (Option<usize>, bool) {
+        // Once shown, even the default selection belongs to this query.
+        // A later, better-ranked result must not steal the user's Enter target.
+        for (index, key, eligible) in rows {
+            if !eligible {
+                continue;
+            }
+            match self {
+                Self::AutomaticTop => {
+                    *self = Self::AutomaticAnchor {
+                        stable_key: key.to_owned(),
+                    };
+                    return (Some(index), false);
+                }
+                Self::AutomaticAnchor { stable_key } | Self::ExplicitAnchor { stable_key }
+                    if stable_key == key =>
+                {
+                    return (Some(index), false)
+                }
+                _ => {}
+            }
+        }
+        // A vanished target is not permission to activate an unrelated result.
+        // Keep its identity until a new query or deliberate selection replaces it.
+        (None, !matches!(self, Self::AutomaticTop))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MainMenuViewportIntent {
+    #[default]
+    FollowSelection,
+    UserControlled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MainMenuRefreshViewportPolicy {
+    ResetToTop,
+    Preserve { reveal_selection: bool },
+}
+
+impl MainMenuViewportIntent {
+    /// True means this input retires any previously deferred viewport work.
+    pub(crate) fn note_input(&mut self, source: ListViewportInputSource) -> bool {
+        match source {
+            ListViewportInputSource::Wheel
+            | ListViewportInputSource::Momentum
+            | ListViewportInputSource::Scrollbar => {
+                *self = Self::UserControlled;
+            }
+            ListViewportInputSource::Filter => *self = Self::FollowSelection,
+            ListViewportInputSource::Keyboard
+            | ListViewportInputSource::Click
+            | ListViewportInputSource::Refresh => return false,
+        }
+        true
+    }
+
+    pub(crate) fn refresh_policy(
+        self,
+        automatic: bool,
+        same_query: bool,
+        selected_was_visible: bool,
+    ) -> MainMenuRefreshViewportPolicy {
+        if !same_query || (automatic && self == Self::FollowSelection) {
+            MainMenuRefreshViewportPolicy::ResetToTop
+        } else {
+            MainMenuRefreshViewportPolicy::Preserve {
+                reveal_selection: !automatic
+                    && self == Self::FollowSelection
+                    && selected_was_visible,
+            }
+        }
+    }
+}
+
+/// Resolve a keyboard gesture before it is allowed to establish selection intent.
+pub(crate) fn main_menu_navigation_target(
+    eligible: impl DoubleEndedIterator<Item = usize> + Clone,
+    selected_index: usize,
+    delta: i32,
+    unarmed: bool,
+) -> Option<usize> {
+    if delta == 0 {
+        return None;
+    }
+    let first = eligible.clone().next()?;
+    if unarmed {
+        return (delta > 0).then_some(first);
+    }
+    if delta < 0 && selected_index <= first {
+        return None;
+    }
+    let mut target = selected_index;
+    let steps = delta.unsigned_abs() as usize;
+    if delta > 0 {
+        for index in eligible.filter(|index| *index > selected_index).take(steps) {
+            target = index;
+        }
+    } else {
+        for index in eligible
+            .rev()
+            .filter(|index| *index < selected_index)
+            .take(steps)
+        {
+            target = index;
+        }
+    }
+    Some(target)
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ListPointerPolicy {
     pub(crate) hovered_index: Option<usize>,
@@ -81,6 +209,140 @@ impl ListPointerPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keyboard_ignores_up_at_top_and_only_down_arms_empty_subsearch() {
+        let eligible = [1, 4, 8];
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 1, -1, false),
+            None
+        );
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 1, -1, true),
+            None
+        );
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 1, 1, true),
+            Some(1)
+        );
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 1, 1, false),
+            Some(4)
+        );
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 8, -1, false),
+            Some(4)
+        );
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 1, 10, false),
+            Some(8)
+        );
+        assert_eq!(
+            main_menu_navigation_target(eligible.into_iter(), 8, 1, false),
+            Some(8)
+        );
+        assert_eq!(
+            main_menu_navigation_target([].into_iter(), 0, 1, true),
+            None
+        );
+    }
+
+    #[test]
+    fn automatic_and_explicit_selection_keep_identity_after_higher_arrivals() {
+        let rows = [(1, "new", true), (3, "previous", true)];
+        let mut automatic = MainMenuSelectionIntent::AutomaticTop;
+        assert_eq!(automatic.reconcile(std::iter::empty()), (None, false));
+        assert_eq!(
+            automatic.reconcile([(1, "previous", true)].into_iter()),
+            (Some(1), false)
+        );
+        assert_eq!(automatic.reconcile(rows.into_iter()), (Some(3), false));
+        let mut explicit = MainMenuSelectionIntent::ExplicitAnchor {
+            stable_key: "previous".into(),
+        };
+        assert_eq!(explicit.reconcile(rows.into_iter()), (Some(3), false));
+        assert!(matches!(
+            explicit,
+            MainMenuSelectionIntent::ExplicitAnchor { .. }
+        ));
+        automatic = MainMenuSelectionIntent::default();
+        assert_eq!(automatic.reconcile(rows.into_iter()), (Some(1), false));
+    }
+
+    #[test]
+    fn removed_or_ineligible_anchor_does_not_select_an_unrelated_result() {
+        for rows in [
+            vec![(1, "next", true)],
+            vec![(1, "previous", false), (3, "next", true)],
+            vec![],
+        ] {
+            for mut intent in [
+                MainMenuSelectionIntent::AutomaticAnchor {
+                    stable_key: "previous".into(),
+                },
+                MainMenuSelectionIntent::ExplicitAnchor {
+                    stable_key: "previous".into(),
+                },
+            ] {
+                let original = intent.clone();
+                assert_eq!(intent.reconcile(rows.iter().copied()), (None, true));
+                assert_eq!(intent, original);
+                assert_eq!(
+                    intent.reconcile([(2, "new-top", true)].into_iter()),
+                    (None, true)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_wheel_and_refresh_keep_independent_viewport_ownership() {
+        let mut viewport = MainMenuViewportIntent::FollowSelection;
+        assert_eq!(
+            viewport.refresh_policy(true, true, true),
+            MainMenuRefreshViewportPolicy::ResetToTop
+        );
+        for source in [
+            ListViewportInputSource::Wheel,
+            ListViewportInputSource::Momentum,
+            ListViewportInputSource::Scrollbar,
+        ] {
+            assert!(viewport.note_input(source));
+            assert!(viewport.note_input(source));
+            assert!(!viewport.note_input(ListViewportInputSource::Refresh));
+            assert_eq!(viewport, MainMenuViewportIntent::UserControlled);
+            for automatic in [true, false] {
+                assert_eq!(
+                    viewport.refresh_policy(automatic, true, true),
+                    MainMenuRefreshViewportPolicy::Preserve {
+                        reveal_selection: false
+                    }
+                );
+            }
+        }
+        assert!(viewport.note_input(ListViewportInputSource::Filter));
+        assert_eq!(viewport, MainMenuViewportIntent::FollowSelection);
+    }
+
+    #[test]
+    fn refresh_only_reveals_previously_visible_explicit_selection_without_user_scroll() {
+        let viewport = MainMenuViewportIntent::FollowSelection;
+        assert_eq!(
+            viewport.refresh_policy(false, true, true),
+            MainMenuRefreshViewportPolicy::Preserve {
+                reveal_selection: true
+            }
+        );
+        assert_eq!(
+            viewport.refresh_policy(false, true, false),
+            MainMenuRefreshViewportPolicy::Preserve {
+                reveal_selection: false
+            }
+        );
+        assert_eq!(
+            viewport.refresh_policy(false, false, true),
+            MainMenuRefreshViewportPolicy::ResetToTop
+        );
+    }
 
     #[test]
     fn wheel_clears_hover_and_arms_suppression() {

@@ -14,6 +14,7 @@
 //! it.
 
 use super::*;
+use crate::design_evaluation::search_fixtures as F;
 
 /// Cap on inbox items loaded into the snapshot per refresh. The grouped view
 /// renders at most the configured max (default 3, clamped to 5); loading a
@@ -24,62 +25,122 @@ const ROOT_BRAIN_INBOX_LOAD_LIMIT: usize = 8;
 const ROOT_BRAIN_INBOX_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl ScriptListApp {
-    /// Reload the open brain-inbox snapshot when it is older than
-    /// [`ROOT_BRAIN_INBOX_TTL`] (or never loaded). On change: bump the inbox
-    /// epoch, invalidate the passive frame + grouped cache, and notify.
-    ///
-    /// `allow_reorder` controls what a changed read may do to rows already on
-    /// screen: the window-show hook passes `true` (fresh glance, newest
-    /// first), mid-session hooks pass `false` (stable merge — see
-    /// [`stable_merge_root_brain_inbox`]).
+    /// Read the synchronous source only when stale. `false` keeps stable source
+    /// order and joins the caller's query publication; `true` publishes a source
+    /// change atomically. Failed reads retain the last accepted inbox rows.
     pub(crate) fn refresh_root_brain_inbox_if_stale(
         &mut self,
         allow_reorder: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .root_search
-            .root_brain_inbox_refresh_if_stale(std::time::Instant::now(), ROOT_BRAIN_INBOX_TTL)
+        if !matches!(self.current_view, AppView::ScriptList) || !self.root_search.query_is_current()
         {
             return;
         }
-
-        // Errors degrade to "no section" — the launcher must never surface a
-        // brain storage failure.
-        let mut items =
-            crate::brain::open_inbox_items(ROOT_BRAIN_INBOX_LOAD_LIMIT).unwrap_or_default();
-        if !allow_reorder {
-            items = crate::brain::stable_merge_open_inbox(
-                self.root_search.root_brain_inbox_items(),
-                items,
-            );
-        }
-        if !self.root_search.install_root_brain_inbox_items(items) {
+        let now = crate::runtime_policy::root_search_now();
+        if self
+            .root_search
+            .root_brain_inbox_cache_is_fresh(now, ROOT_BRAIN_INBOX_TTL)
+        {
             return;
         }
-        tracing::debug!(
-            target: "script_kit::brain",
-            open_items = self.root_search.root_brain_inbox_items().len(),
-            "brain inbox snapshot refreshed"
+        let query = self.computed_filter_text.clone();
+        let generation = self
+            .root_search
+            .allocate_named_provider_generation("brain-inbox");
+        let owned_gate = self.main_services.search_gate();
+        let owned_run = if let Some(gate) = &owned_gate {
+            let Some(run) = gate.begin(
+                "brain-inbox",
+                &query,
+                generation,
+                RootProviderPublicationPolicy::VisibleSynchronous,
+            ) else {
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
+        let result = if let Some(run) = &owned_run {
+            let Ok(result) = run.read_synchronously(F::inbox_result) else {
+                return;
+            };
+            result
+        } else if let Some(sources) = self.main_services.owned_sources() {
+            Ok(sources.brain_inbox.clone())
+        } else if crate::runtime_policy::is_owned_evaluation() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "owned_source_snapshot_required",
+            )
+            .into())
+        } else {
+            crate::brain::open_inbox_items(ROOT_BRAIN_INBOX_LOAD_LIMIT)
+        };
+        // The synchronous read returns the whole OPEN catalogue, independent of input.
+        self.root_search.begin_named_provider(
+            "brain-inbox",
+            generation,
+            &query,
+            "",
+            RootProviderPublicationPolicy::VisibleSynchronous,
+            false,
         );
-        self.invalidate_root_passive_and_grouped_cache();
-        cx.notify();
+        let terminal = F::ProviderTerminal::for_result(&result);
+        let apply = |app: &mut Self, _cx: &mut Context<Self>| {
+            let changed = app.root_search.install_root_brain_inbox_read(
+                generation,
+                now,
+                result,
+                allow_reorder,
+                ROOT_BRAIN_INBOX_LOAD_LIMIT,
+            );
+            app.root_search
+                .finish_named_provider("brain-inbox", generation, terminal.into());
+            if let Some(run) = &owned_run {
+                run.finish(terminal, RootProviderPublicationPolicy::VisibleSynchronous);
+            }
+            if changed {
+                app.invalidate_root_passive_and_grouped_cache();
+            }
+            changed
+        };
+        if allow_reorder {
+            self.commit_main_menu_results_refresh(
+                "brain_inbox_refresh_complete",
+                Some(("brain-inbox", generation)),
+                cx,
+                apply,
+            );
+        } else {
+            apply(self, cx);
+        }
     }
 
-    /// Mark an inbox item resolved (best-effort) and drop it from the
-    /// snapshot immediately so the pinned section shrinks/disappears without
-    /// waiting for the next staleness reload.
+    /// Resolve through the real source owner before dropping its accepted row.
+    /// A refused or failed write leaves the last-good snapshot intact.
     pub(crate) fn resolve_root_brain_inbox_item(&mut self, id: i64, cx: &mut Context<Self>) {
-        if let Err(error) = crate::brain::resolve_inbox_item(id) {
-            logging::log(
-                "ERROR",
-                &format!("Failed to resolve brain inbox item {id}: {error}"),
-            );
-        }
-        if !self.root_search.remove_root_brain_inbox_item(id) {
+        if !matches!(self.current_view, AppView::ScriptList) || !self.root_search.query_is_current()
+        {
             return;
         }
-        self.invalidate_root_passive_and_grouped_cache();
-        cx.notify();
+        self.commit_main_menu_results_refresh("brain_inbox_item_resolved", None, cx, |app, _cx| {
+            if let MainServices::OwnedFixtures(sources) = &mut app.main_services {
+                Arc::make_mut(sources)
+                    .brain_inbox
+                    .retain(|item| item.id != id);
+            } else if crate::runtime_policy::is_owned_evaluation() {
+                return false;
+            } else if crate::brain::resolve_inbox_item(id).is_err() {
+                tracing::warn!(target: "script_kit::brain", code = "brain_inbox_resolve_failed");
+                return false;
+            }
+            let changed = app.root_search.remove_root_brain_inbox_item(id);
+            if changed {
+                app.invalidate_root_passive_and_grouped_cache();
+            }
+            changed
+        });
     }
 }

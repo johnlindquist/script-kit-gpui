@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -17,10 +18,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 
 assertNoninteractiveVisualProbe("cons-flow-ux.entry-verbs");
 
-const binary = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    "target-agent/artifacts/cons-flow-c03/script-kit-gpui",
-);
+const binary = runtimeArtifactFromEnvironment().executablePath
 const runDir = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ??
     ".artifacts/consistency/cons-flow-ux/c03-entry-verbs-v1",
@@ -85,7 +83,7 @@ async function waitForTopState(
 async function agentChatState(driver: Driver): Promise<Json> {
   return driver.request(
     { type: "getAgentChatState", target: { type: "id", id: "main" } },
-    { expect: "agentChatStateResult", timeoutMs: 10_000 },
+    { expect: "agent_chatStateResult", timeoutMs: 10_000 },
   );
 }
 
@@ -181,23 +179,21 @@ async function runScenario(
   let targetObservation: RuntimeTargetObservation | null = null;
   let result: Json = { name, status: "FAILED" };
   try {
-    driver = await Driver.launch({
-      binary,
-      sessionName: `cons-flow-c03-${name}`,
-      sandboxHome: true,
-      seedAgentAuth: options.seedAgentAuth ?? true,
-      sharedModels: false,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1",
-        SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-        SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-        SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-        ...(options.env ?? {}),
-      },
-      readyTimeoutMs: 30_000,
-      defaultTimeoutMs: 15_000,
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary,
+    sessionName: `cons-flow-c03-${name}`,
+    sandboxHome: true,
+    seedAgentAuth: options.seedAgentAuth ?? true,
+    sharedModels: false,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1",
+      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+      ...(options.env ?? {}),
+    },
+    readyTimeoutMs: 30_000,
+    defaultTimeoutMs: 15_000, });
     await driver.waitForSettle();
     result = { name, status: "PASS", ...(await body(driver)) };
     targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });

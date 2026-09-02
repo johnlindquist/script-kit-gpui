@@ -16,6 +16,17 @@ use std::sync::{Mutex, OnceLock};
 /// acquiring to recover from a poisoned mutex (prior test panic).
 pub static SK_PATH_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// Serializes tests that publish the process-global theme or retain identities
+/// whose validity depends on its revision.
+pub static THEME_CACHE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub fn lock_theme_cache_test() -> std::sync::MutexGuard<'static, ()> {
+    THEME_CACHE_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 /// Global lock for tests that mutate shared provider JSON slots or related
 /// `SCRIPT_KIT_*_JSON` environment variables.
 pub static PROVIDER_JSON_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

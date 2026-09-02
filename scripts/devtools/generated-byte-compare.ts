@@ -7,7 +7,6 @@
  * The producer never builds the binary, starts Script Kit, scans the checkout,
  * writes checked-in artifacts, or contacts an AI provider.
  */
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -21,7 +20,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { verifyRuntimeBinaryProvenance } from "./lib/runtime-task-proof.ts";
+import { verifyImmutableArtifact, type ArtifactReference, type ArtifactExpectation } from "../agentic/build-artifact.ts";
+import { spawnOwnedProcess, type OwnedProcess } from "../agentic/owned-process.ts";
+import { claimOutput, validateOutputTarget, createOwnedStagingDirectory, removeOwnedAuxiliaryDirectory,
+  beginManagedTask, updateManagedTask, finalizeManagedTask, buildArtifactLifecycle, commitFinalReceipt, type OwnedCleanup } from "../agentic/artifact-lifecycle.ts";
+import { boundedObservation, unknownOwnedCleanup, DriverLifecycleError } from "./driver.ts";
+import { readArtifactReference } from "./design.ts";
+import { resolveReceiptDetails } from "./lib/receipt-artifact.ts";
 
 export const GENERATED_BYTE_COMPARE_SOURCE_PATHS = [
   "Cargo.toml",
@@ -56,28 +61,11 @@ export interface ExporterProcessResult {
 export interface GeneratedByteCompareDependencies {
   repositoryRoot?: string;
   environment?: Record<string, string | undefined>;
-  readFile?: (path: string) => Uint8Array;
-  resolveRealPath?: (path: string) => string;
-  fileStats?: (path: string) => {
-    isFile(): boolean;
-    mode: number;
-    size: number;
-  };
-  createTemporaryDirectory?: () => string;
-  removeTemporaryDirectory?: (path: string) => void;
-  pathExists?: (path: string) => boolean;
-  currentSourceSha?: () => string | null;
-  verifyBinaryProvenance?: (binaryPath: string) => Record<string, unknown>;
-  runExporter?: (
-    binaryPath: string,
-    arguments_: readonly string[],
-    environment: Record<string, string | undefined>,
-  ) => ExporterProcessResult;
 }
-
 export interface GeneratedByteCompareOptions {
-  binaryPath: string;
-  sourceSha: string;
+  artifactReference: ArtifactReference;
+  outputPath: string;
+  sourcePolicy?: ArtifactExpectation["sourcePolicy"];
 }
 
 export interface GeneratedByteCompareReceiptIdentity {
@@ -193,291 +181,95 @@ function sameIdentity(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-export function generateAuthoritativeByteComparison(
-  options: GeneratedByteCompareOptions,
-  dependencies: GeneratedByteCompareDependencies = {},
-) {
-  if (!options.binaryPath || basename(options.binaryPath) !== "export_design_tokens") {
-    failure("an explicit existing export_design_tokens binary path is required");
-  }
-  if (!/^[a-f0-9]{40}$/i.test(options.sourceSha)) {
-    failure("--source-sha must be the exact 40-character source commit");
-  }
-
+export async function generateAuthoritativeByteComparison(options: GeneratedByteCompareOptions, dependencies: GeneratedByteCompareDependencies = {}) {
   const repositoryRoot = resolve(dependencies.repositoryRoot ?? process.cwd());
-  const environment = dependencies.environment ?? process.env;
-  const safetyErrors = validateGeneratedByteCompareEnvironment(environment);
-  if (safetyErrors.length > 0) failure(safetyErrors.join("; "));
-
-  const readFile = dependencies.readFile ??
-    ((path: string) => readFileSync(path));
-  const realPath = dependencies.resolveRealPath ?? realpathSync;
-  const fileStats = dependencies.fileStats ?? statSync;
-  const sourceSha = options.sourceSha.toLowerCase();
-  const currentSourceSha = dependencies.currentSourceSha ??
-    (() => readCurrentGitCommit(repositoryRoot, readFile));
-  if (currentSourceSha() !== sourceSha) {
-    failure("the supplied source commit does not match the current checkout");
-  }
-
-  let binaryPath: string;
-  let binaryStats: ReturnType<typeof fileStats>;
+  const safetyErrors = validateGeneratedByteCompareEnvironment(dependencies.environment ?? process.env);
+  if (safetyErrors.length) failure(safetyErrors.join("; "));
+  const artifact = verifyImmutableArtifact(repositoryRoot, options.artifactReference, { kind: "tool", packageName: "script-kit-gpui",
+    targetName: "export_design_tokens", sourcePolicy: options.sourcePolicy ?? "current-content" });
+  const claim = claimOutput(validateOutputTarget({ repoRoot: repositoryRoot, candidate: options.outputPath, kind: "receipt", probeId: "generated-byte-compare" }));
+  const task = beginManagedTask(claim, "runtime-run", [artifact.reference]);
+  let temporaryDirectory: string | undefined;
+  let proc: OwnedProcess | undefined;
+  let cleanup: OwnedCleanup = unknownOwnedCleanup(false);
+  let execution = { exitCode: -1, stdoutSha256: sha256(""), stderrSha256: sha256("") };
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  let consumers: Promise<Uint8Array>[] = [];
+  const outputHashes: Record<string, string> = {};
+  const generatedOutputHashes: Record<string, string> = {};
+  const outputs: Array<{ path: string; checkedInSha256: string; generatedSha256: string; byteEqual: boolean; byteLength: number }> = [];
+  let sourceFingerprints: Record<string, string> = {};
+  let sourceSha: string | null = null;
+  let error: string | undefined;
   try {
-    binaryPath = realPath(resolve(repositoryRoot, options.binaryPath));
-    binaryStats = fileStats(binaryPath);
-  } catch {
-    failure("the explicit exporter binary is missing");
-  }
-  const binaryRelativePath = relative(repositoryRoot, binaryPath);
-  if (
-    basename(binaryPath) !== "export_design_tokens" ||
-    binaryRelativePath === "" ||
-    binaryRelativePath.startsWith(".." + "/") ||
-    binaryRelativePath === ".." ||
-    isAbsolute(binaryRelativePath)
-  ) {
-    failure("the exporter binary must stay inside this repository");
-  }
-  if (!binaryStats.isFile() || (binaryStats.mode & 0o111) === 0) {
-    failure("the exporter binary must be an executable regular file");
-  }
-
-  const binaryBytes = readFile(binaryPath);
-  const binarySha256 = sha256(binaryBytes);
-  let verifiedBinary: Record<string, unknown>;
-  try {
-    verifiedBinary = (
-      dependencies.verifyBinaryProvenance ?? verifyRuntimeBinaryProvenance
-    )(binaryRelativePath);
-  } catch (error) {
-    failure(
-      "the exporter requires current independently verified build provenance: " +
-        (error instanceof Error ? error.message : String(error)),
-    );
-  }
-  const provenance = object(verifiedBinary.provenance);
-  const provenancePath = provenance.path;
-  if (
-    verifiedBinary.path !== binaryRelativePath ||
-    verifiedBinary.sha256 !== binarySha256 ||
-    verifiedBinary.sizeBytes !== binaryStats.size ||
-    verifiedBinary.sourceCommit !== sourceSha ||
-    typeof provenancePath !== "string" ||
-    !(provenancePath === `${binaryRelativePath}.provenance.json` ||
-      provenancePath === join(dirname(binaryRelativePath), "manifest.json")) ||
-    typeof provenance.sha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(provenance.sha256) ||
-    provenance.schemaVersion !== 2 ||
-    typeof provenance.builtGitHead !== "string" ||
-    !/^[a-f0-9]{40}$/.test(provenance.builtGitHead) ||
-    typeof provenance.compilerInputSha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(provenance.compilerInputSha256) ||
-    typeof provenance.profile !== "string" ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provenance.profile) ||
-    typeof provenance.requiresExactGitHead !== "boolean" ||
-    provenance.rustDirty !== false
-  ) {
-    failure("the verified exporter provenance does not match its exact current source and executable");
-  }
-  let provenanceBytes: Uint8Array;
-  try {
-    provenanceBytes = readFile(resolve(repositoryRoot, provenancePath));
-  } catch {
-    failure("the independently verified exporter provenance manifest is missing");
-  }
-  if (sha256(provenanceBytes) !== provenance.sha256) {
-    failure("the independently verified exporter provenance manifest does not match its observed bytes");
-  }
-  const sourceFingerprints = fingerprintSources(repositoryRoot, readFile);
-  const checkedInBytes = new Map<string, Uint8Array>();
-  for (const path of GENERATED_BYTE_COMPARE_OUTPUT_PATHS) {
-    try {
-      checkedInBytes.set(path, readFile(resolve(repositoryRoot, path)));
-    } catch {
-      failure("checked-in generated output is missing: " + path);
-    }
-  }
-
-  const makeTemporaryDirectory = dependencies.createTemporaryDirectory ??
-    (() => mkdtempSync(join(tmpdir(), "script-kit-exporter-byte-")));
-  const removeTemporaryDirectory = dependencies.removeTemporaryDirectory ??
-    ((path: string) => rmSync(path, { recursive: true, force: true }));
-  const pathExists = dependencies.pathExists ?? existsSync;
-  const runExporter = dependencies.runExporter ??
-    ((binary: string, arguments_: readonly string[], childEnvironment) =>
-      spawnSync(binary, [...arguments_], {
-        cwd: repositoryRoot,
-        env: childEnvironment,
-        encoding: "buffer",
-        timeout: 30_000,
-        maxBuffer: 2_000_000,
-      }));
-  const temporaryDirectory = makeTemporaryDirectory();
-  const temporaryRelation = relative(repositoryRoot, temporaryDirectory);
-  if (
-    !isAbsolute(temporaryDirectory) ||
-    temporaryRelation === "" ||
-    (!temporaryRelation.startsWith(".." + "/") &&
-      temporaryRelation !== ".." &&
-      !isAbsolute(temporaryRelation))
-  ) {
-    removeTemporaryDirectory(temporaryDirectory);
-    failure("exporter output must use an isolated external temporary directory");
-  }
-
-  let execution: ExporterProcessResult | undefined;
-  let outputHashes: Record<string, string> | undefined;
-  let generatedOutputHashes: Record<string, string> | undefined;
-  let outputs:
-    | Array<{
-      path: string;
-      checkedInSha256: string;
-      generatedSha256: string;
-      byteEqual: true;
-      byteLength: number;
-    }>
-    | undefined;
-  try {
-    execution = runExporter(binaryPath, [temporaryDirectory], {
-      ...environment,
-      SCRIPT_KIT_NONINTERACTIVE: "1",
-      SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0",
-      SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
-      SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0",
-      SCRIPT_KIT_ALLOW_LIVE_AI: "0",
-      SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
-      SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
-    });
-    if (
-      execution.error ||
-      execution.status !== 0 ||
-      execution.signal !== undefined && execution.signal !== null
-    ) {
-      failure("the non-GUI exporter failed before completing byte comparison");
-    }
-
-    outputs = [];
-    outputHashes = {};
-    generatedOutputHashes = {};
+    sourceSha = readCurrentGitCommit(repositoryRoot, readFileSync);
+    sourceFingerprints = fingerprintSources(repositoryRoot, readFileSync);
+    const checked = Object.fromEntries(GENERATED_BYTE_COMPARE_OUTPUT_PATHS.map(path => [path, readFileSync(resolve(repositoryRoot, path))]));
+    temporaryDirectory = createOwnedStagingDirectory(claim);
+    const home = join(temporaryDirectory, "home"); mkdirSync(home, { mode: 0o700 });
+    proc = await spawnOwnedProcess({ argv: [artifact.executablePath, temporaryDirectory], cwd: repositoryRoot, timeoutMs: 30000, maxOutputBytes: 2000000,
+      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, SK_PATH: join(home, ".scriptkit"), CODEX_HOME: join(home, ".codex"),
+        XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), XDG_CACHE_HOME: join(home, ".cache"), TMPDIR: temporaryDirectory,
+        LANG: "en_US.UTF-8", TZ: "UTC", SCRIPT_KIT_NONINTERACTIVE: "1", SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0", SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
+        SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0", SCRIPT_KIT_ALLOW_LIVE_AI: "0", SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0", SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0" } });
+    cleanup = unknownOwnedCleanup(true); updateManagedTask(task, { state: "running", ownedProcesses: [proc.identity], source: artifact.manifest.source });
+    const consume = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> => {
+      const reader = stream.getReader(); readers.push(reader); const chunks: Uint8Array[] = []; let bytes = 0;
+      try { for (;;) { const next = await reader.read(); if (next.done) break; bytes += next.value.length;
+        if (bytes > 1000000) throw new Error("exporter_output_limit"); chunks.push(next.value); }
+        return Buffer.concat(chunks);
+      } finally { reader.releaseLock(); }
+    };
+    consumers = [consume(proc.stdout), consume(proc.stderr)];
+    const completed = await boundedObservation(Promise.all([proc.exited, ...consumers]), 33000);
+    if (completed.completed === false) throw completed.error;
+    execution = { exitCode: completed.value[0] as number, stdoutSha256: sha256(completed.value[1] as Uint8Array), stderrSha256: sha256(completed.value[2] as Uint8Array) };
+    if (execution.exitCode !== 0) failure("non-GUI exporter failed");
     for (const path of GENERATED_BYTE_COMPARE_OUTPUT_PATHS) {
-      let generatedBytes: Uint8Array;
-      try {
-        generatedBytes = readFile(join(temporaryDirectory, basename(path)));
-      } catch {
-        failure("authoritative exporter did not produce " + basename(path));
-      }
-      const checkedBytes = checkedInBytes.get(path)!;
-      if (!Buffer.from(checkedBytes).equals(Buffer.from(generatedBytes))) {
-        failure("checked-in output differs from exporter bytes: " + path);
-      }
-      const currentCheckedBytes = readFile(resolve(repositoryRoot, path));
-      if (!Buffer.from(checkedBytes).equals(Buffer.from(currentCheckedBytes))) {
-        failure("the exporter changed checked-in generated output: " + path);
-      }
-      const checkedSha = sha256(checkedBytes);
-      const generatedSha = sha256(generatedBytes);
-      outputHashes[path] = checkedSha;
-      generatedOutputHashes[path] = generatedSha;
-      outputs.push({
-        path,
-        checkedInSha256: checkedSha,
-        generatedSha256: generatedSha,
-        byteEqual: true,
-        byteLength: checkedBytes.byteLength,
-      });
+      const generated = readFileSync(join(temporaryDirectory, basename(path)));
+      const original = checked[path]!;
+      if (!original.equals(generated)) failure("checked-in output differs from exporter bytes: " + path);
+      if (!original.equals(readFileSync(resolve(repositoryRoot, path)))) failure("exporter changed checked-in output: " + path);
+      outputHashes[path] = sha256(original); generatedOutputHashes[path] = sha256(generated);
+      outputs.push({ path, checkedInSha256: outputHashes[path]!, generatedSha256: generatedOutputHashes[path]!, byteEqual: true, byteLength: original.length });
     }
-
-    if (sha256(readFile(binaryPath)) !== binarySha256) {
-      failure("the exporter binary changed during execution");
-    }
-    if (
-      sha256(readFile(resolve(repositoryRoot, provenancePath))) !== provenance.sha256
-    ) {
-      failure("the exporter build provenance changed during execution");
-    }
-    if (!sameIdentity(sourceFingerprints, fingerprintSources(repositoryRoot, readFile))) {
-      failure("an exporter source owner changed during execution");
-    }
-    if (currentSourceSha() !== sourceSha) {
-      failure("the checkout source commit changed during execution");
+    verifyImmutableArtifact(repositoryRoot, artifact.reference, { kind: "tool", packageName: "script-kit-gpui", targetName: "export_design_tokens", sourcePolicy: options.sourcePolicy ?? "current-content" });
+    if (!sameIdentity(sourceFingerprints, fingerprintSources(repositoryRoot, readFileSync))) failure("exporter source changed during execution");
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+    if (cause && typeof cause === "object" && "cleanup" in cause) {
+      // spawnOwnedProcess attaches its canonical in-process cleanup record to startup failures.
+      const observedCleanup = cause.cleanup as OwnedCleanup;
+      cleanup = observedCleanup;
     }
   } finally {
-    removeTemporaryDirectory(temporaryDirectory);
+    if (proc) {
+      const result = await boundedObservation(proc.close(), 8000); cleanup = result.completed ? result.value : unknownOwnedCleanup(true);
+      const drained = await boundedObservation(Promise.allSettled(consumers), 1000);
+      if (!drained.completed) await boundedObservation(Promise.allSettled(readers.map(reader => reader.cancel())), 500);
+      cleanup = { ...cleanup, streamsDrained: drained.completed && drained.value.every(result => result.status === "fulfilled"), logWriterClosed: true };
+      cleanup = { ...cleanup, closed: cleanup.closed && cleanup.streamsDrained };
+    }
+    if (temporaryDirectory && cleanup.closed) {
+      try { removeOwnedAuxiliaryDirectory(claim, temporaryDirectory); }
+      catch { cleanup = { ...cleanup, closed: false, failureCodes: [...cleanup.failureCodes, "exporter_output_cleanup_failed"] }; }
+    }
+    try { updateManagedTask(task, { result: { status: !error && cleanup.closed ? "succeeded" : "failed" } }); cleanup = finalizeManagedTask(task, cleanup).cleanup; }
+    catch { cleanup = { ...cleanup, closed: false, referencesFinalized: false }; }
   }
-
-  if (pathExists(temporaryDirectory)) {
-    failure("the exporter temporary directory survived cleanup");
-  }
-
-  const receipt = {
-    schemaVersion: 1 as const,
-    generatedBy: "scripts/devtools/generated-byte-compare.ts" as const,
-    taskId: "GOV-005" as const,
-    evidenceClass: "UNIT_BEHAVIOR" as const,
-    provesRuntimeBehavior: false as const,
-    sourceSha,
-    sourceCoverage: {
-      mode: "DECLARED_EXPORTER_SOURCE_OWNERS" as const,
-      sourceGraphExhaustive: false as const,
-    },
-    sourceFingerprints,
-    binary: {
-      path: binaryRelativePath,
-      sha256: binarySha256,
-      sizeBytes: binaryStats.size,
-      sourceCommit: sourceSha,
-      provenance: {
-        path: provenancePath,
-        sha256: provenance.sha256,
-        schemaVersion: 2 as const,
-        builtGitHead: provenance.builtGitHead,
-        compilerInputSha256: provenance.compilerInputSha256,
-        profile: provenance.profile,
-        requiresExactGitHead: provenance.requiresExactGitHead,
-        rustDirty: false as const,
-      },
-    },
-    outputHashes: outputHashes!,
-    generatedOutputHashes: generatedOutputHashes!,
-    outputs: outputs!,
-    byteEqual: true as const,
-    handEditedGeneratedOutput: false as const,
-    safety: {
-      noninteractive: true as const,
-      startsApplication: false as const,
-      revealsWindow: false as const,
-      focusesWindow: false as const,
-      drivesNativeInput: false as const,
-      capturesScreen: false as const,
-      accessesNetwork: false as const,
-      usesLiveAi: false as const,
-      startsExporter: true as const,
-      isolatedTempOutput: true as const,
-    },
-    execution: {
-      exitCode: execution!.status,
-      stdoutSha256: sha256(execution!.stdout ?? ""),
-      stderrSha256: sha256(execution!.stderr ?? ""),
-    },
-    cleanup: { closed: true as const, survivors: [] as string[] },
-    disposition: "EVALUABLE_PASS" as const,
-    pass: true as const,
-  };
-  const selfValidation = validateGeneratedByteCompareReceipt(receipt, {
-    currentSourceSha: sourceSha,
-    currentFileSha256(path) {
-      try {
-        return sha256(readFile(resolve(repositoryRoot, path)));
-      } catch {
-        return null;
-      }
-    },
-  });
-  if (!selfValidation.pass) {
-    failure("completed exporter receipt failed identity validation: " +
-      selfValidation.errors.join("; "));
-  }
-  return receipt;
+  const pass = !error && cleanup.closed && outputs.length === 2;
+  const receipt = { schemaVersion: 2, generatedBy: "scripts/devtools/generated-byte-compare.ts", taskId: "GOV-005", evidenceClass: "UNIT_BEHAVIOR", provesRuntimeBehavior: false,
+    sourceSha, sourceCoverage: { mode: "DECLARED_EXPORTER_SOURCE_OWNERS", sourceGraphExhaustive: false }, sourceFingerprints,
+    binary: { ...artifact.binary, artifactReference: artifact.reference, source: artifact.manifest.source },
+    outputHashes, generatedOutputHashes, outputs, byteEqual: pass, handEditedGeneratedOutput: false,
+    safety: { noninteractive: true, startsApplication: false, revealsWindow: false, focusesWindow: false, drivesNativeInput: false, capturesScreen: false,
+      accessesNetwork: false, usesLiveAi: false, startsExporter: true, isolatedTempOutput: true }, execution, cleanup,
+    disposition: cleanup.closed ? pass ? "EVALUABLE_PASS" : "EVALUABLE_FAIL" : "INVALID_CLEANUP", pass, error };
+  // Release transports copy this small proof alone. Keep its hashed-output detail
+  // authoritative here rather than creating a second observation payload.
+  const finalReceipt = { ...receipt, artifactLifecycle: buildArtifactLifecycle({ claim, finalizationKind: "driver-close", writersFinalized: cleanup.closed, specs: [], artifacts: [] }) };
+  commitFinalReceipt(claim, finalReceipt, [], []);
+  return finalReceipt;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -494,10 +286,12 @@ export function validateGeneratedByteCompareReceipt(
   candidate: unknown,
   identity: GeneratedByteCompareReceiptIdentity = {},
 ) {
-  const receipt = object(candidate);
+  let receipt: Record<string, unknown>;
+  try { receipt = resolveReceiptDetails(object(candidate)); }
+  catch (error) { return { pass: false, errors: [error instanceof Error ? error.message : String(error)] }; }
   const errors: string[] = [];
   if (
-    receipt.schemaVersion !== 1 ||
+    receipt.schemaVersion !== 2 ||
     receipt.generatedBy !== "scripts/devtools/generated-byte-compare.ts" ||
     receipt.taskId !== "GOV-005" ||
     receipt.evidenceClass !== "UNIT_BEHAVIOR" ||
@@ -574,34 +368,16 @@ export function validateGeneratedByteCompareReceipt(
     errors.push("exporter binary fingerprint no longer matches the proven executable");
   }
 
-  const provenance = object(binary.provenance);
-  const provenancePath = provenance.path;
-  if (
-    binary.sourceCommit !== sourceSha ||
-    typeof binaryPath !== "string" ||
-    typeof provenancePath !== "string" ||
-    !(provenancePath === `${binaryPath}.provenance.json` ||
-      provenancePath === join(dirname(binaryPath), "manifest.json")) ||
-    typeof provenance.sha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(provenance.sha256) ||
-    provenance.schemaVersion !== 2 ||
-    typeof provenance.builtGitHead !== "string" ||
-    !/^[a-f0-9]{40}$/.test(provenance.builtGitHead) ||
-    typeof provenance.compilerInputSha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(provenance.compilerInputSha256) ||
-    typeof provenance.profile !== "string" ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provenance.profile) ||
-    typeof provenance.requiresExactGitHead !== "boolean" ||
-    provenance.rustDirty !== false ||
-    (provenance.requiresExactGitHead === true &&
-      provenance.builtGitHead !== sourceSha)
-  ) {
-    errors.push("exporter build provenance is missing, dirty, stale, or inconsistent with its current source");
-  } else if (
-    identity.currentFileSha256 !== undefined &&
-    identity.currentFileSha256(provenancePath) !== provenance.sha256
-  ) {
-    errors.push("exporter build provenance fingerprint no longer matches the observed manifest");
+  const reference = object(binary.artifactReference);
+  const source = object(binary.source);
+  if (typeof reference.manifestPath !== "string" || !reference.manifestPath.startsWith("target-agent/artifacts/") ||
+      typeof reference.manifestSha256 !== "string" || !/^[a-f0-9]{64}$/.test(reference.manifestSha256) ||
+      binary.manifestPath !== reference.manifestPath || binary.manifestSha256 !== reference.manifestSha256 ||
+      binary.sourceCommit !== source.gitHead || source.algorithm !== "reviewed-worktree-content-v1" ||
+      typeof source.compilerInputSha256 !== "string" || !/^[a-f0-9]{64}$/.test(source.compilerInputSha256)) {
+    errors.push("exporter requires an explicit V3 artifact and truthful recorded source identity");
+  } else if (identity.currentFileSha256 !== undefined && identity.currentFileSha256(reference.manifestPath) !== reference.manifestSha256) {
+    errors.push("exporter manifest fingerprint changed");
   }
 
   const checkedHashes = object(receipt.outputHashes);
@@ -682,7 +458,8 @@ export function validateGeneratedByteCompareReceipt(
   }
   const cleanup = object(receipt.cleanup);
   if (
-    cleanup.closed !== true ||
+    cleanup.closed !== true || cleanup.processExited !== true || cleanup.processGroupExited !== true ||
+    cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true || cleanup.referencesFinalized !== true ||
     !Array.isArray(cleanup.survivors) ||
     cleanup.survivors.length !== 0
   ) {
@@ -691,60 +468,23 @@ export function validateGeneratedByteCompareReceipt(
   return { pass: errors.length === 0, errors };
 }
 
-export function parseGeneratedByteCompareArgs(argv: readonly string[]): {
-  binaryPath: string;
-  sourceSha: string;
-  outputPath?: string;
-} {
+export function parseGeneratedByteCompareArgs(argv: readonly string[]): GeneratedByteCompareOptions {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (
-      (flag !== "--binary" && flag !== "--source-sha" && flag !== "--out") ||
-      value === undefined ||
-      value.startsWith("--") ||
-      values.has(flag)
-    ) {
-      failure("expected --binary <export_design_tokens> --source-sha <40-hex> [--out <receipt>]");
-    }
+    const flag = argv[index]; const value = argv[index + 1];
+    if (!flag || !["--artifact", "--out", "--source-policy"].includes(flag) || !value || value.startsWith("--") || values.has(flag))
+      failure("expected --artifact <reference.json> --out <fresh-receipt> [--source-policy current-content|clean-exact-head]");
     values.set(flag, value);
   }
-  const binaryPath = values.get("--binary");
-  const sourceSha = values.get("--source-sha");
-  if (!binaryPath || !sourceSha) {
-    failure("both --binary and --source-sha are required");
-  }
-  return { binaryPath, sourceSha, outputPath: values.get("--out") };
+  const path = values.get("--artifact"); const outputPath = values.get("--out"); const sourcePolicy = values.get("--source-policy") ?? "current-content";
+  if (!path || !outputPath || !["current-content", "clean-exact-head"].includes(sourcePolicy)) failure("explicit artifact, fresh output and valid policy required");
+  return { artifactReference: readArtifactReference(path), outputPath, sourcePolicy: sourcePolicy as ArtifactExpectation["sourcePolicy"] };
 }
 
 if (import.meta.main) {
-  const argv = process.argv.slice(2);
-  if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
-    console.log(
-      "Usage: bun scripts/devtools/generated-byte-compare.ts " +
-        "--binary <prebuilt/export_design_tokens> --source-sha <40-hex> " +
-        "[--out .artifacts/consistency/GOV-005/generated-byte-compare.json]",
-    );
-    process.exit(0);
-  }
-  try {
-    const arguments_ = parseGeneratedByteCompareArgs(argv);
-    if (arguments_.outputPath !== undefined) {
-      const expected = resolve(GENERATED_BYTE_COMPARE_RECEIPT_PATH);
-      if (resolve(arguments_.outputPath) !== expected) {
-        failure("receipt output must be exactly " + GENERATED_BYTE_COMPARE_RECEIPT_PATH);
-      }
-    }
-    const receipt = generateAuthoritativeByteComparison(arguments_);
-    if (arguments_.outputPath !== undefined) {
-      const path = resolve(arguments_.outputPath);
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify(receipt, null, 2) + "\n");
-    }
-    console.log(JSON.stringify(receipt, null, 2));
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(2);
+  if (process.argv.includes("--help")) console.log("generated-byte-compare --artifact <reference.json> --out <fresh-receipt.json> [--source-policy clean-exact-head]");
+  else {
+    const receipt = await generateAuthoritativeByteComparison(parseGeneratedByteCompareArgs(process.argv.slice(2)));
+    console.log(JSON.stringify(receipt)); process.exitCode = receipt.pass ? 0 : 2;
   }
 }

@@ -230,6 +230,7 @@ struct RootBrowserHistorySnapshot {
 struct RootBrowserHistorySnapshotState {
     snapshot: Option<RootBrowserHistorySnapshot>,
     refresh_in_flight: bool,
+    refresh_needed: bool,
     generation: u64,
     last_refresh_error: Option<String>,
 }
@@ -374,12 +375,58 @@ pub(crate) fn cached_root_browser_history_snapshot(
     let ttl = Duration::from_millis(cache_ttl_ms);
     if let Ok(cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() {
         if let Some(snapshot) = cache.snapshot.as_ref() {
-            let _expired = snapshot.captured_at.elapsed() > ttl;
+            let _expired = crate::runtime_policy::root_search_now()
+                .saturating_duration_since(snapshot.captured_at)
+                > ttl;
             return snapshot.hits.clone();
         }
     }
 
     Arc::new(Vec::new())
+}
+
+fn root_browser_history_cache_is_fresh(
+    cache: &RootBrowserHistorySnapshotState,
+    now: Instant,
+    ttl: Duration,
+) -> bool {
+    !cache.refresh_needed
+        && cache
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| now.saturating_duration_since(snapshot.captured_at) <= ttl)
+}
+
+fn fresh_root_browser_history_cache_status(
+    cache: &RootBrowserHistorySnapshotState,
+    now: Instant,
+    ttl: Duration,
+) -> Option<RootPassiveSnapshotStatus> {
+    if cache.refresh_in_flight
+        || cache.last_refresh_error.is_some()
+        || !root_browser_history_cache_is_fresh(cache, now, ttl)
+    {
+        return None;
+    }
+    let snapshot = cache.snapshot.as_ref()?;
+    Some(RootPassiveSnapshotStatus {
+        generation: cache.generation,
+        refreshing: false,
+        cached_count: snapshot.hits.len(),
+        last_refreshed_at: Some(snapshot.captured_at),
+    })
+}
+
+/// Positive snapshot evidence without starting work or recovering poisoned locks.
+pub(crate) fn root_browser_history_fresh_cache_status(
+    cache_ttl_ms: u64,
+) -> Option<RootPassiveSnapshotStatus> {
+    let cache = ROOT_BROWSER_HISTORY_SNAPSHOT.try_lock().ok()?;
+    fresh_root_browser_history_cache_status(
+        &cache,
+        crate::runtime_policy::root_search_now(),
+        Duration::from_millis(cache_ttl_ms),
+    )
 }
 
 #[allow(dead_code)] // Runtime state receipts use this through the binary app layer.
@@ -429,21 +476,21 @@ pub(crate) fn try_begin_root_browser_history_refresh(
     let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() else {
         return None;
     };
-    let now = Instant::now();
-    let is_fresh = cache
-        .snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.captured_at.elapsed() <= ttl);
+    let now = crate::runtime_policy::root_search_now();
+    let is_fresh = root_browser_history_cache_is_fresh(&cache, now, ttl);
     if is_fresh || cache.refresh_in_flight {
         return None;
     }
+    let generation = cache.generation.checked_add(1)?;
     cache.refresh_in_flight = true;
-    cache.generation = cache.generation.wrapping_add(1);
-    let generation = cache.generation;
+    cache.generation = generation;
     let cache_age_ms = cache
         .snapshot
         .as_ref()
-        .map(|snapshot| snapshot.captured_at.elapsed().as_millis() as u64)
+        .map(|snapshot| {
+            now.saturating_duration_since(snapshot.captured_at)
+                .as_millis() as u64
+        })
         .unwrap_or(0);
     let row_count = cache
         .snapshot
@@ -462,7 +509,7 @@ pub(crate) fn try_begin_root_browser_history_refresh(
 
     Some(RootBrowserHistoryRefresh {
         generation,
-        started_at: now,
+        started_at: Instant::now(),
     })
 }
 
@@ -475,7 +522,7 @@ fn discard_root_browser_history_refresh_from_state(
     }
 
     cache.refresh_in_flight = false;
-    cache.generation = cache.generation.wrapping_add(1);
+    cache.generation = cache.generation.saturating_add(1);
     true
 }
 
@@ -485,6 +532,52 @@ pub(crate) fn discard_root_browser_history_refresh(refresh: RootBrowserHistoryRe
         return false;
     };
     discard_root_browser_history_refresh_from_state(&mut cache, refresh.generation)
+}
+
+pub(crate) fn owned_root_browser_history_snapshot(
+    result: Result<Vec<RootBrowserHistorySearchHit>>,
+) -> Result<Vec<RootBrowserHistorySearchHit>> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    result
+}
+
+pub(crate) fn reset_owned_root_browser_history() -> Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = ROOT_BROWSER_HISTORY_SNAPSHOT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser_history_cache_poisoned"))?;
+    let generation = cache
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("browser_history_generation_exhausted"))?;
+    *cache = RootBrowserHistorySnapshotState {
+        generation,
+        ..Default::default()
+    };
+    Ok(())
+}
+
+pub(crate) fn invalidate_owned_root_browser_history_freshness() -> Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = ROOT_BROWSER_HISTORY_SNAPSHOT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser_history_cache_poisoned"))?;
+    cache.generation = cache
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("browser_history_generation_exhausted"))?;
+    cache.refresh_in_flight = false;
+    cache.refresh_needed = true;
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -497,7 +590,7 @@ pub(crate) fn finish_root_browser_history_refresh(
     let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() else {
         return false;
     };
-    if cache.generation != refresh.generation {
+    if cache.generation != refresh.generation || !cache.refresh_in_flight {
         return false;
     }
 
@@ -505,16 +598,19 @@ pub(crate) fn finish_root_browser_history_refresh(
         Ok(hits) => {
             let row_count = hits.len();
             cache.snapshot = Some(RootBrowserHistorySnapshot {
-                captured_at: Instant::now(),
+                captured_at: crate::runtime_policy::root_search_now(),
                 hits: Arc::new(hits.clone()),
             });
+            cache.refresh_needed = false;
             cache.last_refresh_error = None;
 
-            let urls: Vec<String> = hits.iter().take(100).map(|h| h.url.to_string()).collect();
-            std::thread::spawn(move || {
-                let needing = crate::favicons::domains_needing_favicons(&urls);
-                crate::favicons::fetch_favicons_blocking(&needing);
-            });
+            if !crate::runtime_policy::is_owned_evaluation() {
+                let urls: Vec<String> = hits.iter().take(100).map(|h| h.url.to_string()).collect();
+                std::thread::spawn(move || {
+                    let needing = crate::favicons::domains_needing_favicons(&urls);
+                    crate::favicons::fetch_favicons_blocking(&needing);
+                });
+            }
 
             tracing::info!(
                 source = "browser_history",
@@ -536,7 +632,7 @@ pub(crate) fn finish_root_browser_history_refresh(
         }
     }
     cache.refresh_in_flight = false;
-    cache.generation = cache.generation.wrapping_add(1);
+    cache.generation = cache.generation.saturating_add(1);
     true
 }
 
@@ -546,8 +642,11 @@ pub(crate) fn mark_root_browser_history_refresh_in_flight() -> bool {
         if cache.refresh_in_flight {
             return false;
         }
+        let Some(generation) = cache.generation.checked_add(1) else {
+            return false;
+        };
         cache.refresh_in_flight = true;
-        cache.generation = cache.generation.wrapping_add(1);
+        cache.generation = generation;
         return true;
     }
     false
@@ -557,10 +656,10 @@ pub(crate) fn mark_root_browser_history_refresh_in_flight() -> bool {
 pub(crate) fn update_root_browser_history_snapshot(hits: Vec<RootBrowserHistorySearchHit>) {
     if let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() {
         cache.snapshot = Some(RootBrowserHistorySnapshot {
-            captured_at: Instant::now(),
+            captured_at: crate::runtime_policy::root_search_now(),
             hits: Arc::new(hits),
         });
-        cache.generation = cache.generation.wrapping_add(1);
+        cache.generation = cache.generation.saturating_add(1);
         cache.refresh_in_flight = false;
         cache.last_refresh_error = None;
     }
@@ -570,7 +669,7 @@ pub(crate) fn update_root_browser_history_snapshot(hits: Vec<RootBrowserHistoryS
 pub(crate) fn clear_root_browser_history_refresh_in_flight(error: Option<String>) {
     if let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() {
         cache.refresh_in_flight = false;
-        cache.generation = cache.generation.wrapping_add(1);
+        cache.generation = cache.generation.saturating_add(1);
         if let Some(err) = error {
             cache.last_refresh_error = Some(err);
         }
@@ -582,6 +681,10 @@ pub(crate) fn refresh_root_browser_history_snapshot_from_home(
     home: &Path,
     options: &RootBrowserHistorySectionOptions,
 ) -> Result<Vec<RootBrowserHistorySearchHit>> {
+    anyhow::ensure!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     let mut hits = Vec::new();
     let selected_providers: HashSet<_> = options.providers.iter().copied().collect();
     let cutoff = chromium_cutoff_time_for_max_age_days(options.max_age_days);
@@ -592,7 +695,7 @@ pub(crate) fn refresh_root_browser_history_snapshot_from_home(
             continue;
         }
 
-        for db_path in root_chromium_history_db_paths(spec, home) {
+        for db_path in root_chromium_history_db_paths(spec, home)? {
             let profile_label = db_path
                 .parent()
                 .and_then(|parent| parent.file_name())
@@ -600,7 +703,7 @@ pub(crate) fn refresh_root_browser_history_snapshot_from_home(
                 .unwrap_or("Default")
                 .to_string();
 
-            match query_root_chromium_history_db(
+            let mut db_hits = query_root_chromium_history_db(
                 spec,
                 &profile_label,
                 &db_path,
@@ -608,18 +711,8 @@ pub(crate) fn refresh_root_browser_history_snapshot_from_home(
                 cutoff,
                 per_db_limit,
                 true,
-            ) {
-                Ok(mut db_hits) => hits.append(&mut db_hits),
-                Err(error) => {
-                    tracing::debug!(
-                        provider = spec.provider_label,
-                        profile_bytes = profile_label.len(),
-                        path_bytes = db_path.as_os_str().to_string_lossy().len(),
-                        error_bytes = error.to_string().len(),
-                        "root browser history source skipped"
-                    );
-                }
-            }
+            )?;
+            hits.append(&mut db_hits);
         }
     }
 
@@ -718,6 +811,7 @@ fn root_browser_history_provider_label(
 #[allow(dead_code)] // Root unified search calls this through the binary app layer.
 pub(crate) fn open_browser_history_url(url: &str) -> Result<()> {
     ensure_browser_history_url_is_http_or_https(url)?;
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)?;
     open::that(url).context("open browser history URL with default handler")
 }
 
@@ -1068,56 +1162,48 @@ fn recency_bonus(last_visited_at_ms: i64) -> i32 {
 
 fn history_db_paths_for_browser(browser: &SupportedBrowserHistory, home: &Path) -> Vec<PathBuf> {
     let root = home.join(browser.profile_root);
-    match browser.family {
+    let paths = match browser.family {
         BrowserHistoryFamily::Safari => {
             let path = root.join("History.db");
-            if path.exists() {
+            Ok(if path.exists() {
                 vec![path]
             } else {
                 Vec::new()
-            }
+            })
         }
         BrowserHistoryFamily::Firefox => collect_profile_db_paths(&root, "places.sqlite"),
-        BrowserHistoryFamily::Chromium => {
-            let mut paths = collect_profile_db_paths(&root, "History");
-            let root_history = root.join("History");
-            if root_history.exists() && !paths.iter().any(|path| path == &root_history) {
-                paths.push(root_history);
-            }
-            paths
-        }
-    }
+        BrowserHistoryFamily::Chromium => collect_profile_db_paths(&root, "History"),
+    };
+    paths.unwrap_or_else(|error| {
+        tracing::debug!(
+            error_bytes = error.to_string().len(),
+            "browser_history_profiles_read_failed"
+        );
+        Vec::new()
+    })
 }
 
-fn collect_profile_db_paths(root: &Path, db_name: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if !root.exists() {
-        return out;
+fn collect_profile_db_paths(root: &Path, db_name: &str) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if !root.try_exists()? {
+        return Ok(paths);
     }
-
     let direct = root.join(db_name);
-    if direct.exists() {
-        out.push(direct);
+    if direct.try_exists()? {
+        paths.push(direct);
     }
-
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return out,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if !path.metadata()?.is_dir() {
             continue;
         }
         let db_path = path.join(db_name);
-        if db_path.exists() {
-            out.push(db_path);
+        if db_path.try_exists()? {
+            paths.push(db_path);
         }
     }
-
-    out.sort();
-    out
+    paths.sort();
+    Ok(paths)
 }
 
 fn load_history_for_browser(
@@ -1271,7 +1357,7 @@ fn query_chromium_history(
 fn root_chromium_history_db_paths(
     spec: &RootBrowserHistoryProviderSpec,
     home: &Path,
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     collect_profile_db_paths(&home.join(spec.profile_root), "History")
 }
 
@@ -1581,6 +1667,14 @@ fn safari_visit_time_to_unix_ms(visit_time: f64) -> i64 {
 
 fn firefox_visit_time_to_unix_ms(visit_time: i64) -> i64 {
     visit_time / 1000
+}
+
+#[cfg(test)]
+#[test]
+fn owned_browser_history_snapshots_and_resets_require_runtime_authority() {
+    assert!(owned_root_browser_history_snapshot(Ok(Vec::new())).is_err());
+    assert!(reset_owned_root_browser_history().is_err());
+    assert!(invalidate_owned_root_browser_history_freshness().is_err());
 }
 
 #[cfg(test)]

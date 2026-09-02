@@ -15,6 +15,18 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "--linker" ]]; then
+    shift
+    exec clang "-fuse-ld=${SCRIPT_KIT_DEV_LLD:?missing registered LLD path}" "$@"
+fi
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]]; then
+    echo "[dev-cycle] REFUSED: interactive human watcher only" >&2
+    exit 78
+fi
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$PROJECT_ROOT"
+export SCRIPT_KIT_GPUI_BINARY="${PROJECT_ROOT}/target/debug/script-kit-gpui"
+
 # Track heartbeat so exit cannot leave a spinner loop running.
 # Do not trap INT/TERM here — that would swallow Ctrl+C before it reaches the
 # foreground cargo build. EXIT covers normal completion; run_with_heartbeat also
@@ -28,7 +40,7 @@ dev_cycle_cleanup() {
     fi
     clear_tty_line
 }
-trap dev_cycle_cleanup EXIT
+trap 'dev_cycle_status=$?; dev_cycle_cleanup; exit "$dev_cycle_status"' EXIT
 
 SESSION_NAME="${SCRIPT_KIT_DEV_SESSION_NAME:-dev-watch}"
 SESSION_SCRIPT="scripts/agentic/session.sh"
@@ -135,10 +147,11 @@ PY
     return "$status"
 }
 
-if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-    echo "[dev.sh] warning: ignoring inherited CARGO_TARGET_DIR=${CARGO_TARGET_DIR}; dev.sh owns target/" >&2
-    unset CARGO_TARGET_DIR
+if [[ -n "${CARGO_TARGET_DIR:-}" && "$CARGO_TARGET_DIR" != "${PROJECT_ROOT}/target" ]]; then
+    echo "[dev.sh] REFUSED conflicting inherited CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >&2
+    exit 78
 fi
+export CARGO_TARGET_DIR="${PROJECT_ROOT}/target"
 
 # --- Suggestion 1: stale launcher ------------------------------------------
 # If dev.sh / dev-cycle.sh / dev-relaunch.sh have changed since the running
@@ -163,6 +176,9 @@ suggest_restart_if_launcher_stale() {
 suggest_restart_if_launcher_stale
 
 if [ "${SCRIPT_KIT_USE_SCCACHE:-0}" = "1" ]; then
+    if [[ -n "${RUSTC_WRAPPER:-}" && "$RUSTC_WRAPPER" != "sccache" && "${RUSTC_WRAPPER##*/}" != "sccache" ]]; then
+        echo "[dev.sh] REFUSED conflicting RUSTC_WRAPPER" >&2; exit 78
+    fi
     if command -v sccache >/dev/null 2>&1; then
         export RUSTC_WRAPPER=sccache
         echo "[dev.sh] sccache enabled" >&2
@@ -174,7 +190,18 @@ fi
 if [ "${SCRIPT_KIT_USE_LLD:-0}" = "1" ]; then
     llvm_prefix="$(brew --prefix llvm 2>/dev/null || true)"
     if [ -n "$llvm_prefix" ] && [ -x "${llvm_prefix}/bin/ld64.lld" ]; then
-        export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=${llvm_prefix}/bin/ld64.lld"
+        host="$(rustc -vV | sed -n 's/^host: //p')"
+        linker_key="CARGO_TARGET_$(printf '%s' "$host" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+        if [[ -n "${!linker_key:-}" || -n "${RUSTFLAGS:-}" || -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+            echo "[dev.sh] REFUSED conflicting explicit linker/rustflags configuration" >&2; exit 78
+        fi
+        export SCRIPT_KIT_DEV_LLD="${llvm_prefix}/bin/ld64.lld"
+        adapter_dir="${SCRIPT_KIT_DEV_STAMP_DIR:-${TMPDIR:-/tmp}/sk-dev-launcher-stamps}"
+        mkdir -p "$adapter_dir"
+        adapter="${adapter_dir}/lld-adapter-${PPID}"
+        printf '#!/bin/bash\nexec bash %q --linker "$@"\n' "${PROJECT_ROOT}/scripts/agentic/dev-cycle.sh" > "$adapter"
+        chmod 700 "$adapter"
+        export "${linker_key}=${adapter}"
         echo "[dev.sh] LLD enabled ld64.lld=${llvm_prefix}/bin/ld64.lld" >&2
     else
         echo "[dev.sh] warning: SCRIPT_KIT_USE_LLD=1 but Homebrew llvm ld64.lld was not found" >&2
@@ -186,15 +213,16 @@ before_mtime="$(mtime "$BIN_PATH")"
 # Opt-in cargo features for the dev build (space- or comma-separated). Lets the
 # dev loop enable optional features like local-llm:
 #   SCRIPT_KIT_CARGO_FEATURES=local-llm ./dev.sh
-feature_args=()
+build_args=(build --locked --bin script-kit-gpui)
 if [ -n "${SCRIPT_KIT_CARGO_FEATURES:-}" ]; then
-    feature_args+=(--features "$SCRIPT_KIT_CARGO_FEATURES")
+    build_args+=(--features "$SCRIPT_KIT_CARGO_FEATURES")
 fi
+build_args+=(--message-format="${SCRIPT_KIT_CARGO_MESSAGE_FORMAT:-short}")
 
 build_start=$SECONDS
 if [[ " ${SCRIPT_KIT_CARGO_FEATURES:-} " == *"local-llm"* ]]; then
     run_with_heartbeat helper-build \
-        cargo build -p script-kit-ghost-llm-helper --bin script-kit-ghost-llm-helper --message-format="${SCRIPT_KIT_CARGO_MESSAGE_FORMAT:-short}"
+        cargo build --locked -p script-kit-ghost-llm-helper --bin script-kit-ghost-llm-helper --message-format="${SCRIPT_KIT_CARGO_MESSAGE_FORMAT:-short}"
     # Install the helper to a stable, non-purged location so the running app can
     # always find it. target/ and target-agent/pools/* are reclaimed under disk
     # pressure; ~/.scriptkit/bin survives, and resolve_helper_path() checks it.
@@ -208,7 +236,7 @@ if [[ " ${SCRIPT_KIT_CARGO_FEATURES:-} " == *"local-llm"* ]]; then
     fi
 fi
 run_with_heartbeat build \
-    cargo build --bin script-kit-gpui "${feature_args[@]}" --message-format="${SCRIPT_KIT_CARGO_MESSAGE_FORMAT:-short}"
+    cargo "${build_args[@]}"
 build_elapsed=$((SECONDS - build_start))
 
 after_mtime="$(mtime "$BIN_PATH")"

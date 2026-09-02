@@ -12,7 +12,10 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SESSION_SCRIPT="${PROJECT_ROOT}/scripts/agentic/session.sh"
 
 echo "DEV_SESSION_RELAUNCH session=${SESSION_NAME} phase=stop-old" >&2
-bash "${SESSION_SCRIPT}" stop "${SESSION_NAME}" >/dev/null 2>&1 || true
+if ! bash "${SESSION_SCRIPT}" stop "${SESSION_NAME}" >/dev/null; then
+  echo "DEV_SESSION_RELAUNCH refused: previous exact session teardown not confirmed" >&2
+  exit 78
+fi
 
 echo "DEV_SESSION_RELAUNCH session=${SESSION_NAME} phase=start-new" >&2
 set +e

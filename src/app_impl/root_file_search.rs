@@ -4,6 +4,91 @@ const ROOT_FILE_RESULT_CACHE_LIMIT: usize = 24;
 const ROOT_FILE_SEARCH_DEBOUNCE_MS: u64 = 60;
 const SPINE_FILE_SEARCH_DEBOUNCE_MS: u64 = 80;
 
+enum MainFileWorkerEvent {
+    Result(crate::file_search::FileResult),
+    Done,
+    Failed(MainSearchWorkerFailure),
+}
+
+#[derive(Debug)]
+pub(super) enum MainSearchWorkerFailure {
+    Source(anyhow::Error),
+    Disconnected,
+    Cancelled,
+}
+
+impl From<anyhow::Error> for MainSearchWorkerFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Source(error)
+    }
+}
+
+impl From<std::io::Error> for MainSearchWorkerFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Source(error.into())
+    }
+}
+
+impl From<crate::file_search::SearchFailure> for MainSearchWorkerFailure {
+    fn from(error: crate::file_search::SearchFailure) -> Self {
+        match error {
+            crate::file_search::SearchFailure::Source(error) => {
+                Self::Source(std::io::Error::new(error.kind(), error).into())
+            }
+            crate::file_search::SearchFailure::Cancelled => Self::Cancelled,
+            crate::file_search::SearchFailure::Disconnected => Self::Disconnected,
+        }
+    }
+}
+
+impl std::fmt::Display for MainSearchWorkerFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Disconnected => formatter.write_str("search worker sender disconnected"),
+            Self::Cancelled => formatter.write_str("search worker cancelled"),
+        }
+    }
+}
+
+pub(super) type MainSearchWorkerResult<T> = Result<Vec<T>, MainSearchWorkerFailure>;
+
+pub(super) fn main_search_worker_terminal<T>(
+    result: &MainSearchWorkerResult<T>,
+) -> RootProviderTerminal {
+    match result {
+        Ok(rows) if rows.is_empty() => RootProviderTerminal::Empty,
+        Ok(_) => RootProviderTerminal::Success,
+        Err(MainSearchWorkerFailure::Cancelled) => RootProviderTerminal::Cancelled,
+        Err(MainSearchWorkerFailure::Disconnected) => RootProviderTerminal::Disconnected,
+        Err(MainSearchWorkerFailure::Source(error)) => {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::Unsupported)
+            {
+                RootProviderTerminal::Unavailable
+            } else {
+                RootProviderTerminal::Failed
+            }
+        }
+    }
+}
+
+pub(super) fn main_search_fixture_terminal<T>(
+    result: &MainSearchWorkerResult<T>,
+) -> crate::design_evaluation::search_fixtures::ProviderTerminal {
+    use crate::design_evaluation::search_fixtures::ProviderTerminal as Terminal;
+    match main_search_worker_terminal(result) {
+        RootProviderTerminal::Success | RootProviderTerminal::Empty => Terminal::Completed {
+            count: result.as_ref().map_or(0, Vec::len),
+        },
+        RootProviderTerminal::Cancelled => Terminal::Cancelled,
+        RootProviderTerminal::Disconnected => Terminal::Disconnected,
+        RootProviderTerminal::Unavailable => Terminal::Unavailable,
+        _ => Terminal::Failed,
+    }
+}
+
 #[derive(Clone)]
 enum RootFileSearchRequest {
     GlobalQuery {
@@ -36,17 +121,126 @@ impl RootFileSearchRequest {
         match self {
             Self::GlobalQuery { query } => format!("global:{query}"),
             Self::DirectoryBrowse {
-                query,
                 directory,
                 show_hidden,
-            } => format!("dir:{directory}:{show_hidden}:{query}"),
+                ..
+            } => format!("dir:{}:{directory}:{show_hidden}", directory.len()),
+        }
+    }
+
+    fn source(&self) -> &'static str {
+        match self {
+            Self::GlobalQuery { .. } => "files",
+            Self::DirectoryBrowse { .. } => "directory",
+        }
+    }
+
+    fn work_scope(&self) -> String {
+        match self {
+            Self::GlobalQuery { .. } => "global".to_string(),
+            Self::DirectoryBrowse { .. } => self.cache_key(),
+        }
+    }
+
+    fn browse_scope(&self) -> Option<(String, bool)> {
+        match self {
+            Self::DirectoryBrowse {
+                directory,
+                show_hidden,
+                ..
+            } => Some((directory.clone(), *show_hidden)),
+            Self::GlobalQuery { .. } => None,
         }
     }
 }
 
 impl ScriptListApp {
+    fn root_file_request_for_input(
+        &self,
+        raw: &str,
+    ) -> Option<(RootFileSearchRequest, RootProviderPublicationPolicy)> {
+        if !matches!(self.current_view, AppView::ScriptList) {
+            return None;
+        }
+        let syntax = crate::menu_syntax::MenuSyntaxMode::from_input(raw);
+        let search_text = crate::menu_syntax::free_text_for_search(&syntax, raw).trim();
+        let advanced = syntax.advanced_query_for(raw);
+        let source = crate::menu_syntax::RootUnifiedSourceFilter::Files;
+        let explicit = advanced.is_some_and(|query| query.source_filters.includes(source));
+        let mut options = self.config.get_unified_search().root_file_section_options();
+        if explicit {
+            options.files_enabled = true;
+            options.global_search_enabled = true;
+            options.directory_browse_enabled = true;
+            options.query_intent =
+                crate::file_search::RootFileQueryIntent::ExplicitFilesSourceFilter;
+        }
+        if !options.files_enabled
+            || advanced
+                .is_some_and(|query| !query.source_filters.allows(source) || query.has_predicates())
+            || syntax.capture_composer_owns_input_for(search_text)
+            || syntax.command_owns_input_for(search_text)
+        {
+            return None;
+        }
+        if options.global_search_enabled
+            && crate::file_search::should_search_root_files_for_intent(
+                search_text,
+                options.query_intent,
+            )
+        {
+            return Some((
+                RootFileSearchRequest::GlobalQuery {
+                    query: search_text.to_owned(),
+                },
+                if explicit {
+                    RootProviderPublicationPolicy::Visible
+                } else {
+                    RootProviderPublicationPolicy::CacheOnly
+                },
+            ));
+        }
+        if options.directory_browse_enabled
+            && crate::file_search::looks_like_root_directory_browse_query(search_text)
+        {
+            let (directory, show_hidden) =
+                if let Some(parsed) = crate::file_search::parse_directory_path(search_text) {
+                    (parsed.directory, parsed.show_hidden)
+                } else if self.root_search.root_file_search_query == search_text
+                    && self.root_search.root_file_search_mode
+                        == Some(crate::file_search::RootFileSectionMode::DirectoryBrowse)
+                {
+                    self.root_search.root_file_browse_scope.clone()?
+                } else {
+                    return None;
+                };
+            return Some((
+                RootFileSearchRequest::DirectoryBrowse {
+                    query: search_text.to_owned(),
+                    directory,
+                    show_hidden,
+                },
+                RootProviderPublicationPolicy::Visible,
+            ));
+        }
+        None
+    }
+
+    pub(crate) fn root_file_work_identity_for_input(
+        &self,
+        raw: &str,
+    ) -> Option<(String, String, RootProviderPublicationPolicy)> {
+        self.root_file_request_for_input(raw)
+            .map(|(request, policy)| (request.cache_key(), request.work_scope(), policy))
+    }
+
     pub(crate) fn refresh_root_recent_file_results(&mut self) {
         let mut options = self.config.get_unified_search().root_file_section_options();
+        if let Some(sources) = self.main_services.owned_sources() {
+            self.root_search.root_recent_file_results = sources.files.clone();
+            self.root_search.root_recent_file_revision = self.frecency_store.revision();
+            return;
+        }
         if self
             .menu_syntax_mode
             .advanced_query_for(&self.computed_filter_text)
@@ -75,8 +269,8 @@ impl ScriptListApp {
 
         let next_results =
             self.recent_file_results_from_frecency(crate::file_search::ROOT_FILE_RECENT_SEED_LIMIT);
-        let changed = root_file_result_fingerprint(&self.root_search.root_recent_file_results)
-            != root_file_result_fingerprint(&next_results);
+        let changed =
+            !root_file_results_equal(&self.root_search.root_recent_file_results, &next_results);
         self.root_search.root_recent_file_results = next_results;
         self.root_search.root_recent_file_revision = revision;
         if changed {
@@ -96,8 +290,11 @@ impl ScriptListApp {
     /// showing while the provider warms must NOT read as loading, and
     /// passive global warms (no `files:` filter) never claim the treatment.
     pub(crate) fn visible_root_file_search_loading(&self) -> bool {
+        if !self.root_search.query_is_current() {
+            return false;
+        }
         let current_search_text = crate::menu_syntax::free_text_for_search(
-            &self.menu_syntax_mode,
+            self.root_search.computed_menu_syntax(),
             &self.computed_filter_text,
         )
         .trim();
@@ -157,83 +354,70 @@ impl ScriptListApp {
             return false;
         }
 
-        crate::file_search::root_directory_browse_source_key(
-            &self.root_search.root_file_search_query,
-        )
-        .map(|(active_directory, active_show_hidden)| {
-            active_directory == directory && active_show_hidden == show_hidden
-        })
-        .unwrap_or(false)
+        self.root_search
+            .root_file_browse_scope
+            .as_ref()
+            .is_some_and(|(active_directory, active_hidden)| {
+                active_directory == directory && *active_hidden == show_hidden
+            })
     }
 
-    fn refresh_root_file_grouping_after_query_only_change(&mut self, cx: &mut Context<Self>) {
-        let interaction_before = matches!(self.current_view, AppView::ScriptList)
-            .then(|| self.main_menu_interaction_snapshot());
-        self.invalidate_grouped_cache();
-        if let Some(interaction_before) = interaction_before {
-            self.reconcile_script_list_after_results_refresh(
-                "root_file_query_only_grouping_change",
-                interaction_before,
-                cx,
-            );
-        }
-        cx.notify();
-    }
-
-    fn apply_root_file_search_results_for_generation(
-        &mut self,
-        generation: u64,
-        results: Vec<crate::file_search::FileResult>,
-        loading: bool,
-        clear_cancel: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_search.root_file_search_generation != generation {
-            tracing::debug!(
-                event = "root_file_provider_stale_drop",
-                generation,
-                active_generation = self.root_search.root_file_search_generation,
-                query_sha256 = %crate::logging::log_private_user_value(
-                    &self.root_search.root_file_search_query
-                ),
-                query_bytes = self.root_search.root_file_search_query.len(),
-            );
-            return;
-        }
-
-        let results_changed = root_file_result_fingerprint(&self.root_search.root_file_results)
-            != root_file_result_fingerprint(&results);
-        let loading_changed = self.root_search.root_file_search_loading != loading
-            || self.root_search.root_file_provider_loading != loading;
-        if !results_changed && !loading_changed {
-            if clear_cancel {
-                self.root_search.root_file_search_cancel = None;
+    fn reusable_root_file_cache_entry(
+        &self,
+        request: &RootFileSearchRequest,
+        cache_key: &str,
+    ) -> Option<(&str, &[crate::file_search::FileResult])> {
+        let same_source = self.root_search.root_file_search_mode == Some(request.mode());
+        let scope_matches = match request {
+            RootFileSearchRequest::GlobalQuery { query } => {
+                same_source && self.root_search.root_file_search_query == *query
             }
-            return;
-        }
-
-        let interaction_before = if matches!(self.current_view, AppView::ScriptList) {
-            Some(self.main_menu_interaction_snapshot())
-        } else {
-            None
+            RootFileSearchRequest::DirectoryBrowse {
+                directory,
+                show_hidden,
+                ..
+            } => {
+                same_source
+                    && self.active_root_directory_browse_source_matches(directory, *show_hidden)
+                    && root_directory_browse_listing_is_fresh(
+                        self.root_search.root_file_browse_listed_at,
+                        self.main_services.search_now(),
+                    )
+            }
         };
+        crate::file_search::reusable_root_file_cache_entry(
+            &self.root_search.root_file_result_cache,
+            cache_key,
+            scope_matches,
+        )
+    }
 
-        self.root_search.root_file_results = results;
-        self.root_search.root_file_search_loading = loading;
-        self.root_search.root_file_provider_loading = loading;
-        self.root_search.root_file_frame = None;
-        if clear_cancel {
-            self.root_search.root_file_search_cancel = None;
+    pub(super) fn owned_root_file_cache_readiness(
+        &self,
+        source: &str,
+    ) -> Option<crate::root_search_store::RootSearchSourceCacheReadiness<'_>> {
+        if self.root_search.named_provider_in_flight("files")
+            || self.root_search.named_provider_in_flight("directory")
+            || self.root_search.root_file_provider_loading
+        {
+            return None;
         }
-        self.invalidate_grouped_cache();
-        if let Some(interaction_before) = interaction_before {
-            self.reconcile_script_list_after_results_refresh(
-                "root_file_results_publish",
-                interaction_before,
-                cx,
-            );
+        let (request, _) = self.root_file_request_for_input(&self.computed_filter_text)?;
+        if request.source() != source || self.root_search.root_file_search_query != request.query()
+        {
+            return None;
         }
-        cx.notify();
+        let cache_key = request.cache_key();
+        let (identity, rows) = self.reusable_root_file_cache_entry(&request, &cache_key)?;
+        if !root_file_results_equal(&self.root_search.root_file_results, rows) {
+            return None;
+        }
+        Some(crate::root_search_store::RootSearchSourceCacheReadiness {
+            query: self.root_search.query_stamp(),
+            identity,
+            generation: None,
+            row_count: rows.len(),
+        })
     }
 
     fn cached_root_file_results_for_request(
@@ -254,26 +438,11 @@ impl ScriptListApp {
             .unwrap_or_default()
     }
 
-    fn cache_root_file_search_results_for_generation(
+    fn cache_root_file_results(
         &mut self,
-        generation: u64,
         cache_key: String,
         results: Vec<crate::file_search::FileResult>,
-        clear_cancel: bool,
     ) {
-        if self.root_search.root_file_search_generation != generation {
-            tracing::debug!(
-                event = "root_file_provider_stale_drop",
-                generation,
-                active_generation = self.root_search.root_file_search_generation,
-                query_sha256 = %crate::logging::log_private_user_value(
-                    &self.root_search.root_file_search_query
-                ),
-                query_bytes = self.root_search.root_file_search_query.len(),
-            );
-            return;
-        }
-
         if let Some(index) = self
             .root_search
             .root_file_result_cache
@@ -288,11 +457,6 @@ impl ScriptListApp {
         while self.root_search.root_file_result_cache.len() > ROOT_FILE_RESULT_CACHE_LIMIT {
             self.root_search.root_file_result_cache.pop_back();
         }
-
-        if clear_cancel {
-            self.root_search.root_file_search_cancel = None;
-        }
-        self.root_search.root_file_provider_loading = false;
     }
 
     pub(crate) fn active_root_file_cache_result_count(&self) -> usize {
@@ -316,217 +480,270 @@ impl ScriptListApp {
     }
 
     pub(crate) fn maybe_start_root_file_search(&mut self, query: &str, cx: &mut Context<Self>) {
-        let search_text =
-            crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, query).to_string();
-        let trimmed = search_text.trim();
-        let advanced_query_owned = self.menu_syntax_mode.advanced_query_for(query).cloned();
-        let source_filters = advanced_query_owned
-            .as_ref()
-            .map(|advanced_query| advanced_query.source_filters.clone())
-            .unwrap_or_default();
-        let advanced_predicate_active = advanced_query_owned
-            .as_ref()
-            .is_some_and(|advanced_query| advanced_query.has_predicates());
-        let mut root_file_options = self.config.get_unified_search().root_file_section_options();
-        if source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Files) {
-            root_file_options.files_enabled = true;
-            root_file_options.global_search_enabled = true;
-            root_file_options.directory_browse_enabled = true;
-            root_file_options.recent_files_enabled = true;
-            root_file_options.query_intent =
-                crate::file_search::RootFileQueryIntent::ExplicitFilesSourceFilter;
-            root_file_options.source_chip_visible_limit =
-                Some(self.root_file_source_chip_visible_limit_for(
-                    query,
-                    trimmed,
-                    advanced_predicate_active,
-                    self.root_search.root_file_search_mode,
-                ));
+        self.start_root_file_search_for_query(query, false, cx);
+    }
+
+    pub(crate) fn refresh_root_file_source(&mut self, cx: &mut Context<Self>) {
+        self.start_root_file_search_for_query(&self.computed_filter_text.clone(), true, cx);
+    }
+
+    fn start_root_file_search_for_query(
+        &mut self,
+        query: &str,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_search.query_is_current() || self.computed_filter_text != query {
+            return;
         }
-        if !root_file_options.files_enabled
-            || !source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::Files)
-        {
+        let requested = self.root_file_request_for_input(query);
+        let active = self.root_search.named_provider_in_flight("files")
+            || self.root_search.named_provider_in_flight("directory");
+        let Some((request, policy)) = requested else {
             self.cancel_root_file_search();
-            let had_results = !self.root_search.root_file_results.is_empty()
-                || !self.root_search.root_recent_file_results.is_empty()
-                || !self.root_search.root_file_search_query.is_empty()
-                || self.root_search.root_file_search_loading
-                || self.root_search.root_file_provider_loading
-                || self.root_search.root_file_search_mode.is_some();
-            self.root_search.root_file_results.clear();
-            self.root_search.root_recent_file_results.clear();
-            self.root_search.root_file_search_query.clear();
-            self.root_search.root_file_search_mode = None;
-            self.root_search.root_file_search_loading = false;
-            self.root_search.root_file_provider_loading = false;
-            self.root_search.root_file_frame = None;
-            if had_results {
-                self.root_search.root_file_search_generation =
-                    self.root_search.root_file_search_generation.wrapping_add(1);
-                self.invalidate_grouped_cache();
-                cx.notify();
+            let changed = self.root_search.root_file_search_mode.is_some()
+                || !self.root_search.root_file_results.is_empty();
+            if changed {
+                self.commit_main_menu_results_refresh(
+                    "root_file_scope_retired",
+                    None,
+                    cx,
+                    |app, _cx| {
+                        app.root_search.root_file_results.clear();
+                        app.root_search.root_file_search_query.clear();
+                        app.root_search.root_file_search_mode = None;
+                        app.root_search.root_file_browse_scope = None;
+                        app.root_search.root_file_browse_listed_at = None;
+                        app.root_search.root_file_search_loading = false;
+                        app.root_search.root_file_frame = None;
+                        true
+                    },
+                );
+            }
+            return;
+        };
+        let source = request.source();
+        let work_key = request.cache_key();
+        let work_scope = request.work_scope();
+        if active {
+            if !force
+                && self.root_search.named_provider_work_matches(
+                    source,
+                    self.root_search.root_file_search_generation,
+                    &work_key,
+                    &work_scope,
+                )
+            {
+                // Only the accepted raw-input boundary can transfer an active Files attachment.
+                self.root_search.root_file_search_query = request.query().to_owned();
+                self.root_search.root_file_search_mode = Some(request.mode());
+                self.root_search.root_file_frame = None;
+                self.ensure_main_list_loading_animation(cx);
+                return;
+            }
+            if force {
+                for active_source in ["files", "directory"] {
+                    self.root_search.detach_named_provider_consumer(
+                        active_source,
+                        self.root_search.root_file_search_generation,
+                    );
+                }
+            }
+            self.root_search
+                .note_desired_provider(source, &work_key, &work_scope, policy);
+            self.cancel_root_file_search();
+            let apply = |app: &mut Self, _cx: &mut Context<Self>| {
+                app.root_search.root_file_search_query = request.query().to_owned();
+                app.root_search.root_file_search_mode = Some(request.mode());
+                app.root_search.root_file_browse_scope = request.browse_scope();
+                app.root_search.root_file_browse_listed_at = None;
+                app.root_search.root_file_results =
+                    app.cached_root_file_results_for_request(&request);
+                app.root_search.root_file_search_loading =
+                    app.root_search.root_file_results.is_empty();
+                app.root_search.root_file_frame = None;
+                true
+            };
+            if policy == RootProviderPublicationPolicy::Visible {
+                self.commit_main_menu_results_refresh(
+                    "root_file_waiting_for_worker",
+                    None,
+                    cx,
+                    apply,
+                );
+            } else {
+                apply(self, cx);
+            }
+            return;
+        }
+        let reusable_cache = if force {
+            None
+        } else {
+            self.reusable_root_file_cache_entry(&request, &work_key)
+        };
+        if let Some((_, cached)) = reusable_cache {
+            let adopt_cached =
+                !root_file_results_equal(&self.root_search.root_file_results, cached);
+            if self.root_search.root_file_search_query == request.query() && !adopt_cached {
+                return;
+            }
+            let apply = |app: &mut Self, _cx: &mut Context<Self>| {
+                app.root_search.root_file_search_query = request.query().to_owned();
+                if adopt_cached {
+                    app.root_search.root_file_results =
+                        app.cached_root_file_results_for_request(&request);
+                }
+                app.root_search.root_file_search_loading = false;
+                app.root_search.root_file_frame = None;
+                true
+            };
+            if policy == RootProviderPublicationPolicy::Visible {
+                self.commit_main_menu_results_refresh("root_file_cached_scope", None, cx, apply);
+            } else {
+                apply(self, cx);
             }
             return;
         }
 
-        let can_collect = matches!(self.current_view, AppView::ScriptList)
-            && self
-                .menu_syntax_mode
-                .advanced_query_for(&self.filter_text)
-                .is_none_or(|advanced_query| !advanced_query.has_predicates())
-            && !self.menu_syntax_object_selector_state.owns_main_list()
-            && !self.menu_syntax_trigger_picker_state.owns_main_list()
-            && !self
-                .menu_syntax_mode
-                .capture_composer_owns_input_for(trimmed)
-            && !self.menu_syntax_mode.command_owns_input_for(trimmed);
+        let generation = self.root_search.allocate_named_provider_generation(source);
+        let cancel = crate::file_search::new_cancel_token();
+        let apply = |app: &mut Self, _cx: &mut Context<Self>| {
+            app.root_search.begin_named_provider(
+                source,
+                generation,
+                &work_key,
+                &work_scope,
+                policy,
+                true,
+            );
+            app.root_search.root_file_search_generation = generation;
+            app.root_search.root_file_search_query = request.query().to_owned();
+            app.root_search.root_file_search_mode = Some(request.mode());
+            app.root_search.root_file_browse_scope = request.browse_scope();
+            app.root_search.root_file_browse_listed_at = None;
+            app.root_search.root_file_results = app.cached_root_file_results_for_request(&request);
+            app.root_search.root_file_search_loading = app.root_search.root_file_results.is_empty();
+            app.root_search.root_file_provider_loading = true;
+            app.root_search.root_file_frame = None;
+            app.root_search.root_file_search_cancel = Some(cancel.clone());
+            true
+        };
+        if policy == RootProviderPublicationPolicy::Visible {
+            self.commit_main_menu_results_refresh("root_file_search_started", None, cx, apply);
+        } else {
+            apply(self, cx);
+        }
+        self.ensure_main_list_loading_animation(cx);
 
-        let request = if !can_collect {
-            None
-        } else if root_file_options.global_search_enabled
-            && crate::file_search::should_search_root_files_for_intent(
-                trimmed,
-                root_file_options.query_intent,
-            )
-        {
-            Some(RootFileSearchRequest::GlobalQuery {
-                query: trimmed.to_string(),
-            })
-        } else if root_file_options.directory_browse_enabled
-            && crate::file_search::looks_like_root_directory_browse_query(trimmed)
-        {
-            crate::file_search::parse_directory_path(trimmed).map(|parsed| {
-                RootFileSearchRequest::DirectoryBrowse {
-                    query: trimmed.to_string(),
-                    directory: parsed.directory,
-                    show_hidden: parsed.show_hidden,
+        let services = self.main_services.clone();
+        let owned_run = if let Some(gate) = self.main_services.search_gate() {
+            match gate.begin(source, request.query(), generation, policy) {
+                Some(run) => Some(Arc::new(run)),
+                None => {
+                    self.finish_root_file_worker(
+                        generation,
+                        &request,
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "owned_file_gate_unavailable",
+                        )
+                        .into()),
+                        None,
+                        cx,
+                    );
+                    return;
                 }
-            })
+            }
         } else {
             None
         };
-
-        let Some(request) = request else {
-            self.cancel_root_file_search();
-            let had_results = !self.root_search.root_file_results.is_empty()
-                || !self.root_search.root_file_search_query.is_empty()
-                || self.root_search.root_file_search_loading
-                || self.root_search.root_file_provider_loading
-                || self.root_search.root_file_search_mode.is_some();
-            self.root_search.root_file_results.clear();
-            self.root_search.root_file_search_query.clear();
-            self.root_search.root_file_search_mode = None;
-            self.root_search.root_file_search_loading = false;
-            self.root_search.root_file_provider_loading = false;
-            self.root_search.root_file_frame = None;
-            if had_results {
-                self.root_search.root_file_search_generation =
-                    self.root_search.root_file_search_generation.wrapping_add(1);
-                self.invalidate_grouped_cache();
-                cx.notify();
-            }
-            return;
-        };
-
-        let mode = request.mode();
-        match &request {
-            RootFileSearchRequest::GlobalQuery { .. }
-                if self.root_search.root_file_search_query == request.query()
-                    && self.root_search.root_file_search_mode == Some(mode) =>
-            {
-                let cached_results = self.cached_root_file_results_for_request(&request);
-                if root_file_result_fingerprint(&self.root_search.root_file_results)
-                    != root_file_result_fingerprint(&cached_results)
-                {
-                    self.root_search.root_file_results = cached_results;
-                    self.root_search.root_file_search_loading =
-                        self.root_search.root_file_results.is_empty();
-                    self.root_search.root_file_frame = None;
-                    self.invalidate_grouped_cache();
-                }
-                // The same request can become visibly loading through a
-                // newly typed `files:` filter while its provider task is
-                // already in flight — attach the loading treatment.
-                self.ensure_main_list_loading_animation(cx);
-                return;
-            }
-            RootFileSearchRequest::DirectoryBrowse {
-                query,
-                directory,
-                show_hidden,
-            } if self.active_root_directory_browse_source_matches(directory, *show_hidden)
-                && root_directory_browse_listing_is_fresh(
-                    self.root_search.root_file_browse_listed_at,
-                    std::time::Instant::now(),
-                ) =>
-            {
-                if self.root_search.root_file_search_query != *query {
-                    self.root_search.root_file_search_query = query.clone();
-                    self.refresh_root_file_grouping_after_query_only_change(cx);
-                }
-                self.ensure_main_list_loading_animation(cx);
-                return;
-            }
-            _ => {}
-        }
-
-        self.cancel_root_file_search();
-        self.root_search.root_file_search_generation =
-            self.root_search.root_file_search_generation.wrapping_add(1);
-        let generation = self.root_search.root_file_search_generation;
-        self.root_search.root_file_search_query = request.query().to_string();
-        self.root_search.root_file_search_mode = Some(mode);
-        self.root_search.root_file_browse_listed_at =
-            matches!(&request, RootFileSearchRequest::DirectoryBrowse { .. })
-                .then(std::time::Instant::now);
-        let cached_results = self.cached_root_file_results_for_request(&request);
-        self.root_search.root_file_results = cached_results;
-        self.root_search.root_file_search_loading = self.root_search.root_file_results.is_empty();
-        self.root_search.root_file_provider_loading = true;
-        self.invalidate_grouped_cache();
-        // Start the loading clock at request acceptance, not after the
-        // debounce or the first provider event.
-        self.ensure_main_list_loading_animation(cx);
-
-        let cancel = crate::file_search::new_cancel_token();
-        self.root_search.root_file_search_cancel = Some(cancel.clone());
-        let publish_active_results = source_filters
-            .includes(crate::menu_syntax::RootUnifiedSourceFilter::Files)
-            || matches!(&request, RootFileSearchRequest::DirectoryBrowse { .. });
-        let request_cache_key = request.cache_key();
-
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(
                     ROOT_FILE_SEARCH_DEBOUNCE_MS,
                 ))
                 .await;
-
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn({
-                let cancel = cancel.clone();
-                let request = request.clone();
-                move || match request {
+            let (tx, rx) = std::sync::mpsc::channel::<MainFileWorkerEvent>();
+            if let Some(run) = owned_run.clone() {
+                cx.background_executor()
+                    .spawn(async move {
+                        run.deliver(
+                            move |result: anyhow::Result<Vec<crate::file_search::FileResult>>| {
+                                match result {
+                                    Ok(files) => {
+                                        for file in files {
+                                            let _ = tx.send(MainFileWorkerEvent::Result(file));
+                                        }
+                                        let _ = tx.send(MainFileWorkerEvent::Done);
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.send(MainFileWorkerEvent::Failed(error.into()));
+                                    }
+                                }
+                            },
+                            crate::design_evaluation::search_fixtures::file_results,
+                        )
+                        .await;
+                    })
+                    .detach();
+            } else if let Some(sources) = services.owned_sources() {
+                cx.background_executor().timer(sources.file_delay).await;
+                let files = sources
+                    .root_file_provider_files
+                    .as_deref()
+                    .unwrap_or(&sources.files);
+                let needle = request.query().to_lowercase();
+                let directory = match &request {
+                    RootFileSearchRequest::DirectoryBrowse {
+                        directory,
+                        show_hidden,
+                        ..
+                    } => crate::file_search::expand_path(directory)
+                        .map(|path| (std::path::PathBuf::from(path), *show_hidden)),
+                    _ => None,
+                };
+                for file in files.iter().filter(|file| {
+                    if let Some((directory, hidden)) = &directory {
+                        std::path::Path::new(&file.path).parent() == Some(directory.as_path())
+                            && (*hidden || !file.name.starts_with('.'))
+                    } else {
+                        file.name.to_lowercase().contains(&needle)
+                    }
+                }) {
+                    let _ = tx.send(MainFileWorkerEvent::Result(file.clone()));
+                }
+                let _ = tx.send(MainFileWorkerEvent::Done);
+            } else {
+                let producer_request = request.clone();
+                let producer_cancel = cancel.clone();
+                std::thread::spawn(move || match producer_request {
                     RootFileSearchRequest::GlobalQuery { query } => {
-                        if emit_root_file_search_test_fixture(&query, &cancel, &tx) {
+                        let mut emit = |event| {
+                            let event = match event {
+                                crate::file_search::SearchEvent::Result(file) => {
+                                    MainFileWorkerEvent::Result(file)
+                                }
+                                crate::file_search::SearchEvent::Done(Ok(())) => {
+                                    MainFileWorkerEvent::Done
+                                }
+                                crate::file_search::SearchEvent::Done(Err(error)) => {
+                                    MainFileWorkerEvent::Failed(error.into())
+                                }
+                            };
+                            let _ = tx.send(event);
+                        };
+                        if emit_root_file_search_test_fixture(&query, &producer_cancel, &mut emit) {
                             return;
                         }
-
                         let provider_query =
                             crate::file_search::root_file_provider_query_for_user_query(&query);
                         crate::file_search::search_files_streaming_with_options(
                             &provider_query,
                             None,
                             crate::file_search::ROOT_FILE_SOURCE_LIMIT,
-                            cancel,
+                            producer_cancel,
                             crate::file_search::SearchFilesStreamingOptions::root_search(),
-                            |event| {
-                                let _ = tx.send(event);
-                            },
+                            emit,
                         );
                     }
                     RootFileSearchRequest::DirectoryBrowse {
@@ -534,86 +751,178 @@ impl ScriptListApp {
                         show_hidden,
                         ..
                     } => {
-                        for result in crate::file_search::list_directory_with_options(
+                        let files = match crate::file_search::list_directory_with_options(
                             &directory,
                             crate::file_search::ROOT_FILE_BROWSE_SOURCE_LIMIT,
                             show_hidden,
                         ) {
-                            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            Ok(files) => files,
+                            Err(error) => {
+                                let _ = tx.send(MainFileWorkerEvent::Failed(error.into()));
                                 return;
                             }
-                            let _ = tx.send(crate::file_search::SearchEvent::Result(result));
+                        };
+                        for file in files {
+                            if producer_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
+                            }
+                            let _ = tx.send(MainFileWorkerEvent::Result(file));
                         }
-                        let _ = tx.send(crate::file_search::SearchEvent::Done);
+                        let _ = tx.send(MainFileWorkerEvent::Done);
                     }
-                }
-            });
-
+                });
+            }
             let mut batch = Vec::new();
-            loop {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-
+            let result = loop {
                 match rx.try_recv() {
-                    Ok(crate::file_search::SearchEvent::Result(result)) => {
-                        batch.push(result);
+                    Ok(MainFileWorkerEvent::Result(file)) => batch.push(file),
+                    Ok(MainFileWorkerEvent::Done) => {
+                        break if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            Err(MainSearchWorkerFailure::Cancelled)
+                        } else {
+                            Ok(batch)
+                        }
                     }
-                    Ok(crate::file_search::SearchEvent::Done) => break,
+                    Ok(MainFileWorkerEvent::Failed(error)) => break Err(error),
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(16))
-                            .await;
+                            .await
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err(if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            MainSearchWorkerFailure::Cancelled
+                        } else {
+                            MainSearchWorkerFailure::Disconnected
+                        });
+                    }
+                }
+            };
+            if this
+                .update(cx, |app, cx| {
+                    app.finish_root_file_worker(
+                        generation,
+                        &request,
+                        result,
+                        owned_run.as_deref(),
+                        cx,
+                    )
+                })
+                .is_err()
+            {
+                if let Some(run) = owned_run.as_deref() {
+                    run.finish(
+                        crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::CacheOnly,
+                    );
                 }
             }
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    // Ownership can change while the request is in flight
-                    // (e.g. a `files:` filter typed onto the same free text),
-                    // so the publish decision is re-evaluated now instead of
-                    // trusting the intent captured at request start.
-                    let publish_now =
-                        app.root_file_request_should_publish_now(generation, &request);
-                    tracing::debug!(
-                        event = "root_file_provider_done",
-                        query_sha256 = %crate::logging::log_private_user_value(
-                            &app.root_search.root_file_search_query
-                        ),
-                        query_bytes = app.root_search.root_file_search_query.len(),
-                        generation,
-                        publish_active_results = publish_now,
-                        requested_publish_at_start = publish_active_results,
-                        result_count = batch.len(),
-                        cache_key_sha256 = %crate::logging::log_private_user_value(
-                            &request_cache_key
-                        ),
-                        cache_key_bytes = request_cache_key.len(),
-                        visible_frame_touched = publish_now,
-                    );
-                    if publish_now {
-                        app.apply_root_file_search_results_for_generation(
-                            generation, batch, false, true, cx,
-                        );
-                    } else {
-                        app.cache_root_file_search_results_for_generation(
-                            generation,
-                            request_cache_key,
-                            batch,
-                            true,
-                        );
-                    }
-                })
-            });
         })
         .detach();
     }
+
+    fn finish_root_file_worker(
+        &mut self,
+        generation: u64,
+        request: &RootFileSearchRequest,
+        result: MainSearchWorkerResult<crate::file_search::FileResult>,
+        owned_run: Option<&crate::design_evaluation::search_fixtures::SearchRun>,
+        cx: &mut Context<Self>,
+    ) {
+        let source = request.source();
+        let current_work = self
+            .root_search
+            .named_provider_work_is_current(source, generation);
+        let accepted = self.root_search.accepts_named_provider(source, generation);
+        let can_cache = self
+            .root_search
+            .named_provider_consumer_is_live(source, generation);
+        let publish = accepted && self.root_file_request_should_publish_now(generation, request);
+        let terminal = main_search_worker_terminal(&result);
+        if let Some(run) = owned_run {
+            run.finish(
+                if can_cache {
+                    main_search_fixture_terminal(&result)
+                } else {
+                    crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded
+                },
+                if publish {
+                    RootProviderPublicationPolicy::Visible
+                } else {
+                    RootProviderPublicationPolicy::CacheOnly
+                },
+            );
+        }
+        if !current_work {
+            return;
+        }
+        let apply = |app: &mut Self, _cx: &mut Context<Self>| {
+            app.root_search.finish_named_provider(
+                source,
+                generation,
+                if can_cache {
+                    terminal
+                } else {
+                    RootProviderTerminal::StaleDiscarded
+                },
+            );
+            if app.root_search.root_file_search_generation != generation {
+                return false;
+            }
+            app.root_search.root_file_provider_loading = false;
+            app.root_search.root_file_search_loading = false;
+            app.root_search.root_file_search_cancel = None;
+            if can_cache {
+                if let Ok(results) = result {
+                    if publish {
+                        app.cache_root_file_results(request.cache_key(), results.clone());
+                        app.root_search.root_file_results = dedupe_root_file_results(results);
+                    } else {
+                        app.cache_root_file_results(request.cache_key(), results);
+                    }
+                    if matches!(request, RootFileSearchRequest::DirectoryBrowse { .. }) {
+                        app.root_search.root_file_browse_listed_at =
+                            Some(app.main_services.search_now());
+                    }
+                }
+            }
+            if publish {
+                app.root_search.root_file_frame = None;
+            }
+            true
+        };
+        if publish {
+            self.commit_main_menu_results_refresh(
+                "root_file_results_publish",
+                Some((source, generation)),
+                cx,
+                apply,
+            );
+        } else {
+            apply(self, cx);
+        }
+        let restart_files = self.root_search.take_named_provider_desired("files");
+        let restart_directory = self.root_search.take_named_provider_desired("directory");
+        if restart_files || restart_directory {
+            self.refresh_root_file_source(cx);
+        } else if !can_cache && self.root_search.root_file_search_generation == generation {
+            self.root_search.root_file_search_query.clear();
+        }
+    }
 }
 
-fn root_file_result_fingerprint(files: &[crate::file_search::FileResult]) -> Vec<&str> {
-    files.iter().map(|file| file.path.as_str()).collect()
+fn root_file_results_equal(
+    left: &[crate::file_search::FileResult],
+    right: &[crate::file_search::FileResult],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            a.path == b.path
+                && a.name == b.name
+                && a.size == b.size
+                && a.modified == b.modified
+                && a.file_type == b.file_type
+        })
 }
 
 /// How long a same-directory browse may serve its cached readdir listing
@@ -661,6 +970,66 @@ fn root_file_visible_loading_decision(
 mod loading_decision_tests {
     use super::{root_file_visible_loading_decision, *};
     use crate::file_search::RootFileSectionMode;
+
+    #[test]
+    fn worker_control_outcomes_do_not_reclassify_native_io_errors() {
+        for kind in [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let result: MainSearchWorkerResult<()> =
+                Err(std::io::Error::new(kind, "native source read").into());
+            assert_eq!(
+                main_search_worker_terminal(&result),
+                RootProviderTerminal::Failed
+            );
+        }
+        let unavailable: MainSearchWorkerResult<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "native source unavailable",
+        )
+        .into());
+        assert_eq!(
+            main_search_worker_terminal(&unavailable),
+            RootProviderTerminal::Unavailable
+        );
+        assert_eq!(
+            main_search_worker_terminal::<()>(&Err(MainSearchWorkerFailure::Cancelled)),
+            RootProviderTerminal::Cancelled
+        );
+        assert_eq!(
+            main_search_worker_terminal::<()>(&Err(MainSearchWorkerFailure::Disconnected)),
+            RootProviderTerminal::Disconnected
+        );
+    }
+
+    #[test]
+    fn file_semantics_include_equal_length_name_and_metadata_changes() {
+        let original = crate::file_search::FileResult {
+            path: "/owned/launch.md".into(),
+            name: "Alpha".into(),
+            size: 5,
+            modified: 1,
+            file_type: crate::file_search::FileType::Document,
+        };
+        let mut changed = original.clone();
+        changed.name = "Bravo".into();
+        assert!(!root_file_results_equal(
+            std::slice::from_ref(&original),
+            std::slice::from_ref(&changed)
+        ));
+        changed = original.clone();
+        changed.modified = 2;
+        assert!(!root_file_results_equal(
+            std::slice::from_ref(&original),
+            std::slice::from_ref(&changed)
+        ));
+        assert!(root_file_results_equal(
+            std::slice::from_ref(&original),
+            std::slice::from_ref(&original)
+        ));
+    }
 
     /// Chaos battery 05: same-directory fragment typing must reuse the cached
     /// readdir listing only within the refresh TTL; a never-listed browse and
@@ -748,120 +1117,6 @@ mod loading_decision_tests {
             );
         }
     }
-
-    /// Hard rule (user, 2026-07-20): while the user has not moved selection,
-    /// focus is pinned to the FIRST item — a late provider publish that
-    /// injects rows above must snap selection to the new first row, never
-    /// leave it stranded mid-list on the previously painted identity.
-    /// (OF-32 identity preservation applies only after deliberate movement;
-    /// see `same_query_root_file_publish_preserves_user_moved_selection`.)
-    #[gpui::test]
-    fn same_query_root_file_publish_snaps_untouched_selection_to_first(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let app = main_menu_selection_test_app(cx);
-        app.update(cx, |app, cx| {
-            let query = "zzlauncherrefreshprobe";
-            let painted_key = "fallback/root-file-search-handoff/global";
-            app.scripts = vec![main_menu_selection_test_script(
-                "zzlauncherrefreshprobe first",
-            )];
-            app.scriptlets.clear();
-            app.skills.clear();
-            app.apps.clear();
-            app.computed_filter_text = query.to_string();
-            app.filter_text = query.to_string();
-            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(query);
-            app.root_search.root_file_search_generation = 40;
-            app.root_search.root_file_search_mode =
-                Some(crate::file_search::RootFileSectionMode::GlobalQuery);
-            app.root_search.root_file_search_query = query.to_string();
-            app.root_search.root_file_search_loading = true;
-            app.root_search.root_file_provider_loading = true;
-            app.invalidate_grouped_cache();
-            app.get_grouped_results_cached();
-            app.selected_index = app
-                .main_menu_result_caches
-                .grouped_index_for_stable_selection_key(painted_key)
-                .expect("same query should include the painted Search Files handoff");
-            assert!(!app.main_menu_selection_user_moved);
-            assert_eq!(
-                selected_main_menu_stable_key(app).as_deref(),
-                Some(painted_key)
-            );
-
-            app.apply_root_file_search_results_for_generation(
-                40,
-                vec![crate::file_search::FileResult {
-                    path: "/tmp/zzlauncherrefreshprobe.txt".to_string(),
-                    name: "zzlauncherrefreshprobe.txt".to_string(),
-                    size: 1,
-                    modified: 1,
-                    file_type: crate::file_search::FileType::File,
-                }],
-                false,
-                true,
-                cx,
-            );
-
-            assert_eq!(
-                selected_main_menu_stable_key(app),
-                first_selectable_main_menu_stable_key(app),
-                "late same-query results must keep untouched selection pinned to the first row"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn same_query_root_file_publish_preserves_user_moved_selection(cx: &mut gpui::TestAppContext) {
-        let app = main_menu_selection_test_app(cx);
-        app.update(cx, |app, cx| {
-            let query = "zzlauncherrefreshprobe";
-            let handoff_key = "fallback/root-file-search-handoff/global";
-            app.scripts = vec![main_menu_selection_test_script(
-                "zzlauncherrefreshprobe first",
-            )];
-            app.scriptlets.clear();
-            app.skills.clear();
-            app.apps.clear();
-            app.computed_filter_text = query.to_string();
-            app.filter_text = query.to_string();
-            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(query);
-            app.root_search.root_file_search_generation = 41;
-            app.root_search.root_file_search_mode =
-                Some(crate::file_search::RootFileSectionMode::GlobalQuery);
-            app.root_search.root_file_search_query = query.to_string();
-            app.root_search.root_file_search_loading = true;
-            app.root_search.root_file_provider_loading = true;
-            app.invalidate_grouped_cache();
-            app.get_grouped_results_cached();
-            app.selected_index = app
-                .main_menu_result_caches
-                .grouped_index_for_stable_selection_key(handoff_key)
-                .expect("same query should include the Search Files handoff");
-            app.mark_main_menu_selection_user_moved();
-            let selected_before = selected_main_menu_stable_key(app);
-
-            app.apply_root_file_search_results_for_generation(
-                41,
-                vec![crate::file_search::FileResult {
-                    path: "/tmp/zzlauncherrefreshprobe.txt".to_string(),
-                    name: "zzlauncherrefreshprobe.txt".to_string(),
-                    size: 1,
-                    modified: 1,
-                    file_type: crate::file_search::FileType::File,
-                }],
-                false,
-                true,
-                cx,
-            );
-
-            let selected_after = selected_main_menu_stable_key(app);
-            assert_eq!(selected_before.as_deref(), Some(handoff_key));
-            assert_eq!(selected_after, selected_before);
-            assert_ne!(selected_after, first_selectable_main_menu_stable_key(app));
-        });
-    }
 }
 
 fn dedupe_root_file_results(
@@ -915,7 +1170,7 @@ fn default_root_file_test_delay_ms() -> u64 {
 fn emit_root_file_search_test_fixture(
     query: &str,
     cancel: &crate::file_search::CancelToken,
-    tx: &std::sync::mpsc::Sender<crate::file_search::SearchEvent>,
+    emit: &mut impl FnMut(crate::file_search::SearchEvent),
 ) -> bool {
     let Ok(raw) = std::env::var("SCRIPT_KIT_ROOT_FILE_SEARCH_TEST_PROVIDER") else {
         return false;
@@ -936,7 +1191,7 @@ fn emit_root_file_search_test_fixture(
         } => {
             let found = fixtures.into_iter().find(|fixture| fixture.query == query);
             if found.is_none() && !passthrough_unmatched {
-                let _ = tx.send(crate::file_search::SearchEvent::Done);
+                emit(crate::file_search::SearchEvent::Done(Ok(())));
                 return true;
             }
             found
@@ -948,18 +1203,24 @@ fn emit_root_file_search_test_fixture(
 
     std::thread::sleep(std::time::Duration::from_millis(fixture.delay_ms));
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        emit(crate::file_search::SearchEvent::Done(Err(
+            crate::file_search::SearchFailure::Cancelled,
+        )));
         return true;
     }
 
     for result in fixture.results {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            emit(crate::file_search::SearchEvent::Done(Err(
+                crate::file_search::SearchFailure::Cancelled,
+            )));
             return true;
         }
-        let _ = tx.send(crate::file_search::SearchEvent::Result(
+        emit(crate::file_search::SearchEvent::Result(
             result.into_file_result(),
         ));
     }
-    let _ = tx.send(crate::file_search::SearchEvent::Done);
+    emit(crate::file_search::SearchEvent::Done(Ok(())));
     true
 }
 
@@ -1020,6 +1281,155 @@ fn spotlight_indexable_scope(path: &std::path::Path) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
+enum SpineFileSearchRequest {
+    GlobalQuery(String),
+    GlobalRecents(Option<String>),
+    ProjectQuery { query: String, scope: String },
+    ProjectRecents(String),
+}
+
+impl SpineFileSearchRequest {
+    fn key(&self) -> String {
+        match self {
+            Self::GlobalQuery(query) => query.clone(),
+            Self::GlobalRecents(scope) => format!(
+                "{SPINE_FILE_RECENTS_SENTINEL}\u{1f}{}",
+                scope.as_deref().unwrap_or("global")
+            ),
+            Self::ProjectQuery { query, scope } => format!(
+                "{SPINE_PROJECT_SEARCH_KEY_PREFIX}{}:{scope}{query}",
+                scope.len()
+            ),
+            Self::ProjectRecents(scope) => {
+                format!("{SPINE_PROJECT_RECENTS_SENTINEL_PREFIX}{scope}")
+            }
+        }
+    }
+
+    fn scope(&self) -> &str {
+        match self {
+            Self::GlobalQuery(_) => "global",
+            Self::GlobalRecents(scope) => scope.as_deref().unwrap_or("global"),
+            Self::ProjectQuery { scope, .. } | Self::ProjectRecents(scope) => scope,
+        }
+    }
+
+    fn query(&self) -> &str {
+        match self {
+            Self::GlobalQuery(query) | Self::ProjectQuery { query, .. } => query,
+            Self::GlobalRecents(_) | Self::ProjectRecents(_) => "",
+        }
+    }
+
+    fn recents(&self) -> bool {
+        matches!(self, Self::GlobalRecents(_) | Self::ProjectRecents(_))
+    }
+
+    fn emit(
+        &self,
+        cancel: crate::file_search::CancelToken,
+        tx: std::sync::mpsc::Sender<MainFileWorkerEvent>,
+    ) {
+        use crate::file_search::{SearchEvent, SearchFilesStreamingOptions};
+        let mut hits = 0;
+        let mut completion = Ok(());
+        let mut emit = |event| match event {
+            SearchEvent::Result(file) => {
+                if !self.recents() || !crate::file_search::is_noisy_recent_file_path(&file.path) {
+                    hits += 1;
+                    let _ = tx.send(MainFileWorkerEvent::Result(file));
+                }
+            }
+            SearchEvent::Done(result) => completion = result,
+        };
+        match self {
+            Self::GlobalQuery(query) => {
+                if !emit_root_file_search_test_fixture(query, &cancel, &mut emit) {
+                    let query = crate::file_search::root_file_provider_query_for_user_query(query);
+                    crate::file_search::search_files_streaming_with_options(
+                        &query,
+                        None,
+                        crate::file_search::ROOT_FILE_SOURCE_LIMIT,
+                        cancel.clone(),
+                        SearchFilesStreamingOptions::root_search(),
+                        &mut emit,
+                    );
+                }
+            }
+            Self::ProjectQuery { query, scope } => {
+                crate::file_search::search_files_streaming_with_options(
+                    query,
+                    Some(scope),
+                    crate::file_search::ROOT_FILE_SOURCE_LIMIT,
+                    cancel.clone(),
+                    SearchFilesStreamingOptions {
+                        skip_metadata: true,
+                        allow_filesystem_fallback: true,
+                    },
+                    &mut emit,
+                )
+            }
+            Self::GlobalRecents(scope) => crate::file_search::search_files_streaming_with_options(
+                crate::file_search::RECENTLY_USED_FILES_MDQUERY,
+                scope.as_deref(),
+                crate::file_search::RECENTLY_USED_FILES_SOURCE_LIMIT,
+                cancel.clone(),
+                SearchFilesStreamingOptions {
+                    skip_metadata: false,
+                    allow_filesystem_fallback: false,
+                },
+                &mut emit,
+            ),
+            Self::ProjectRecents(scope) => {
+                if let Some(spotlight_scope) =
+                    spotlight_indexable_scope(std::path::Path::new(scope))
+                {
+                    crate::file_search::search_files_streaming_with_options(
+                        crate::file_search::RECENTLY_USED_FILES_MDQUERY,
+                        Some(&spotlight_scope),
+                        crate::file_search::RECENTLY_USED_FILES_SOURCE_LIMIT,
+                        cancel.clone(),
+                        SearchFilesStreamingOptions {
+                            skip_metadata: false,
+                            allow_filesystem_fallback: false,
+                        },
+                        &mut emit,
+                    );
+                }
+                if completion.is_ok()
+                    && hits == 0
+                    && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    match crate::file_search::recent_files_filesystem(
+                        std::path::Path::new(scope),
+                        crate::file_search::ROOT_FILE_RECENT_SEED_LIMIT,
+                    ) {
+                        Ok(files) => {
+                            for file in files {
+                                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
+                                let _ = tx.send(MainFileWorkerEvent::Result(file));
+                            }
+                        }
+                        Err(error) => completion = Err(error.into()),
+                    }
+                }
+            }
+        }
+        let terminal = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            MainFileWorkerEvent::Failed(MainSearchWorkerFailure::Cancelled)
+        } else {
+            match completion {
+                Ok(()) => MainFileWorkerEvent::Done,
+                Err(error) => MainFileWorkerEvent::Failed(error.into()),
+            }
+        };
+        let _ = tx.send(terminal);
+    }
+}
+
 impl ScriptListApp {
     // ── Spine @file: subsearch ───────────────────────────────────────
 
@@ -1031,17 +1441,18 @@ impl ScriptListApp {
 
     fn clear_spine_file_subsearch_state(&mut self, cx: &mut Context<Self>) {
         self.cancel_spine_file_subsearch();
-        let had_state = !self.spine_file_search_query.is_empty()
-            || !self.spine_file_search_results.is_empty()
-            || self.spine_file_search_loading;
-        self.spine_file_search_query.clear();
-        self.spine_file_search_results.clear();
-        self.spine_file_search_loading = false;
-        if had_state {
-            self.spine_file_search_generation = self.spine_file_search_generation.wrapping_add(1);
-            self.invalidate_grouped_cache();
-            cx.notify();
+        if self.spine_file_search_query.is_empty()
+            && self.spine_file_search_results.is_empty()
+            && !self.spine_file_search_loading
+        {
+            return;
         }
+        self.commit_main_menu_results_refresh("spine_file_scope_cleared", None, cx, |app, _cx| {
+            app.spine_file_search_query.clear();
+            app.spine_file_search_results.clear();
+            app.spine_file_search_loading = false;
+            true
+        });
     }
 
     pub(crate) fn active_spine_context_subsearch(
@@ -1053,7 +1464,7 @@ impl ScriptListApp {
         if !self.spine_projection_owns_main_list() {
             return None;
         }
-        let projection = self.spine_projection.as_ref()?;
+        let projection = self.root_search.computed_spine_projection()?;
         match &projection.active_segment_kind {
             crate::spine::SpineSegmentKind::ContextMention {
                 context_type,
@@ -1073,19 +1484,52 @@ impl ScriptListApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
+        self.start_spine_file_subsearch_for_current_projection(false, cx);
+    }
+
+    pub(crate) fn refresh_spine_file_source(&mut self, cx: &mut Context<Self>) {
+        self.start_spine_file_subsearch_for_current_projection(true, cx);
+    }
+
+    fn start_spine_file_subsearch_for_current_projection(
+        &mut self,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_search.query_is_current() {
+            return;
+        }
         let Some((source, query)) = self.active_spine_context_subsearch() else {
             self.clear_spine_file_subsearch_state(cx);
             return;
         };
-        match source {
-            crate::spine::catalog_subsearch::ContextSubsearchSource::File => {
-                self.maybe_start_spine_file_subsearch(&query, cx);
+        use crate::spine::catalog_subsearch::ContextSubsearchSource;
+        let query = query.trim().to_string();
+        let request = match (source, query.is_empty()) {
+            (ContextSubsearchSource::File, false) => SpineFileSearchRequest::GlobalQuery(query),
+            (ContextSubsearchSource::File, true) => SpineFileSearchRequest::GlobalRecents(
+                self.spine_cwd
+                    .as_deref()
+                    .and_then(spotlight_indexable_scope)
+                    .or_else(|| dirs::home_dir().map(|home| home.to_string_lossy().to_string())),
+            ),
+            (ContextSubsearchSource::Project, empty) => {
+                let Some(scope) = self.spine_project_scope_dir() else {
+                    self.clear_spine_file_subsearch_state(cx);
+                    return;
+                };
+                if empty {
+                    SpineFileSearchRequest::ProjectRecents(scope)
+                } else {
+                    SpineFileSearchRequest::ProjectQuery { query, scope }
+                }
             }
-            crate::spine::catalog_subsearch::ContextSubsearchSource::Project => {
-                self.maybe_start_spine_project_subsearch(&query, cx);
+            _ => {
+                self.clear_spine_file_subsearch_state(cx);
+                return;
             }
-            _ => self.clear_spine_file_subsearch_state(cx),
-        }
+        };
+        self.start_spine_file_worker(request, force, cx);
     }
 
     /// Directory the `@project:` subsearch is scoped to: the global cwd chip,
@@ -1097,399 +1541,255 @@ impl ScriptListApp {
             .or_else(|| dirs::home_dir().map(|home| home.to_string_lossy().to_string()))
     }
 
-    fn maybe_start_spine_file_subsearch(&mut self, query: &str, cx: &mut Context<Self>) {
-        let query = query.trim();
-        if query.is_empty() {
-            // A3 recent-files decision (2026-06-09): an empty `@file:`
-            // sub-query seeds Spotlight recently-used files instead of
-            // clearing, so the colon-mode landing state shows real recents.
-            self.maybe_start_spine_file_recents_search(cx);
-            return;
-        }
-        if self.spine_file_search_query == query {
-            return;
-        }
-
-        self.cancel_spine_file_subsearch();
-        self.spine_file_search_generation = self.spine_file_search_generation.wrapping_add(1);
-        let generation = self.spine_file_search_generation;
-        self.spine_file_search_query = query.to_string();
-        self.spine_file_search_loading = true;
-        self.spine_file_search_results.clear();
-        self.invalidate_grouped_cache();
-        cx.notify();
-
-        let cancel = crate::file_search::new_cancel_token();
-        self.spine_file_search_cancel = Some(cancel.clone());
-        let query_owned = query.to_string();
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(
-                    SPINE_FILE_SEARCH_DEBOUNCE_MS,
-                ))
-                .await;
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn({
-                let cancel = cancel.clone();
-                let query_owned = query_owned.clone();
-                move || {
-                    if emit_root_file_search_test_fixture(&query_owned, &cancel, &tx) {
-                        return;
-                    }
-                    let provider_query =
-                        crate::file_search::root_file_provider_query_for_user_query(&query_owned);
-                    // The spine cwd is the agent's working directory, not a
-                    // search filter. Typed `@file:` sub-queries search
-                    // globally, matching the "Open full File Search" portal
-                    // row rendered alongside these results — scoping mdfind
-                    // to the cwd (always set since the global cwd chip
-                    // landed, defaulting to `~/.scriptkit`, which Spotlight
-                    // does not index) emptied every inline result.
-                    crate::file_search::search_files_streaming_with_options(
-                        &provider_query,
+    fn start_spine_file_worker(
+        &mut self,
+        request: SpineFileSearchRequest,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let key = request.key();
+        if self.root_search.named_provider_in_flight("spine") {
+            if force
+                || !self.root_search.named_provider_work_matches(
+                    "spine",
+                    self.spine_file_search_generation,
+                    &key,
+                    request.scope(),
+                )
+            {
+                if force {
+                    self.root_search
+                        .detach_named_provider_consumer("spine", self.spine_file_search_generation);
+                }
+                self.root_search.note_desired_provider(
+                    "spine",
+                    &key,
+                    request.scope(),
+                    RootProviderPublicationPolicy::Visible,
+                );
+                self.cancel_spine_file_subsearch();
+                if self.spine_file_search_query != key || !self.spine_file_search_loading {
+                    self.commit_main_menu_results_refresh(
+                        "spine_file_waiting_for_worker",
                         None,
-                        crate::file_search::ROOT_FILE_SOURCE_LIMIT,
-                        cancel,
-                        crate::file_search::SearchFilesStreamingOptions::root_search(),
-                        |event| {
-                            let _ = tx.send(event);
+                        cx,
+                        |app, _cx| {
+                            if app.spine_file_search_query != key {
+                                app.spine_file_search_results.clear();
+                            }
+                            app.spine_file_search_query = key;
+                            app.spine_file_search_loading = true;
+                            true
                         },
                     );
                 }
-            });
-
-            let mut batch = Vec::new();
-            loop {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                match rx.try_recv() {
-                    Ok(crate::file_search::SearchEvent::Result(result)) => {
-                        batch.push(result);
-                    }
-                    Ok(crate::file_search::SearchEvent::Done) => break,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(16))
-                            .await;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                }
             }
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    app.apply_spine_file_subsearch_results(generation, batch, cx);
-                })
-            });
-        })
-        .detach();
-    }
-
-    /// Kick the async Spotlight "recently used files" seed for the empty
-    /// `@file:` colon mode. Results merge after frecency recents in
-    /// `build_rich_file_subsearch_rows`.
-    fn maybe_start_spine_file_recents_search(&mut self, cx: &mut Context<Self>) {
-        if self.spine_file_search_query == SPINE_FILE_RECENTS_SENTINEL {
             return;
         }
-
-        self.cancel_spine_file_subsearch();
-        self.spine_file_search_generation = self.spine_file_search_generation.wrapping_add(1);
-        let generation = self.spine_file_search_generation;
-        self.spine_file_search_query = SPINE_FILE_RECENTS_SENTINEL.to_string();
-        self.spine_file_search_loading = true;
-        self.spine_file_search_results.clear();
-        self.invalidate_grouped_cache();
-        cx.notify();
-
+        if !force && self.spine_file_search_query == key {
+            return;
+        }
+        let generation = self.root_search.allocate_named_provider_generation("spine");
         let cancel = crate::file_search::new_cancel_token();
-        self.spine_file_search_cancel = Some(cancel.clone());
-        // Recents may scope to the picked cwd (a project-local landing state
-        // is useful), but only when Spotlight can actually serve it; hidden
-        // dot-directories like the default `~/.scriptkit` are unindexed and
-        // would yield a permanently empty "Recent Files" section.
-        let onlyin = self
-            .spine_cwd
-            .as_deref()
-            .and_then(spotlight_indexable_scope)
-            .or_else(|| dirs::home_dir().map(|home| home.to_string_lossy().to_string()));
-
-        cx.spawn(async move |this, cx| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn({
-                let cancel = cancel.clone();
-                let onlyin = onlyin.clone();
-                move || {
-                    crate::file_search::search_files_streaming_with_options(
-                        crate::file_search::RECENTLY_USED_FILES_MDQUERY,
-                        onlyin.as_deref(),
-                        crate::file_search::RECENTLY_USED_FILES_SOURCE_LIMIT,
-                        cancel,
-                        crate::file_search::SearchFilesStreamingOptions {
-                            // Need real modified timestamps to order recents.
-                            skip_metadata: false,
-                            allow_filesystem_fallback: false,
-                        },
-                        |event| {
-                            let _ = tx.send(event);
-                        },
+        self.commit_main_menu_results_refresh("spine_file_search_started", None, cx, |app, _cx| {
+            app.root_search.begin_named_provider(
+                "spine",
+                generation,
+                &key,
+                request.scope(),
+                RootProviderPublicationPolicy::Visible,
+                true,
+            );
+            app.spine_file_search_generation = generation;
+            if app.spine_file_search_query != key {
+                app.spine_file_search_results.clear();
+            }
+            app.spine_file_search_query = key;
+            app.spine_file_search_loading = true;
+            app.spine_file_search_cancel = Some(cancel.clone());
+            true
+        });
+        let services = self.main_services.clone();
+        let owned_run = if let Some(gate) = services.search_gate() {
+            match gate.begin(
+                "spine",
+                request.query(),
+                generation,
+                RootProviderPublicationPolicy::Visible,
+            ) {
+                Some(run) => Some(Arc::new(run)),
+                None => {
+                    self.finish_spine_file_worker(
+                        generation,
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "spine_fixture_source_unavailable",
+                        )
+                        .into()),
+                        None,
+                        cx,
                     );
-                }
-            });
-
-            let mut batch = Vec::new();
-            loop {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                match rx.try_recv() {
-                    Ok(crate::file_search::SearchEvent::Result(result)) => {
-                        if !crate::file_search::is_noisy_recent_file_path(&result.path) {
-                            batch.push(result);
-                        }
-                    }
-                    Ok(crate::file_search::SearchEvent::Done) => break,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(16))
-                            .await;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                }
             }
-
-            batch.sort_by(|a, b| b.modified.cmp(&a.modified));
-            batch.truncate(crate::file_search::ROOT_FILE_RECENT_SEED_LIMIT);
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    app.apply_spine_file_subsearch_results(generation, batch, cx);
-                })
-            });
-        })
-        .detach();
-    }
-
-    /// Typed `@project:` sub-query: mdfind scoped to the cwd, with the
-    /// filesystem-walk fallback so Spotlight-blind dot-directory cwds
-    /// (`~/.scriptkit`) still return results. The raw query is passed
-    /// through (no provider-query rewrite) so the fallback stays eligible.
-    fn maybe_start_spine_project_subsearch(&mut self, query: &str, cx: &mut Context<Self>) {
-        let query = query.trim();
-        if query.is_empty() {
-            self.maybe_start_spine_project_recents_search(cx);
-            return;
-        }
-        let Some(scope) = self.spine_project_scope_dir() else {
-            self.clear_spine_file_subsearch_state(cx);
-            return;
+        } else {
+            None
         };
-        let dedup_key = format!("{SPINE_PROJECT_SEARCH_KEY_PREFIX}{scope}\u{1f}{query}");
-        if self.spine_file_search_query == dedup_key {
-            return;
-        }
-
-        self.cancel_spine_file_subsearch();
-        self.spine_file_search_generation = self.spine_file_search_generation.wrapping_add(1);
-        let generation = self.spine_file_search_generation;
-        self.spine_file_search_query = dedup_key;
-        self.spine_file_search_loading = true;
-        self.spine_file_search_results.clear();
-        self.invalidate_grouped_cache();
-        cx.notify();
-
-        let cancel = crate::file_search::new_cancel_token();
-        self.spine_file_search_cancel = Some(cancel.clone());
-        let query_owned = query.to_string();
-
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(
-                    SPINE_FILE_SEARCH_DEBOUNCE_MS,
-                ))
-                .await;
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
+            if !request.recents() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(
+                        SPINE_FILE_SEARCH_DEBOUNCE_MS,
+                    ))
+                    .await;
             }
-
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn({
-                let cancel = cancel.clone();
-                let query_owned = query_owned.clone();
-                let scope = scope.clone();
-                move || {
-                    crate::file_search::search_files_streaming_with_options(
-                        &query_owned,
-                        Some(&scope),
-                        crate::file_search::ROOT_FILE_SOURCE_LIMIT,
-                        cancel,
-                        crate::file_search::SearchFilesStreamingOptions {
-                            skip_metadata: true,
-                            allow_filesystem_fallback: true,
-                        },
-                        |event| {
-                            let _ = tx.send(event);
-                        },
-                    );
-                }
-            });
-
-            let mut batch = Vec::new();
-            loop {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                match rx.try_recv() {
-                    Ok(crate::file_search::SearchEvent::Result(result)) => {
-                        batch.push(result);
-                    }
-                    Ok(crate::file_search::SearchEvent::Done) => break,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(16))
-                            .await;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                }
-            }
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    app.apply_spine_file_subsearch_results(generation, batch, cx);
-                })
-            });
-        })
-        .detach();
-    }
-
-    /// Empty `@project:` landing state: Spotlight recently-used files scoped
-    /// to the cwd when Spotlight can serve it, else (and when Spotlight
-    /// returns nothing) a bounded filesystem walk sorted by mtime.
-    fn maybe_start_spine_project_recents_search(&mut self, cx: &mut Context<Self>) {
-        let Some(scope) = self.spine_project_scope_dir() else {
-            self.clear_spine_file_subsearch_state(cx);
-            return;
-        };
-        let sentinel = format!("{SPINE_PROJECT_RECENTS_SENTINEL_PREFIX}{scope}");
-        if self.spine_file_search_query == sentinel {
-            return;
-        }
-
-        self.cancel_spine_file_subsearch();
-        self.spine_file_search_generation = self.spine_file_search_generation.wrapping_add(1);
-        let generation = self.spine_file_search_generation;
-        self.spine_file_search_query = sentinel;
-        self.spine_file_search_loading = true;
-        self.spine_file_search_results.clear();
-        self.invalidate_grouped_cache();
-        cx.notify();
-
-        let cancel = crate::file_search::new_cancel_token();
-        self.spine_file_search_cancel = Some(cancel.clone());
-        let spotlight_scope = spotlight_indexable_scope(std::path::Path::new(&scope));
-
-        cx.spawn(async move |this, cx| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn({
-                let cancel = cancel.clone();
-                let scope = scope.clone();
-                move || {
-                    let mut spotlight_hits = 0usize;
-                    if let Some(spotlight_scope) = &spotlight_scope {
-                        crate::file_search::search_files_streaming_with_options(
-                            crate::file_search::RECENTLY_USED_FILES_MDQUERY,
-                            Some(spotlight_scope),
-                            crate::file_search::RECENTLY_USED_FILES_SOURCE_LIMIT,
-                            cancel,
-                            crate::file_search::SearchFilesStreamingOptions {
-                                skip_metadata: false,
-                                allow_filesystem_fallback: false,
-                            },
-                            |event| {
-                                if let crate::file_search::SearchEvent::Result(result) = event {
-                                    if !crate::file_search::is_noisy_recent_file_path(&result.path)
-                                    {
-                                        spotlight_hits += 1;
-                                        let _ = tx
-                                            .send(crate::file_search::SearchEvent::Result(result));
+            if let Some(run) = owned_run.clone() {
+                cx.background_executor()
+                    .spawn(async move {
+                        run.deliver(
+                            move |result: anyhow::Result<Vec<crate::file_search::FileResult>>| {
+                                match result {
+                                    Ok(files) => {
+                                        for file in files {
+                                            let _ = tx.send(MainFileWorkerEvent::Result(file));
+                                        }
+                                        let _ = tx.send(MainFileWorkerEvent::Done);
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.send(MainFileWorkerEvent::Failed(error.into()));
                                     }
                                 }
                             },
-                        );
+                            crate::design_evaluation::search_fixtures::file_results,
+                        )
+                        .await;
+                    })
+                    .detach();
+            } else if let Some(sources) = services.owned_sources() {
+                cx.background_executor().timer(sources.file_delay).await;
+                let needle = request.query().to_lowercase();
+                for file in &sources.files {
+                    if file.name.to_lowercase().contains(&needle) {
+                        let _ = tx.send(MainFileWorkerEvent::Result(file.clone()));
                     }
-                    if spotlight_hits == 0 {
-                        for result in crate::file_search::recent_files_filesystem(
-                            std::path::Path::new(&scope),
-                            crate::file_search::ROOT_FILE_RECENT_SEED_LIMIT,
-                        ) {
-                            let _ = tx.send(crate::file_search::SearchEvent::Result(result));
+                }
+                let _ = tx.send(MainFileWorkerEvent::Done);
+            } else {
+                let request = request.clone();
+                let cancel = cancel.clone();
+                std::thread::spawn(move || request.emit(cancel, tx));
+            }
+            let mut batch = Vec::new();
+            let result = loop {
+                match rx.try_recv() {
+                    Ok(MainFileWorkerEvent::Result(file)) => {
+                        if !request.recents()
+                            || !crate::file_search::is_noisy_recent_file_path(&file.path)
+                        {
+                            batch.push(file);
                         }
                     }
-                    let _ = tx.send(crate::file_search::SearchEvent::Done);
-                }
-            });
-
-            let mut batch = Vec::new();
-            loop {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                match rx.try_recv() {
-                    Ok(crate::file_search::SearchEvent::Result(result)) => {
-                        batch.push(result);
+                    Ok(MainFileWorkerEvent::Done) => {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break Err(MainSearchWorkerFailure::Cancelled);
+                        }
+                        if request.recents() {
+                            batch.sort_by_key(|file| std::cmp::Reverse(file.modified));
+                            batch.truncate(crate::file_search::ROOT_FILE_RECENT_SEED_LIMIT);
+                        }
+                        break Ok(batch);
                     }
-                    Ok(crate::file_search::SearchEvent::Done) => break,
+                    Ok(MainFileWorkerEvent::Failed(error)) => break Err(error),
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(16))
-                            .await;
+                            .await
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err(if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            MainSearchWorkerFailure::Cancelled
+                        } else {
+                            MainSearchWorkerFailure::Disconnected
+                        })
+                    }
+                }
+            };
+            if this
+                .update(cx, |app, cx| {
+                    app.finish_spine_file_worker(generation, result, owned_run.as_deref(), cx)
+                })
+                .is_err()
+            {
+                if let Some(run) = owned_run.as_deref() {
+                    run.finish(
+                        crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded,
+                        RootProviderPublicationPolicy::Visible,
+                    );
                 }
             }
-
-            batch.sort_by(|a, b| b.modified.cmp(&a.modified));
-            batch.truncate(crate::file_search::ROOT_FILE_RECENT_SEED_LIMIT);
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |app, cx| {
-                    app.apply_spine_file_subsearch_results(generation, batch, cx);
-                })
-            });
         })
         .detach();
     }
 
-    fn apply_spine_file_subsearch_results(
+    fn finish_spine_file_worker(
         &mut self,
         generation: u64,
-        results: Vec<crate::file_search::FileResult>,
+        result: MainSearchWorkerResult<crate::file_search::FileResult>,
+        owned_run: Option<&crate::design_evaluation::search_fixtures::SearchRun>,
         cx: &mut Context<Self>,
     ) {
-        if self.spine_file_search_generation != generation {
-            return;
-        }
-        let interaction_before = matches!(self.current_view, AppView::ScriptList)
-            .then(|| self.main_menu_interaction_snapshot());
-        let results = dedupe_root_file_results(results);
-        self.spine_file_search_results = results;
-        self.spine_file_search_loading = false;
-        self.spine_file_search_cancel = None;
-        self.invalidate_grouped_cache();
-        if let Some(interaction_before) = interaction_before {
-            self.reconcile_script_list_after_results_refresh(
-                "spine_file_subsearch_results",
-                interaction_before,
-                cx,
+        let accepted = self.root_search.accepts_named_provider("spine", generation)
+            && self.spine_file_search_generation == generation;
+        if let Some(run) = owned_run {
+            run.finish(
+                if accepted {
+                    main_search_fixture_terminal(&result)
+                } else {
+                    crate::design_evaluation::search_fixtures::ProviderTerminal::StaleDiscarded
+                },
+                RootProviderPublicationPolicy::Visible,
             );
         }
-        cx.notify();
+        if !self
+            .root_search
+            .named_provider_work_is_current("spine", generation)
+        {
+            return;
+        }
+        if accepted {
+            let terminal = main_search_worker_terminal(&result);
+            self.commit_main_menu_results_refresh(
+                "spine_file_results_complete",
+                Some(("spine", generation)),
+                cx,
+                |app, _cx| {
+                    app.root_search
+                        .finish_named_provider("spine", generation, terminal);
+                    app.spine_file_search_loading = false;
+                    app.spine_file_search_cancel = None;
+                    if let Ok(results) = result {
+                        app.spine_file_search_results = dedupe_root_file_results(results);
+                    }
+                    true
+                },
+            );
+        } else {
+            self.root_search.finish_named_provider(
+                "spine",
+                generation,
+                RootProviderTerminal::StaleDiscarded,
+            );
+            if self.spine_file_search_generation == generation {
+                self.spine_file_search_loading = false;
+                self.spine_file_search_cancel = None;
+            }
+        }
+        if self.root_search.take_named_provider_desired("spine") {
+            self.refresh_spine_file_source(cx);
+        } else if !accepted && self.spine_file_search_generation == generation {
+            self.spine_file_search_query.clear();
+        }
     }
 }
 

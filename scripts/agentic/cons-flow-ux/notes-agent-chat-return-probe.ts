@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
@@ -12,9 +13,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 assertNoninteractiveVisualProbe("cons-flow-ux.notes-agent-chat-return");
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../../..");
-const BINARY =
-  process.env.PROBE_BINARY ??
-  join(PROJECT_ROOT, "target-agent/artifacts/cons-flow-c09/script-kit-gpui");
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_PATH = join(PROJECT_ROOT, ".test-output", "cons-flow-c09", "notes-agent-chat-return.json");
 const NOTES_TARGET = { type: "kind", kind: "notes", index: 0 };
 const runId = `notes-ai-return-${Date.now().toString(36)}`;
@@ -90,19 +89,17 @@ async function gpuiKey(driver: Driver, target: Json, key: string, modifiers: str
   );
 }
 
-const driver = await Driver.launch({
-  binary: BINARY,
-  sessionName: "cons-flow-c09-notes-ai-return",
-  sandboxHome: true,
-  seedAgentAuth: true,
-  defaultTimeoutMs: 12_000,
-  env: {
-    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-    SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-  },
-});
+const driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY,
+sessionName: "cons-flow-c09-notes-ai-return",
+sandboxHome: true,
+seedAgentAuth: true,
+defaultTimeoutMs: 12_000,
+env: {
+  SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+  SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+  SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+  SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+}, });
 
 try {
   driver.send({ type: "openNotes", requestId: `${runId}-open-notes` });

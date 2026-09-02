@@ -213,13 +213,21 @@ impl ScriptListApp {
     /// Whether the Spine projection currently owns the main list (i.e., a sigil
     /// segment is active and should replace the normal unified search results).
     pub(crate) fn spine_projection_owns_main_list(&self) -> bool {
+        self.spine_projection_owns_main_list_for(&self.spine_parse, self.spine_projection.as_ref())
+    }
+
+    pub(crate) fn spine_projection_owns_main_list_for(
+        &self,
+        parse: &crate::spine::SpineParse,
+        projection: Option<&crate::spine::SpineCursorProjection>,
+    ) -> bool {
         if !self.spine_enabled {
             return false;
         }
         if matches!(self.current_view, AppView::DayPage { .. }) {
             return false;
         }
-        match &self.spine_projection {
+        match projection {
             Some(proj) => {
                 // Committed postfix captures (`todo; …`) are owned by the
                 // menu-syntax capture composer (the restored form
@@ -230,8 +238,7 @@ impl ScriptListApp {
                     proj.active_segment_kind,
                     crate::spine::SpineSegmentKind::Capture { .. }
                 ) {
-                    let raw = self
-                        .spine_parse
+                    let raw = parse
                         .segments
                         .get(proj.active_segment_index)
                         .map(|segment| segment.raw.as_str())
@@ -253,13 +260,12 @@ impl ScriptListApp {
                 if let crate::spine::SpineSegmentKind::ListFilter { query } =
                     &proj.active_segment_kind
                 {
-                    if self
-                        .spine_parse
+                    if parse
                         .segments
                         .get(proj.active_segment_index)
                         .is_some_and(|segment| {
                             crate::menu_syntax::list_filter_segment_is_terminal(
-                                &self.spine_parse.input,
+                                &parse.input,
                                 segment.byte_range.clone(),
                                 query,
                             )
@@ -304,16 +310,19 @@ impl ScriptListApp {
         self.open_file_search_view_with_result_transition(query, presentation, true, cx);
     }
 
-    fn seed_file_search_directory_results_for_first_paint(&mut self, query: &str) -> bool {
+    fn seed_file_search_directory_results_for_first_paint(
+        &mut self,
+        query: &str,
+    ) -> std::io::Result<bool> {
         let Some(parsed) = crate::file_search::parse_directory_path(query) else {
-            return false;
+            return Ok(false);
         };
 
         let results = crate::file_search::list_directory_with_options(
             &parsed.directory,
             crate::file_search::DEFAULT_CACHE_LIMIT,
             parsed.show_hidden,
-        );
+        )?;
 
         if results.is_empty() {
             tracing::info!(
@@ -322,7 +331,7 @@ impl ScriptListApp {
                 directory = %parsed.directory,
                 "File-search first-paint seed found no directory rows"
             );
-            return false;
+            return Ok(false);
         }
 
         self.cached_file_results = results;
@@ -342,10 +351,10 @@ impl ScriptListApp {
             "Seeded file-search directory rows before first paint"
         );
 
-        true
+        Ok(true)
     }
 
-    fn seed_file_search_default_results_for_first_paint(&mut self) -> bool {
+    fn seed_file_search_default_results_for_first_paint(&mut self) -> std::io::Result<bool> {
         let mut results = self
             .recent_file_results_from_frecency(crate::file_search::ROOT_FILE_RECENT_HYDRATE_LIMIT);
         let source = if results.is_empty() {
@@ -353,7 +362,7 @@ impl ScriptListApp {
                 "~/",
                 crate::file_search::DEFAULT_CACHE_LIMIT,
                 false,
-            );
+            )?;
             "home_directory"
         } else {
             "frecency_recent_files"
@@ -364,7 +373,7 @@ impl ScriptListApp {
                 category = "FILE_SEARCH",
                 "Default file-search first-paint seed found no recent or home-directory rows"
             );
-            return false;
+            return Ok(false);
         }
 
         self.cached_file_results = results;
@@ -383,7 +392,7 @@ impl ScriptListApp {
             "Seeded default file-search rows before first paint"
         );
 
-        true
+        Ok(true)
     }
 
     fn open_file_search_view_with_result_transition(
@@ -418,6 +427,7 @@ impl ScriptListApp {
             selected_index: 0,
             presentation,
         };
+        self.note_main_route_changed();
         self.rekey_main_automation_surface_from_current_view();
         self.hovered_index = None;
         // opened_from_main_menu intentionally NOT set here — the entry point
@@ -444,14 +454,38 @@ impl ScriptListApp {
         // (preserve_current_results_until_first_batch = true), which keeps the
         // previous rows visible and is intentionally left on the async path.
         let fresh_directory_entry = !preserve_current_results_until_first_batch;
-        let seeded_initial_results = fresh_directory_entry
-            && self.seed_file_search_directory_results_for_first_paint(&query);
+        let seeded_initial_results = if self.main_services.is_production() && fresh_directory_entry
+        {
+            match self.seed_file_search_directory_results_for_first_paint(&query) {
+                Ok(seeded) => seeded,
+                Err(error) => {
+                    let _ = self.begin_file_search_session();
+                    self.file_search_loading = false;
+                    self.show_error_toast(format!("File search failed: {error}"), cx);
+                    return;
+                }
+            }
+        } else {
+            false
+        };
         let seed_fresh_full_default = !preserve_current_results_until_first_batch
             && !preserve_sort_mode
             && presentation == FileSearchPresentation::Full
             && query.trim().is_empty();
         let seeded_default_results =
-            seed_fresh_full_default && self.seed_file_search_default_results_for_first_paint();
+            if self.main_services.is_production() && seed_fresh_full_default {
+                match self.seed_file_search_default_results_for_first_paint() {
+                    Ok(seeded) => seeded,
+                    Err(error) => {
+                        let _ = self.begin_file_search_session();
+                        self.file_search_loading = false;
+                        self.show_error_toast(format!("File search failed: {error}"), cx);
+                        return;
+                    }
+                }
+            } else {
+                false
+            };
         let seeded_initial_results = seeded_initial_results || seeded_default_results;
 
         if !preserve_current_results_until_first_batch && !seeded_initial_results {

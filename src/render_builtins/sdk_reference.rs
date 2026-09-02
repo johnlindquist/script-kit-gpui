@@ -159,16 +159,17 @@ impl ScriptListApp {
                         let catalog_action = SdkReferenceCatalogAction::CopyMarkdownCard;
                         let markdown =
                             crate::mcp_resources::format_sdk_reference_entry_markdown(entry);
-                        match crate::platform::copy_text_to_clipboard(&markdown) {
-                            Ok(()) => {
+                        match crate::platform::copy_text(&markdown) {
+                            Ok(receipt) => {
                                 this.show_hud(
-                                    catalog_action.copied_hud(&entry.name),
+                                    receipt.feedback(catalog_action.copied_hud(&entry.name)),
                                     Some(2000),
                                     cx,
                                 );
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "sdk_reference copy_text_to_clipboard failed");
+                                tracing::warn!(error = %e, "sdk_reference copy failed");
+                                this.show_error_toast(format!("Failed to copy SDK reference: {e}"), cx);
                             }
                         }
                     }
@@ -178,14 +179,18 @@ impl ScriptListApp {
                         let catalog_action = SdkReferenceCatalogAction::CopyMarkdownCard;
                         let markdown =
                             crate::mcp_resources::format_sdk_reference_entry_markdown(entry);
-                        if let Err(e) = crate::platform::copy_text_to_clipboard(&markdown) {
-                            tracing::warn!(error = %e, "sdk_reference enter-copy failed");
-                        } else {
-                            this.show_hud(
-                                catalog_action.copied_hud(&entry.name),
-                                Some(2000),
-                                cx,
-                            );
+                        match crate::platform::copy_text(&markdown) {
+                            Ok(receipt) => {
+                                this.show_hud(
+                                    receipt.feedback(catalog_action.copied_hud(&entry.name)),
+                                    Some(2000),
+                                    cx,
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "sdk_reference enter-copy failed");
+                                this.show_error_toast(format!("Failed to copy SDK reference: {e}"), cx);
+                            }
                         }
                     }
                     cx.stop_propagation();

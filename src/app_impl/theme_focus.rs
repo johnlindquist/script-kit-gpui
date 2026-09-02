@@ -72,6 +72,7 @@ impl ScriptListApp {
         } else {
             self.theme = std::sync::Arc::new(base_theme);
         }
+        self.update_prompt_theme(cx);
 
         info!(target: "APP", "Theme reloaded based on system appearance");
 
@@ -99,7 +100,20 @@ impl ScriptListApp {
             padding = ?self.config.get_padding(),
             "Config reloaded"
         );
-        cx.notify();
+        if matches!(self.current_view, AppView::ScriptList) {
+            let value = self.filter_text.clone();
+            let retrieval_changed = self.accept_root_search_input_intent(&value);
+            if retrieval_changed || !self.root_search.query_is_current() {
+                self.flush_pending_main_menu_query(cx);
+            } else {
+                self.commit_main_menu_results_refresh("config_reload", None, cx, |app, _cx| {
+                    app.invalidate_root_passive_and_grouped_cache();
+                    true
+                });
+            }
+        } else {
+            cx.notify();
+        }
     }
 
     /// Adjust the light theme opacity by a delta amount
@@ -120,6 +134,7 @@ impl ScriptListApp {
         // Create new theme with adjusted opacity
         let adjusted_theme = base_theme.with_opacity_offset(self.light_opacity_offset);
         self.theme = std::sync::Arc::new(adjusted_theme);
+        self.update_prompt_theme(cx);
         self.sync_open_terminal_theme(cx);
 
         let new_opacity = self.theme.get_opacity().main;

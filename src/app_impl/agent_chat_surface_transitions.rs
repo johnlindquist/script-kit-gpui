@@ -55,8 +55,9 @@ impl ScriptListApp {
         let previous_state = self.agent_chat_surface_state;
         let previous_view = self.current_view.clone();
         self.embedded_agent_chat_focus_handle = Some(entity.read(cx).focus_handle(cx));
-        self.current_view = AppView::AgentChatView { entity };
-        let main_rekeyed = self.rekey_main_automation_surface_from_current_view();
+        let main_rekeyed = self.transition_current_view_and_rekey_main_automation_surface(
+            AppView::AgentChatView { entity },
+        );
         self.transition_agent_chat_surface(AgentChatSurfaceEvent::EmbeddedOpened);
         self.focused_input = FocusedInput::None;
         self.clear_actions_popup_state();

@@ -120,3 +120,76 @@ struct ThemeChooserContrastSnapshot {
     worst_label: String,
     worst_ratio: f32,
 }
+
+fn build_theme_chooser_contrast_snapshot(
+    theme: &crate::theme::Theme,
+) -> ThemeChooserContrastSnapshot {
+    let rows = theme::audit_theme_contrast(theme)
+        .into_iter()
+        .map(|sample| ThemeChooserContrastRow {
+            label: sample.label.to_string(),
+            ratio: sample.ratio,
+            minimum: sample.minimum,
+            passes: sample.passes(),
+        })
+        .collect::<Vec<_>>();
+
+    let passing = rows.iter().filter(|row| row.passes).count();
+    let total = rows.len();
+
+    let worst = rows
+        .iter()
+        .min_by(|left, right| {
+            left.ratio
+                .partial_cmp(&right.ratio)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .cloned()
+        .unwrap_or(ThemeChooserContrastRow {
+            label: "n/a".to_string(),
+            ratio: 0.0,
+            minimum: 4.5,
+            passes: false,
+        });
+
+    ThemeChooserContrastSnapshot {
+        rows,
+        passing,
+        total,
+        worst_label: worst.label,
+        worst_ratio: worst.ratio,
+    }
+}
+
+fn cached_theme_chooser_contrast_snapshot(
+    theme: &std::sync::Arc<crate::theme::Theme>,
+) -> ThemeChooserContrastSnapshot {
+    static THEME_CHOOSER_CONTRAST_CACHE: std::sync::LazyLock<
+        parking_lot::Mutex<std::collections::HashMap<usize, ThemeChooserContrastSnapshot>>,
+    > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+    let cache_key = std::sync::Arc::as_ptr(theme) as usize;
+
+    if let Some(snapshot) = THEME_CHOOSER_CONTRAST_CACHE.lock().get(&cache_key).cloned() {
+        return snapshot;
+    }
+
+    let snapshot = build_theme_chooser_contrast_snapshot(theme.as_ref());
+
+    let mut cache = THEME_CHOOSER_CONTRAST_CACHE.lock();
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(cache_key, snapshot.clone());
+    snapshot
+}
+
+impl ScriptListApp {
+    pub(crate) fn theme_chooser_theme_fingerprint(theme: &crate::theme::Theme) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let bytes = serde_json::to_vec(theme).unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+}

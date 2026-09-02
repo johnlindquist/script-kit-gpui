@@ -1,21 +1,23 @@
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
+  chmodSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  symlinkSync,
-  unlinkSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { dirname, join } from "node:path";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import {
   currentIdentity,
   DEFAULT_CONSISTENCY_CATALOG_PATH,
   parseProgressSections,
   parseTaskCatalog,
+  receiptStaleReasons,
+  stalenessReasons,
   verifyTask,
 } from "./consistency.ts";
 import {
@@ -25,10 +27,11 @@ import {
 import {
   prepareBlockedRuntimeTaskProof,
   prepareRuntimeTaskProof,
-  reviewedCompilerInputFingerprint,
   runtimeTaskProofSourceOwners,
   verifyRuntimeBinaryProvenance,
 } from "./lib/runtime-task-proof.ts";
+import { createArtifactFixture } from "../agentic/build-artifact-fixture.ts";
+import { ArtifactVerificationError, verifyImmutableArtifact, type ArtifactReference } from "../agentic/build-artifact.ts";
 
 type Obj = Record<string, unknown>;
 
@@ -41,6 +44,10 @@ const binaryPath = "scripts/devtools/lib/runtime-task-proof.ts";
 const binarySha = createHash("sha256").update(readFileSync(binaryPath)).digest("hex");
 const bounds = { x: 0, y: 0, width: 800, height: 600 };
 const temporaryDirectories: string[] = [];
+let signedBinary: Obj | undefined;
+let disposeArtifactFixture: (() => void) | undefined;
+
+afterAll(() => disposeArtifactFixture?.());
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
@@ -55,46 +62,16 @@ function controls(taskId: RuntimeTaskProofId): Record<string, boolean> {
 }
 
 function syntheticBinary(unsigned = false): Obj {
-  if (unsigned) {
-    return { path: binaryPath, sha256: binarySha, sourceCommit: gitHead };
+  if (unsigned) return { path: binaryPath, sha256: binarySha, sourceCommit: gitHead };
+  if (!signedBinary) {
+    // Publish once; each candidate owns a deep copy of the same immutable artifact identity.
+    // Production proof verification still checks current source and provenance on every call.
+    const fixture = createArtifactFixture(process.cwd(), { existingRepository: true, executable: readFileSync(binaryPath, "utf8") });
+    disposeArtifactFixture = fixture.dispose;
+    const artifact = verifyImmutableArtifact(process.cwd(), fixture.reference, { kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content" });
+    signedBinary = { ...artifact.binary, artifactReference: artifact.reference };
   }
-  const artifactRoot = join(process.cwd(), "target-agent", "artifacts");
-  mkdirSync(artifactRoot, { recursive: true });
-  const directory = mkdtempSync(join(artifactRoot, ".runtime-task-proof-"));
-  temporaryDirectories.push(directory);
-  const executablePath = join(directory, "script-kit-gpui");
-  const executableBytes = readFileSync(binaryPath);
-  writeFileSync(executablePath, executableBytes);
-  const executableRelative = relative(process.cwd(), executablePath);
-  const manifestPath = `${executablePath}.provenance.json`;
-  const manifestBytes = JSON.stringify({
-    schemaVersion: 2,
-    pool: "agent-debug",
-    source: "target-agent/pools/agent-debug/debug/script-kit-gpui",
-    binaryPath: executableRelative,
-    binarySha256: binarySha,
-    sizeBytes: executableBytes.byteLength,
-    gitHead,
-    compilerInputSha256: reviewedCompilerInputFingerprint(gitHead),
-    profile: "debug",
-    requiresExactGitHead: false,
-    rustDirty: false,
-    builtAt: new Date().toISOString(),
-  });
-  writeFileSync(manifestPath, manifestBytes);
-  return {
-    path: executableRelative,
-    sha256: binarySha,
-    sourceCommit: gitHead,
-    provenance: {
-      path: relative(process.cwd(), manifestPath),
-      sha256: createHash("sha256").update(manifestBytes).digest("hex"),
-      builtGitHead: gitHead,
-      compilerInputSha256: reviewedCompilerInputFingerprint(gitHead),
-      profile: "debug",
-      requiresExactGitHead: false,
-    },
-  };
+  return structuredClone(signedBinary);
 }
 
 function baseCandidate(unsigned = false): Obj {
@@ -399,152 +376,72 @@ function candidateFor(taskId: RuntimeTaskProofId, unsigned = false): Obj {
 describe("canonical direct runtime task receipts", () => {
   test("an unsigned existing executable cannot borrow current HEAD as build provenance", () => {
     expect(() => prepareRuntimeTaskProof("PF-004", candidateFor("PF-004", true), controls("PF-004")))
-      .toThrow("verified build provenance");
+      .toThrow();
   });
 
-  test("stale, dirty, substituted, ambiguous, and symlinked artifact manifests fail closed", () => {
-    const scenarios: Array<[
-      string,
-      (binary: Obj, manifest: Obj, manifestPath: string) => void,
-      string,
-    ]> = [
-      ["missing manifest", (_binary, _manifest, manifestPath) => {
-        unlinkSync(manifestPath);
-      }, "exactly one"],
-      ["old source", (_binary, manifest, manifestPath) => {
-        manifest.gitHead = "b".repeat(40);
-        writeFileSync(manifestPath, JSON.stringify(manifest));
-      }, "current source commit"],
-      ["dirty sources", (_binary, manifest, manifestPath) => {
-        manifest.rustDirty = true;
-        writeFileSync(manifestPath, JSON.stringify(manifest));
-      }, "uncommitted compiler-input"],
-      ["substituted executable", (binary) => {
-        writeFileSync(binary.path as string, "not-the-observed-build");
-      }, "exact owned executable bytes"],
-      ["incorrect size", (_binary, manifest, manifestPath) => {
-        manifest.sizeBytes = Number(manifest.sizeBytes) + 1;
-        writeFileSync(manifestPath, JSON.stringify(manifest));
-      }, "exact owned executable bytes"],
-      ["different compiler inputs", (_binary, manifest, manifestPath) => {
-        manifest.compilerInputSha256 = "0".repeat(64);
-        writeFileSync(manifestPath, JSON.stringify(manifest));
-      }, "current reviewed compiler-input tree"],
-      ["ambiguous manifests", (_binary, manifest, manifestPath) => {
-        writeFileSync(join(manifestPath, "..", "manifest.json"), JSON.stringify(manifest));
-      }, "exactly one"],
-      ["manifest symlink", (_binary, manifest, manifestPath) => {
-        const external = mkdtempSync(join(tmpdir(), "runtime-task-external-manifest-"));
-        temporaryDirectories.push(external);
-        const target = join(external, "manifest.json");
-        writeFileSync(target, JSON.stringify(manifest));
-        unlinkSync(manifestPath);
-        symlinkSync(target, manifestPath);
-      }, "manifest symlink"],
-    ];
-
-    for (const [name, mutateManifest, expected] of scenarios) {
-      const binary = syntheticBinary();
-      const manifestPath = (binary.provenance as Obj).path as string;
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Obj;
-      mutateManifest(binary, manifest, manifestPath);
-      expect(() => verifyRuntimeBinaryProvenance(binary.path as string), name).toThrow(expected);
+  test("explicit manifest and byte mismatches fail closed without adjacent-manifest discovery", () => {
+    const binary = syntheticBinary(); const reference = binary.artifactReference as ArtifactReference;
+    expect(() => verifyRuntimeBinaryProvenance({ ...reference, manifestSha256: "0".repeat(64) }))
+      .toThrow(ArtifactVerificationError);
+    const path = binary.path as string; const bytes = readFileSync(path);
+    const mode = statSync(path).mode & 0o777;
+    try {
+      chmodSync(path, mode | 0o200); writeFileSync(path, "substituted executable"); chmodSync(path, mode);
+      expect(() => verifyRuntimeBinaryProvenance(reference)).toThrow(ArtifactVerificationError);
+    } finally {
+      chmodSync(path, mode | 0o200);
+      try { writeFileSync(path, bytes); } finally { chmodSync(path, mode); }
+    }
+    const directory = dirname(reference.manifestPath);
+    const directoryMode = statSync(directory).mode & 0o777;
+    const extra = join(directory, "unrelated.provenance.json");
+    try {
+      chmodSync(directory, directoryMode | 0o200);
+      writeFileSync(extra, "{}");
+      chmodSync(directory, directoryMode);
+      expect(verifyRuntimeBinaryProvenance(reference).sha256).toBe(binarySha);
+    } finally {
+      chmodSync(directory, directoryMode | 0o200);
+      try { rmSync(extra, { force: true }); } finally { chmodSync(directory, directoryMode); }
     }
   });
 
-  test("documentation-only commits reuse an independently identical reviewed compiler tree", () => {
+  test("documentation-only commits preserve recorded build identity and current compiler-content compatibility", () => {
     const repository = mkdtempSync(join(tmpdir(), "runtime-task-doc-only-repository-"));
     temporaryDirectories.push(repository);
-    const originalDirectory = process.cwd();
-    const git = (...args: string[]): string => {
-      const result = Bun.spawnSync([
-        "git",
-        "-C",
-        repository,
-        "-c",
-        "user.name=Script Kit Proof Fixture",
-        "-c",
-        "user.email=proof-fixture@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        ...args,
-      ], { stdout: "pipe", stderr: "pipe" });
-      if (result.exitCode !== 0) {
-        throw new Error(`Disposable provenance Git fixture failed: ${result.stderr.toString()}`);
-      }
-      return result.stdout.toString().trim();
-    };
-
-    git("init", "--quiet");
-    mkdirSync(join(repository, "scripts", "agentic"), { recursive: true });
-    mkdirSync(join(repository, "src"), { recursive: true });
-    writeFileSync(join(repository, "scripts", "agentic", "compiler-input-paths.txt"), "src/lib.rs\n");
-    writeFileSync(join(repository, "src", "lib.rs"), "pub const REVIEWED: bool = true;\n");
-    git("add", "scripts/agentic/compiler-input-paths.txt", "src/lib.rs");
-    git("commit", "--quiet", "-m", "fixture: establish reviewed compiler source");
-    const buildCommit = git("rev-parse", "HEAD");
-    writeFileSync(join(repository, "README.md"), "documentation-only fixture change\n");
-    git("add", "README.md");
-    git("commit", "--quiet", "-m", "fixture: modify documentation only");
-    const currentCommit = git("rev-parse", "HEAD");
-
-    const artifactRelative = "target-agent/artifacts/doc-only/script-kit-gpui";
-    const executablePath = join(repository, artifactRelative);
-    mkdirSync(join(executablePath, ".."), { recursive: true });
-    const executableBytes = Buffer.from("owned disposable executable bytes");
-    writeFileSync(executablePath, executableBytes);
-    const executableSha = createHash("sha256").update(executableBytes).digest("hex");
-    const manifestPath = `${executablePath}.provenance.json`;
-
-    process.chdir(repository);
+    const fixture = createArtifactFixture(repository);
     try {
-      const compilerInputSha256 = reviewedCompilerInputFingerprint(currentCommit);
-      expect(reviewedCompilerInputFingerprint(buildCommit)).toBe(compilerInputSha256);
-      const manifest = {
-        schemaVersion: 2,
-        pool: "agent-debug",
-        source: "target-agent/pools/agent-debug/debug/script-kit-gpui",
-        binaryPath: artifactRelative,
-        binarySha256: executableSha,
-        sizeBytes: executableBytes.byteLength,
-        gitHead: buildCommit,
-        compilerInputSha256,
-        profile: "debug",
-        requiresExactGitHead: false,
-        rustDirty: false,
-        builtAt: new Date().toISOString(),
-      };
-      const manifestBytes = JSON.stringify(manifest);
-      writeFileSync(manifestPath, manifestBytes);
-      const expected = {
-        path: artifactRelative,
-        sha256: executableSha,
-        sourceCommit: currentCommit,
-        provenance: {
-          path: `${artifactRelative}.provenance.json`,
-          sha256: createHash("sha256").update(manifestBytes).digest("hex"),
-          builtGitHead: buildCommit,
-          compilerInputSha256,
-          profile: "debug",
-          requiresExactGitHead: false,
-        },
-      };
-
-      expect(verifyRuntimeBinaryProvenance(artifactRelative, expected)).toMatchObject({
-        sourceCommit: currentCommit,
-        provenance: { builtGitHead: buildCommit, compilerInputSha256 },
-      });
-
-      manifest.profile = "release";
-      manifest.requiresExactGitHead = true;
-      writeFileSync(manifestPath, JSON.stringify(manifest));
-      expect(() => verifyRuntimeBinaryProvenance(artifactRelative))
-        .toThrow("release, CI, and explicit Git tracking require the exact build commit");
-    } finally {
-      process.chdir(originalDirectory);
-    }
+      const before = verifyImmutableArtifact(repository, fixture.reference, { kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content" });
+      writeFileSync(join(repository, "documentation.txt"), "documentation-only fixture change\n");
+      for (const args of [["add", "documentation.txt"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "documentation"]]) {
+        const result = Bun.spawnSync(["git", "-C", repository, ...args], { stdout: "pipe", stderr: "pipe" });
+        expect(result.exitCode).toBe(0);
+      }
+      const after = verifyImmutableArtifact(repository, fixture.reference, { kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content" });
+      expect(after.binary.sourceCommit).toBe(before.manifest.source.gitHead);
+      expect(after.manifest.source.compilerInputSha256).toBe(before.manifest.source.compilerInputSha256);
+      expect(() => verifyImmutableArtifact(repository, fixture.reference, { kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "clean-exact-head" })).toThrow();
+      const current = currentIdentity();
+      const previousDirectory = process.cwd();
+      try {
+        process.chdir(repository);
+        const fixtureCurrent = currentIdentity({ registry: current.registry });
+        expect(fixtureCurrent.headCommit).not.toBe(after.binary.sourceCommit);
+        const binary = { ...after.binary, artifactReference: after.reference };
+        expect(receiptStaleReasons({
+          path: "observed.json", disposition: "EVALUABLE_PASS", archived: false,
+          receipt: { runtimeTaskProof: {}, binary },
+        }, fixtureCurrent)).toEqual([]);
+        expect(stalenessReasons({
+          taskId: "PF-004",
+          identities: {
+            receiptRegistryVersion: fixtureCurrent.registry.registryVersion,
+            receiptRegistryFingerprint: fixtureCurrent.registry.registryFingerprint,
+            binaries: [binary],
+          },
+        }, fixtureCurrent)).toEqual([]);
+      } finally { process.chdir(previousDirectory); }
+    } finally { fixture.dispose(); }
 
     const taskId = "PF-004";
     const prepared = prepareRuntimeTaskProof(taskId, candidateFor(taskId), controls(taskId));
@@ -573,6 +470,11 @@ describe("canonical direct runtime task receipts", () => {
       expect(prepared.receipt.taskIds).toEqual([taskId]);
       expect(prepared.receipt.evidenceClass).toBe("RUNTIME_HIDDEN");
       expect(prepared.receipt.disposition).toBe("EVALUABLE_PASS");
+      const binary = prepared.receipt.binary as Obj;
+      const reference = binary.artifactReference as ArtifactReference;
+      expect(binary.manifestPath).toBe(reference.manifestPath);
+      expect(binary.manifestSha256).toBe(reference.manifestSha256);
+      expect(binary.provenance).toBeUndefined();
       expect((prepared.receipt.catalogBinding as Obj).sectionSha256)
         .toBe(catalog.byId.get(taskId)!.sectionSha256);
       expect(Object.keys(prepared.receipt.sourceFingerprints as Obj).sort())
@@ -598,8 +500,45 @@ describe("canonical direct runtime task receipts", () => {
       });
       expect(audited.exitCode).toBe(0);
       expect(audited.receipt.disposition).toBe("EVALUABLE_PASS");
+      expect(stalenessReasons(audited.receipt, currentIdentity())).toEqual([]);
     },
   );
+
+  test("canonical audits require explicit artifact identity and redact rejected private references", () => {
+    const taskId = "PF-004";
+    const prepared = prepareRuntimeTaskProof(taskId, candidateFor(taskId), controls(taskId));
+    const directory = mkdtempSync(join(tmpdir(), "runtime-task-artifact-identity-"));
+    temporaryDirectories.push(directory);
+    const taskDirectory = join(directory, taskId);
+    mkdirSync(taskDirectory, { recursive: true });
+    const privatePath = "/Users/example/Sensitive Script/manifest.json";
+    const variants: Array<[(binary: Obj) => void, Obj]> = [
+      [(binary) => { delete binary.artifactReference; }, { code: "stale-binary-provenance-missing" }],
+      [(binary) => { binary.sourceCommit = "a".repeat(40); }, {
+        code: "stale-binary-provenance-identity", detail: "observed_sourceCommit_mismatch",
+      }],
+      [(binary) => { binary.manifestSha256 = "b".repeat(64); }, {
+        code: "stale-binary-provenance-identity", detail: "observed_manifestSha256_mismatch",
+      }],
+      [(binary) => { (binary.artifactReference as Obj).manifestPath = privatePath; }, {
+        code: "stale-binary-provenance", detail: "unsafe_artifact_path",
+      }],
+    ];
+    const current = currentIdentity();
+    for (const [mutate, expectedReason] of variants) {
+      const receipt = structuredClone(prepared.receipt);
+      mutate(receipt.binary as Obj);
+      writeFileSync(join(taskDirectory, "observed.json"), JSON.stringify(receipt));
+      const audited = verifyTask({
+        taskId, scope: "cons-proof-gov", receiptsRoot: directory, catalog,
+        progress: parseProgressSections(`### ${taskId} — ${catalog.byId.get(taskId)!.title}\n`),
+        current,
+      });
+      expect(audited.exitCode).not.toBe(0);
+      expect(audited.receipt.staleReasons).toContainEqual(expectedReason);
+      expect(JSON.stringify(audited.receipt)).not.toContain(privatePath);
+    }
+  });
 
   test("generic or swapped registered inspectors cannot discharge another obligation", () => {
     expect(() => prepareRuntimeTaskProof("PF-004", candidateFor("PF-005"), controls("PF-004")))
@@ -631,12 +570,11 @@ describe("canonical direct runtime task receipts", () => {
     ])).toThrow("uniquely identified");
   });
 
-  test("unobserved visibility, stale source, wrong bytes, or missing cleanup fails closed", () => {
-    const taskId = "PF-004";
-    const variants: Array<[string, (candidate: Obj) => void, string]> = [
+  test.each<[string, (candidate: Obj) => void, string]>([
       ["unobserved target", (candidate) => delete (candidate.target as Obj).visible, "observed hidden or visible"],
       ["stale source", (candidate) => (candidate.repository as Obj).gitCommit = "a".repeat(40), "source commit"],
-      ["stale binary source", (candidate) => (candidate.binary as Obj).sourceCommit = "a".repeat(40), "current-source binary"],
+      ["stale binary source", (candidate) => (candidate.binary as Obj).sourceCommit = "a".repeat(40), "observed_sourceCommit_mismatch"],
+      ["wrong manifest identity", (candidate) => (candidate.binary as Obj).manifestSha256 = "b".repeat(64), "observed_manifestSha256_mismatch"],
       ["wrong binary bytes", (candidate) => {
         (candidate.binary as Obj).sha256 = "b".repeat(64);
         (candidate.transaction as Obj).binarySha256 = "b".repeat(64);
@@ -644,13 +582,12 @@ describe("canonical direct runtime task receipts", () => {
       ["transaction binary drift", (candidate) => (candidate.transaction as Obj).binarySha256 = "b".repeat(64), "matching proof transaction"],
       ["surviving app", (candidate) => (candidate.cleanup as Obj).processExited = false, "cleanup"],
       ["touched clipboard", (candidate) => (candidate.cleanup as Obj).clipboardTouched = true, "cleanup"],
-    ];
-    for (const [name, mutate, expected] of variants) {
-      const candidate = candidateFor(taskId);
-      mutate(candidate);
-      expect(() => prepareRuntimeTaskProof(taskId, candidate, controls(taskId)), name)
-        .toThrow(expected);
-    }
+  ])("%s fails closed", (name, mutate, expected) => {
+    const taskId = "PF-004";
+    const candidate = candidateFor(taskId);
+    mutate(candidate);
+    expect(() => prepareRuntimeTaskProof(taskId, candidate, controls(taskId)), name)
+      .toThrow(expected);
   });
 
   test("foreign canonical section and broken primitive observations cannot become runtime proof", () => {
@@ -670,23 +607,29 @@ describe("canonical direct runtime task receipts", () => {
       .toThrow("runtime primitive is invalid");
   });
 
-  test("shared text, native activation, and selection transition require their actual downstream observations", () => {
+  test("shared text requires actual day-page glyph observations", () => {
     const missingDayPage = candidateFor("PF-006");
     delete missingDayPage.dayPage;
     expect(() => prepareRuntimeTaskProof("PF-006", missingDayPage, controls("PF-006")))
       .toThrow("dayPage glyph evidence");
+  });
 
+  test("native activation requires actual disabled activation observations", () => {
     const missingDisabled = candidateFor("PF-007");
     delete (missingDisabled.activationEvidence as Obj).disabled;
     expect(() => prepareRuntimeTaskProof("PF-007", missingDisabled, controls("PF-007")))
       .toThrow("disabled native activation");
+  });
 
+  test("native activation rejects a forged enabled action selector", () => {
     const forgedSelector = candidateFor("PF-007");
     (((forgedSelector.activationEvidence as Obj).enabled as Obj).activation as Obj)
       .actionSelector = "deleteEverything:";
     expect(() => prepareRuntimeTaskProof("PF-007", forgedSelector, controls("PF-007")))
       .toThrow("enabled native activation");
+  });
 
+  test("selection transition requires an advancing data-generation transaction", () => {
     const noSelection = candidateFor("PF-008");
     ((noSelection.selectedRow as Obj).transaction as Obj).dataGenerationAdvanced = false;
     expect(() => prepareRuntimeTaskProof("PF-008", noSelection, controls("PF-008")))
@@ -723,10 +666,11 @@ describe("canonical direct runtime task receipts", () => {
   test("final auditing rejects build provenance that is mutated after receipt publication", () => {
     const taskId = "PF-004";
     const prepared = prepareRuntimeTaskProof(taskId, candidateFor(taskId), controls(taskId));
-    const manifestPath = ((prepared.receipt.binary as Obj).provenance as Obj).path as string;
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    manifest.gitHead = "b".repeat(40);
-    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const { manifestPath } = (prepared.receipt.binary as Obj).artifactReference as ArtifactReference;
+    const bytes = readFileSync(manifestPath);
+    const mode = statSync(manifestPath).mode & 0o777;
+    const manifest = JSON.parse(bytes.toString());
+    manifest.source.gitHead = "b".repeat(40);
 
     const directory = mkdtempSync(join(tmpdir(), "runtime-task-provenance-"));
     temporaryDirectories.push(directory);
@@ -734,16 +678,27 @@ describe("canonical direct runtime task receipts", () => {
     mkdirSync(taskDirectory, { recursive: true });
     writeFileSync(join(taskDirectory, "observed.json"), JSON.stringify(prepared.receipt));
     const progressText = `### ${taskId} — ${catalog.byId.get(taskId)!.title}\n`;
-    const audited = verifyTask({
-      taskId,
-      scope: "cons-proof-gov",
-      receiptsRoot: directory,
-      catalog,
-      progress: parseProgressSections(progressText),
-      current: currentIdentity(),
-    });
-    expect(audited.exitCode).toBe(3);
-    expect(JSON.stringify(audited.receipt)).toContain("stale-binary-provenance");
+    try {
+      chmodSync(manifestPath, mode | 0o200);
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      chmodSync(manifestPath, mode);
+      const audited = verifyTask({
+        taskId,
+        scope: "cons-proof-gov",
+        receiptsRoot: directory,
+        catalog,
+        progress: parseProgressSections(progressText),
+        current: currentIdentity(),
+      });
+      expect(audited.exitCode).toBe(3);
+      expect(audited.receipt.disposition).toBe("BLOCKED_STALE_GENERATION");
+      expect(audited.receipt.staleReasons).toContainEqual({
+        code: "stale-binary-provenance", detail: "manifest_hash_mismatch",
+      });
+    } finally {
+      chmodSync(manifestPath, mode | 0o200);
+      try { writeFileSync(manifestPath, bytes); } finally { chmodSync(manifestPath, mode); }
+    }
   });
 
   test("an absent application emits a registered typed block without revealing diagnostic content", () => {

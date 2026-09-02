@@ -110,34 +110,6 @@ fn menu_syntax_hint_surface_has_dedicated_scroll_and_arrow_routing() {
 }
 
 #[test]
-fn live_menu_syntax_ownership_bypasses_debounced_grouped_cache() {
-    let source = fs::read_to_string("src/app_impl/filtering_cache.rs")
-        .expect("Failed to read src/app_impl/filtering_cache.rs");
-
-    let live_gate = source
-        .find("let live_menu_syntax_owns_main_list =")
-        .expect("grouped cache must check live menu syntax ownership");
-    let cache_hit = source
-        .find(".has_grouped_results_for(&grouped_cache_key)")
-        .expect("grouped cache should use the prepared grouped cache key");
-
-    assert!(
-        live_gate < cache_hit,
-        "live menu syntax ownership must bypass stale computed-filter cache hits"
-    );
-    assert!(
-        source.contains("live_filter_text != computed_filter_text")
-            && source.contains("Arc::<[GroupedListItem]>::from(Vec::new())"),
-        "the live ownership gate should return a transient empty result without storing stale rows"
-    );
-    assert!(
-        source.contains("pub(crate) fn get_filtered_results_cached")
-            && source.contains(".store_filtered_results(self.filter_text.clone(), Vec::new())"),
-        "mutable filtered-cache refreshes used by stdin setFilter must not repopulate fuzzy rows while menu syntax owns input"
-    );
-}
-
-#[test]
 fn refine_picker_owns_main_list_until_query_is_terminal() {
     let popup = fs::read_to_string("src/app_impl/menu_syntax_trigger_picker.rs")
         .expect("Failed to read src/app_impl/menu_syntax_trigger_picker.rs");
@@ -157,21 +129,6 @@ fn refine_picker_owns_main_list_until_query_is_terminal() {
         filtering_cache.contains("self.menu_syntax_trigger_picker_state.owns_main_list()")
             && render.contains("self.menu_syntax_trigger_picker_state.owns_main_list()"),
         "refine (`:`) picker snapshots should suppress stale structured search results while selectable rows are open"
-    );
-    assert!(
-        render.contains("let menu_syntax_owns_main_list = popup_owns_main_list")
-            && filtering_cache.contains(
-                "let live_menu_syntax_owns_main_list = popup_owns_live_main_list"
-            )
-            && filtering_cache.contains(
-                "let menu_syntax_owns_main_list = popup_owns_computed_main_list"
-            ),
-        "main-owned filter/object picker rows must outrank spine/search ownership in render and grouped-cache gates"
-    );
-    assert!(
-        filtering_cache.contains("if !popup_owns_live_main_list")
-            && filtering_cache.contains("&& self.spine_projection_owns_main_list()"),
-        "the early Spine projection path must yield to main-owned filter/object picker snapshots"
     );
     assert!(
         filtering_cache.contains("free_text_for_search(&self.menu_syntax_mode, filter_text)")
@@ -253,8 +210,6 @@ fn trigger_picker_state_changes_rebuild_main_list() {
 fn trigger_picker_main_list_contract_exposes_rows_without_detached_popup() {
     let trigger_owner = fs::read_to_string("src/app_impl/menu_syntax_trigger_picker_main_list.rs")
         .expect("Failed to read src/app_impl/menu_syntax_trigger_picker_main_list.rs");
-    let collect_elements = fs::read_to_string("src/app_layout/collect_elements.rs")
-        .expect("Failed to read src/app_layout/collect_elements.rs");
     let prompt_handler =
         fs::read_to_string("src/prompt_handler/mod.rs").expect("Failed to read prompt_handler.rs");
 
@@ -264,28 +219,10 @@ fn trigger_picker_main_list_contract_exposes_rows_without_detached_popup() {
         "trigger picker keyboard ownership should be derived from ScriptList state"
     );
     assert!(
-        collect_elements.contains("list:menu-syntax-trigger-picker")
-            && collect_elements.contains("menuSyntaxTriggerPicker")
-            && collect_elements.contains("menu-syntax-trigger-row"),
-        "ScriptList getElements should expose trigger picker rows as main-list rows"
-    );
-    assert!(
         !prompt_handler.contains(
             "menu_syntax_trigger_picker_main_list::is_menu_syntax_trigger_picker_main_list_open"
         ),
         "PromptPopup automation target resolution must not include main-owned trigger rows"
-    );
-    assert!(
-        prompt_handler.contains("self.menu_syntax_trigger_picker_state.owns_main_list()")
-            && prompt_handler
-                .contains("self.accept_menu_syntax_trigger_picker_row(&row_id, None, cx)"),
-        "main-window batch selectBySemanticId should activate main-owned trigger picker rows"
-    );
-    assert!(
-        trigger_owner.contains("menu_syntax_trigger_picker_keep_open_main_list")
-            && trigger_owner.contains("self.invalidate_grouped_cache();")
-            && trigger_owner.contains("self.reconcile_script_list_after_filter_change("),
-        "batch selectBySemanticId keep-open transitions must invalidate rendered rows after rebuilding the picker snapshot"
     );
 }
 

@@ -5,9 +5,9 @@
 //! elapsed timings, and actionable failure suggestions.
 
 use crate::protocol::transaction_trace::{
-    append_transaction_trace, now_epoch_ms, read_latest_transaction_trace,
-    remember_persisted_transaction_results, restore_persisted_transaction_result,
-    sanitize_transaction_trace, should_include_trace, transaction_content_fingerprint,
+    append_transaction_trace, now_epoch_ms, remember_persisted_transaction_results,
+    restore_persisted_transaction_result, sanitize_transaction_trace, should_include_trace,
+    transaction_content_fingerprint,
 };
 use crate::protocol::types::batch_wait::{
     BatchCommand, BatchOptions, BatchResultEntry, StateMatchSpec, TransactionCommandTrace,
@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_WAIT_POLL_INTERVAL_MS: u64 = 25;
+pub const MAX_BATCH_COMMANDS: usize = 256;
+pub const MAX_WAIT_POLLS: usize = 4096;
 
 // ── Provider trait ─────────────────────────────────────────────────────────
 
@@ -59,6 +61,124 @@ pub fn matches_state_spec(snapshot: &UiStateSnapshot, spec: &StateMatchSpec) -> 
     matches_state(snapshot, spec)
 }
 
+/// Match production Chat state for either an embedded or detached owner.
+/// Probe collection is lazy: ordinary state predicates never copy the probe tail.
+pub fn matches_agent_chat_wait_condition(
+    condition: &crate::protocol::WaitDetailedCondition,
+    state: &crate::protocol::AgentChatStateSnapshot,
+    probe_fn: impl FnOnce() -> crate::protocol::AgentChatTestProbeSnapshot,
+) -> Option<bool> {
+    Some(match condition {
+        crate::protocol::WaitDetailedCondition::AgentChatReady => {
+            state.context_ready && state.status == "idle"
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatPickerOpen => {
+            state.picker.as_ref().is_some_and(|p| p.open)
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatPickerClosed => {
+            state.picker.is_none() || state.picker.as_ref().is_some_and(|p| !p.open)
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatItemAccepted => {
+            state.last_accepted_item.is_some()
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatCursorAt { index } => {
+            state.cursor_index == *index
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatStatus { status } => {
+            state.status == *status
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatInputMatch { text } => {
+            state.input_text == *text
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatInputContains { substring } => {
+            state.input_text.contains(substring.as_str())
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatAcceptedViaKey { key } => {
+            let probe = probe_fn();
+            probe
+                .accepted_items
+                .last()
+                .is_some_and(|item| item.accepted_via_key == *key)
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatAcceptedLabel { label } => {
+            let probe = probe_fn();
+            probe
+                .accepted_items
+                .last()
+                .is_some_and(|item| item.item_label == *label)
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatAcceptedCursorAt { index } => {
+            let probe = probe_fn();
+            probe
+                .accepted_items
+                .last()
+                .is_some_and(|item| item.cursor_after == *index)
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatInputLayoutMatch {
+            visible_start,
+            visible_end,
+            cursor_in_window,
+        } => {
+            let probe = probe_fn();
+            probe.input_layout.as_ref().is_some_and(|layout| {
+                layout.visible_start == *visible_start
+                    && layout.visible_end == *visible_end
+                    && layout.cursor_in_window == *cursor_in_window
+            })
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatSetupVisible => state.setup.is_some(),
+        crate::protocol::WaitDetailedCondition::AgentChatSetupReasonCode { reason_code } => state
+            .setup
+            .as_ref()
+            .is_some_and(|s| s.reason_code == *reason_code),
+        crate::protocol::WaitDetailedCondition::AgentChatSetupPrimaryAction { action } => state
+            .setup
+            .as_ref()
+            .is_some_and(|s| s.primary_action == *action),
+        crate::protocol::WaitDetailedCondition::AgentChatSetupAgentPickerOpen => {
+            state.setup.as_ref().is_some_and(|s| s.agent_picker_open)
+        }
+        crate::protocol::WaitDetailedCondition::AgentChatSetupSelectedAgent { agent_id } => {
+            state.setup.as_ref().is_some_and(|s| {
+                s.selected_agent_id
+                    .as_ref()
+                    .is_some_and(|id| id == agent_id)
+            })
+        }
+        // Non-Agent Chat conditions (already handled above, but required for exhaustiveness)
+        _ => return None,
+    })
+}
+
+/// Match conditions that are meaningful on every registered surface.
+pub fn matches_ui_wait_condition(
+    snapshot: &UiStateSnapshot,
+    condition: &WaitCondition,
+) -> Option<bool> {
+    Some(match condition {
+        WaitCondition::Named(WaitNamedCondition::InputEmpty) => {
+            snapshot.input_value.as_deref().unwrap_or("").is_empty()
+        }
+        WaitCondition::Named(WaitNamedCondition::WindowVisible) => snapshot.window_visible,
+        WaitCondition::Named(WaitNamedCondition::WindowFocused) => snapshot.window_focused,
+        WaitCondition::Named(WaitNamedCondition::ChoicesRendered) => snapshot.choice_count > 0,
+        WaitCondition::Detailed(
+            WaitDetailedCondition::ElementExists { semantic_id }
+            | WaitDetailedCondition::ElementVisible { semantic_id },
+        ) => snapshot
+            .visible_semantic_ids
+            .iter()
+            .any(|id| id == semantic_id),
+        WaitCondition::Detailed(WaitDetailedCondition::ElementFocused { semantic_id }) => {
+            snapshot.focused_semantic_id.as_deref() == Some(semantic_id.as_str())
+        }
+        WaitCondition::Detailed(WaitDetailedCondition::StateMatch { state }) => {
+            matches_state_spec(snapshot, state)
+        }
+        _ => return None,
+    })
+}
+
 fn matches_state(snapshot: &UiStateSnapshot, spec: &StateMatchSpec) -> bool {
     if let Some(ref expected) = spec.input_value {
         // UI snapshots omit an empty input as `None`, while automation clients
@@ -91,6 +211,226 @@ mod state_match_tests {
     use super::*;
 
     #[test]
+    fn surface_waits_observe_target_visibility_focus_and_elements() {
+        let snapshot = UiStateSnapshot {
+            window_visible: false,
+            window_focused: false,
+            visible_semantic_ids: vec!["input:notes".into()],
+            focused_semantic_id: Some("input:notes".into()),
+            input_value: Some("draft".into()),
+            ..Default::default()
+        };
+        for condition in [
+            WaitNamedCondition::WindowVisible,
+            WaitNamedCondition::WindowFocused,
+            WaitNamedCondition::ChoicesRendered,
+            WaitNamedCondition::InputEmpty,
+        ] {
+            assert_eq!(
+                matches_ui_wait_condition(&snapshot, &WaitCondition::Named(condition)),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            matches_ui_wait_condition(
+                &snapshot,
+                &WaitCondition::Detailed(WaitDetailedCondition::ElementFocused {
+                    semantic_id: "input:notes".into()
+                })
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            matches_ui_wait_condition(
+                &snapshot,
+                &WaitCondition::Detailed(WaitDetailedCondition::ElementExists {
+                    semantic_id: "input:main".into()
+                })
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            matches_ui_wait_condition(
+                &snapshot,
+                &WaitCondition::Detailed(WaitDetailedCondition::AgentChatPickerClosed)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn chat_ready_requires_idle_context_and_does_not_collect_probe() {
+        let mut state = crate::protocol::AgentChatStateSnapshot {
+            context_ready: true,
+            status: "streaming".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            matches_agent_chat_wait_condition(
+                &WaitDetailedCondition::AgentChatReady,
+                &state,
+                || panic!("state predicates must not collect probes")
+            ),
+            Some(false)
+        );
+        state.status = "idle".into();
+        assert_eq!(
+            matches_agent_chat_wait_condition(
+                &WaitDetailedCondition::AgentChatReady,
+                &state,
+                || panic!("state predicates must not collect probes")
+            ),
+            Some(true)
+        );
+        state.context_ready = false;
+        assert_eq!(
+            matches_agent_chat_wait_condition(
+                &WaitDetailedCondition::AgentChatReady,
+                &state,
+                Default::default
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn chat_setup_waits_use_actual_setup_reason_and_selection() {
+        use crate::protocol::{
+            AgentChatSetupActionKind, AgentChatSetupSnapshot, AgentChatStateSnapshot,
+        };
+        let state = AgentChatStateSnapshot {
+            setup: Some(AgentChatSetupSnapshot {
+                reason_code: "agent_missing".into(),
+                title: "Choose an agent".into(),
+                body: String::new(),
+                primary_action: AgentChatSetupActionKind::Retry,
+                secondary_action: None,
+                selected_agent_id: Some("fixture-agent".into()),
+                catalog_agent_ids: vec![],
+                compatible_agent_ids: vec![],
+                needs_image: false,
+                needs_embedded_context: false,
+                agent_picker_open: true,
+                agent_picker_selected_id: None,
+            }),
+            ..Default::default()
+        };
+        for condition in [
+            WaitDetailedCondition::AgentChatSetupVisible,
+            WaitDetailedCondition::AgentChatSetupReasonCode {
+                reason_code: "agent_missing".into(),
+            },
+            WaitDetailedCondition::AgentChatSetupPrimaryAction {
+                action: AgentChatSetupActionKind::Retry,
+            },
+            WaitDetailedCondition::AgentChatSetupAgentPickerOpen,
+            WaitDetailedCondition::AgentChatSetupSelectedAgent {
+                agent_id: "fixture-agent".into(),
+            },
+        ] {
+            assert_eq!(
+                matches_agent_chat_wait_condition(&condition, &state, Default::default),
+                Some(true)
+            );
+            assert_eq!(
+                matches_agent_chat_wait_condition(
+                    &condition,
+                    &AgentChatStateSnapshot::default(),
+                    Default::default
+                ),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            matches_agent_chat_wait_condition(
+                &WaitDetailedCondition::AgentChatSetupSelectedAgent {
+                    agent_id: "other-agent".into()
+                },
+                &state,
+                Default::default
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn chat_proof_waits_match_only_latest_acceptance_and_exact_layout() {
+        use crate::protocol::{
+            AgentChatInputLayoutTelemetry, AgentChatPickerItemAcceptedTelemetry,
+            AgentChatTestProbeSnapshot,
+        };
+        let mut probe = AgentChatTestProbeSnapshot::default();
+        for (label, key, cursor) in [("old", "enter", 2), ("latest", "tab", 9)] {
+            probe
+                .accepted_items
+                .push(AgentChatPickerItemAcceptedTelemetry {
+                    trigger: "@".into(),
+                    item_label: label.into(),
+                    item_id: label.into(),
+                    accepted_via_key: key.into(),
+                    cursor_after: cursor,
+                    caused_submit: false,
+                });
+        }
+        probe.input_layout = Some(AgentChatInputLayoutTelemetry {
+            char_count: 20,
+            visible_start: 4,
+            visible_end: 12,
+            cursor_in_window: 5,
+        });
+        for (condition, expected) in [
+            (
+                WaitDetailedCondition::AgentChatAcceptedLabel {
+                    label: "old".into(),
+                },
+                false,
+            ),
+            (
+                WaitDetailedCondition::AgentChatAcceptedLabel {
+                    label: "latest".into(),
+                },
+                true,
+            ),
+            (
+                WaitDetailedCondition::AgentChatAcceptedViaKey { key: "tab".into() },
+                true,
+            ),
+            (
+                WaitDetailedCondition::AgentChatAcceptedCursorAt { index: 9 },
+                true,
+            ),
+            (
+                WaitDetailedCondition::AgentChatInputLayoutMatch {
+                    visible_start: 4,
+                    visible_end: 12,
+                    cursor_in_window: 5,
+                },
+                true,
+            ),
+            (
+                WaitDetailedCondition::AgentChatInputLayoutMatch {
+                    visible_start: 4,
+                    visible_end: 12,
+                    cursor_in_window: 6,
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(
+                matches_agent_chat_wait_condition(&condition, &probe.state, || probe.clone()),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn shared_command_errors_retain_code_and_suggestion_through_anyhow() {
+        let expected = TransactionError::element_not_found("choice:2:missing");
+        let error: anyhow::Error = expected.clone().into();
+        assert_eq!(error.downcast::<TransactionError>().unwrap(), expected);
+    }
+
+    #[test]
     fn expected_empty_input_matches_none_and_some_empty_snapshots() {
         let spec = StateMatchSpec {
             input_value: Some(String::new()),
@@ -107,21 +447,12 @@ mod state_match_tests {
     }
 
     #[test]
-    fn replay_trace_policy_never_overrides_the_current_privacy_mode() {
-        for status in [TransactionTraceStatus::Ok, TransactionTraceStatus::Failed] {
-            assert!(!should_expose_replayed_trace(
-                TransactionTraceMode::Off,
-                &status
-            ));
+    fn trace_policy_never_overrides_the_current_privacy_mode() {
+        for success in [true, false] {
+            assert!(!should_include_trace(TransactionTraceMode::Off, success));
         }
-        assert!(!should_expose_replayed_trace(
-            TransactionTraceMode::OnFailure,
-            &TransactionTraceStatus::Ok
-        ));
-        assert!(should_expose_replayed_trace(
-            TransactionTraceMode::OnFailure,
-            &TransactionTraceStatus::Failed
-        ));
+        assert!(!should_include_trace(TransactionTraceMode::OnFailure, true));
+        assert!(should_include_trace(TransactionTraceMode::OnFailure, false));
     }
 
     #[test]
@@ -462,7 +793,7 @@ fn run_wait_for_command<P: TransactionStateProvider>(
             };
         }
 
-        if elapsed_ms >= timeout {
+        if elapsed_ms >= timeout || polls.len() >= MAX_WAIT_POLLS {
             let error = TransactionError {
                 code: TransactionErrorCode::WaitConditionTimeout,
                 message: format!(
@@ -498,7 +829,9 @@ fn run_wait_for_command<P: TransactionStateProvider>(
             };
         }
 
-        std::thread::sleep(Duration::from_millis(poll_interval.max(1)));
+        std::thread::sleep(Duration::from_millis(
+            poll_interval.max(1).min(timeout.saturating_sub(elapsed_ms)),
+        ));
     }
 }
 
@@ -509,6 +842,24 @@ pub fn stable_transaction_fingerprint(
     let payload = serde_json::json!({
         "commands": commands,
         "options": options,
+    });
+    Ok(transaction_content_fingerprint(&serde_json::to_string(
+        &payload,
+    )?))
+}
+
+/// A runtime transaction is scoped to one process session and exact target lifetime.
+/// Persisted traces remain history, never an authority to skip a live observation.
+pub fn scoped_transaction_fingerprint(
+    commands: &[BatchCommand],
+    options: Option<&BatchOptions>,
+    target: &crate::protocol::AutomationWindowInfo,
+    session_id: &str,
+) -> Result<String> {
+    let payload = serde_json::json!({
+        "commands": commands, "options": options, "sessionId": session_id,
+        "target": {"id":target.id,"generation":target.generation,"kind":target.kind,
+            "parentId":target.parent_window_id,"parentGeneration":target.parent_window_generation},
     });
     Ok(transaction_content_fingerprint(&serde_json::to_string(
         &payload,
@@ -562,13 +913,6 @@ impl BatchOutput {
             trace: Some(trace),
         }
     }
-}
-
-fn should_expose_replayed_trace(
-    trace_mode: TransactionTraceMode,
-    status: &TransactionTraceStatus,
-) -> bool {
-    should_include_trace(trace_mode, status == &TransactionTraceStatus::Ok)
 }
 
 fn record_first_batch_failure(failed_at: &mut Option<usize>, index: usize) {
@@ -635,35 +979,11 @@ pub fn execute_wait_for<P: TransactionStateProvider>(
     trace_mode: TransactionTraceMode,
 ) -> Result<WaitForOutput> {
     let timeout = timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-    let poll_interval = poll_interval.unwrap_or(DEFAULT_WAIT_POLL_INTERVAL_MS);
+    anyhow::ensure!(timeout <= 600_000, "wait_deadline_invalid");
+    let poll_interval = poll_interval
+        .unwrap_or(DEFAULT_WAIT_POLL_INTERVAL_MS)
+        .clamp(1, 1_000);
     let command_fingerprint = stable_wait_fingerprint(condition, timeout, poll_interval)?;
-
-    if let Some(existing) = read_latest_transaction_trace(None, Some(&request_id))? {
-        if existing.command_fingerprint.is_empty() {
-            tracing::warn!(
-                target: "script_kit::transaction",
-                request_id = %request_id,
-                "Ignoring legacy transaction trace without fingerprint"
-            );
-        } else if existing.command_fingerprint == command_fingerprint {
-            let success = existing.status == TransactionTraceStatus::Ok;
-            let include_trace = should_expose_replayed_trace(trace_mode, &existing.status);
-            return Ok(WaitForOutput {
-                request_id,
-                success,
-                elapsed: existing.total_elapsed_ms,
-                error: existing
-                    .commands
-                    .iter()
-                    .find_map(|command| command.error.clone()),
-                trace: include_trace.then_some(existing),
-            });
-        } else {
-            return Err(anyhow::anyhow!(
-                "requestId {request_id} was already used for a different transaction payload"
-            ));
-        }
-    }
 
     let result = run_wait_for_command(provider, 0, condition, timeout, poll_interval);
 
@@ -712,27 +1032,21 @@ pub fn execute_batch<P: TransactionStateProvider>(
     trace_mode: TransactionTraceMode,
 ) -> Result<BatchOutput> {
     let stop_on_error = options.is_none_or(|o| o.stop_on_error);
+    anyhow::ensure!(
+        commands.len() <= MAX_BATCH_COMMANDS,
+        "batch_command_budget_exhausted"
+    );
+    anyhow::ensure!(
+        !options.is_some_and(|options| options.rollback_on_error),
+        "batch_rollback_unsupported"
+    );
+    let timeout =
+        Duration::from_millis(options.map_or(DEFAULT_WAIT_TIMEOUT_MS, |options| options.timeout));
+    anyhow::ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_millis(600_000),
+        "batch_deadline_invalid"
+    );
     let command_fingerprint = stable_transaction_fingerprint(commands, options)?;
-    if let Some(existing) = read_latest_transaction_trace(None, Some(&request_id))? {
-        if existing.command_fingerprint.is_empty() {
-            tracing::warn!(
-                target: "script_kit::transaction",
-                request_id = %request_id,
-                "Ignoring legacy transaction trace without fingerprint"
-            );
-        } else if existing.command_fingerprint == command_fingerprint {
-            let include_trace = should_expose_replayed_trace(trace_mode, &existing.status);
-            let mut replay = BatchOutput::from_trace(existing);
-            if !include_trace {
-                replay.trace = None;
-            }
-            return Ok(replay);
-        } else {
-            return Err(anyhow::anyhow!(
-                "requestId {request_id} was already used for a different transaction payload"
-            ));
-        }
-    }
     let started_at_ms = now_epoch_ms();
     let started = Instant::now();
     let mut results = Vec::new();
@@ -748,6 +1062,25 @@ pub fn execute_batch<P: TransactionStateProvider>(
     );
 
     for (index, command) in commands.iter().enumerate() {
+        if started.elapsed() >= timeout {
+            let error = TransactionError::wait_timeout("Batch timeout exceeded");
+            results.push(BatchResultEntry {
+                index,
+                success: false,
+                command: command_name(command).into(),
+                elapsed: Some(0),
+                value: None,
+                error: Some(error.clone()),
+            });
+            command_traces.push(unsupported_command_trace(
+                index,
+                command,
+                &error,
+                provider.snapshot(),
+            ));
+            record_first_batch_failure(&mut failed_at, index);
+            break;
+        }
         match command {
             BatchCommand::SetInput { text } => {
                 let cmd_started_at = now_epoch_ms();
@@ -807,7 +1140,11 @@ pub fn execute_batch<P: TransactionStateProvider>(
                 timeout,
                 poll_interval,
             } => {
-                let t = timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+                let t = timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS).min(
+                    options
+                        .map_or(DEFAULT_WAIT_TIMEOUT_MS, |options| options.timeout)
+                        .saturating_sub(started.elapsed().as_millis() as u64),
+                );
                 let pi = poll_interval.unwrap_or(DEFAULT_WAIT_POLL_INTERVAL_MS);
 
                 let wr = run_wait_for_command(provider, index, condition, t, pi);

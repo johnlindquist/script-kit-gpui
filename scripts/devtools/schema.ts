@@ -3,7 +3,88 @@
 import {
   receiptRegistryReport,
   validateReceiptFile,
+  type ReceiptSchemaDefinition,
 } from "./lib/receipt-schema.ts";
+import { OWNED_RESPONSE_CODEC, OWNED_RESPONSE_ENCODING } from "./driver.ts";
+
+interface PrimitiveSchemaReport {
+  primitive: string;
+  requiredResultFields: string[];
+  failClosedWhen?: string[];
+  implementation?: string;
+}
+
+interface OwnedCaptureFrameProtocolReport {
+  request: {
+    type: "design";
+    command: {
+      operation: "captureFrame";
+      target: { type: "instance"; id: string; generation: string };
+      includeImage: string;
+    };
+  };
+  requiredCommandFields: string[];
+  additionalCommandFields: false;
+  requiredResultFields: string[];
+  semantics: string;
+  identity: string;
+  failClosedWhen: string[];
+  exactPriorFrameReadback: string;
+}
+
+interface OwnedFrameAcknowledgementProtocolReport {
+  version: 1;
+  operation: "acknowledgeFrames";
+  requiredCommandFields: string[];
+  requiredResultFields: string[];
+  semantics: string;
+  failClosedWhen: string[];
+}
+
+interface OwnedResponseEncodingProtocolReport {
+  capability: typeof OWNED_RESPONSE_CODEC;
+  request: { responseEncoding: typeof OWNED_RESPONSE_ENCODING };
+  requiredResponseFields: string[];
+  additionalResponseFields: false;
+  semantics: string;
+  identity: string;
+  physicalOutputAccounting: string;
+  failClosedWhen: string[];
+}
+
+interface ExecutableReceiptRegistryEntry extends Pick<
+  ReceiptSchemaDefinition,
+  | "primitiveId"
+  | "version"
+  | "tool"
+  | "commands"
+  | "nonNullPaths"
+  | "allowedDispositions"
+  | "requiredEvidenceLayers"
+  | "privacyPolicy"
+  | "identityPolicy"
+  | "description"
+> {
+  requiredFields: string[];
+  forbidMissingPrimitivesOnPass: boolean;
+  activationProof: boolean;
+  predicates: string[];
+}
+
+export interface SchemaReport {
+  schemaVersion: 2;
+  tool: "script-kit-devtools.schema";
+  generatedAt: string;
+  source: string;
+  philosophy: string;
+  receiptEnvelopeFields: string[];
+  classifications: string[];
+  targetIdentityFields: string[];
+  primitiveSchemas: PrimitiveSchemaReport[];
+  ownedEvaluationProtocol: { captureFrame: OwnedCaptureFrameProtocolReport; acknowledgeFrames: OwnedFrameAcknowledgementProtocolReport; responseEncoding: OwnedResponseEncodingProtocolReport };
+  executableReceiptRegistry: ExecutableReceiptRegistryEntry[];
+  acceptanceBar: string[];
+}
 
 const classifications = [
   "ok",
@@ -88,6 +169,10 @@ const targetIdentityFields = [
   "resolvedTarget.targetGeneration",
   "resolvedTarget.surfaceGeneration",
   "resolvedTarget.dataGeneration",
+  "resolvedTarget.presentationRevision",
+  "resolvedTarget.themeRevision",
+  "resolvedTarget.frameGeneration",
+  "resolvedTarget.parentWindowGeneration",
   "resolvedTarget.bounds",
   "resolvedTarget.screenId",
   "resolvedTarget.zOrder",
@@ -103,7 +188,10 @@ const targetIdentityFields = [
   "resolvedTarget.ambiguity",
 ];
 
-const primitiveSchemas = [
+const primitiveSchemas: PrimitiveSchemaReport[] = [
+  { primitive: "devtools.design.run", requiredResultFields: ["artifactReference", "observation", "assertions", "cleanup"] },
+  { primitive: "devtools.stories.run", requiredResultFields: ["library", "journeys", "cleanup"] },
+  { primitive: "devtools.build-ops", requiredResultFields: ["buildOps", "safety", "cleanup"] },
   {
     primitive: "devtools.aiReliability.inspect",
     requiredResultFields: [
@@ -599,7 +687,7 @@ function parseArgs(argv: string[]) {
   };
 }
 
-function report() {
+function report(): SchemaReport {
   return {
     schemaVersion: 2,
     tool: "script-kit-devtools.schema",
@@ -610,12 +698,41 @@ function report() {
     classifications,
     targetIdentityFields,
     primitiveSchemas,
+    ownedEvaluationProtocol: {
+      acknowledgeFrames: {
+        version: 1, operation: "acknowledgeFrames",
+        requiredCommandFields: ["operation", "target", "expected", "cursor"],
+        requiredResultFields: ["operation", "ok", "target", "expected", "acknowledgedCursor", "retiredFrames", "retainedFrames", "retainedTraceBytes"],
+        semantics: "Explicit mutation on the sealed search fixture after the driver losslessly retains a frame page. Retire stamps strictly before the exact cursor frame and release their accounted bytes; preserve that frame as the next scheduled-capture baseline. Never draw, notify, advance a clock, clear a failure, or change a read cursor. expected echoes the accepted target expectation, not a newly observed frame.",
+        failClosedWhen: ["foreign or stale target", "cursor beyond the expected frame", "stale, retired, future or nonexistent cursor frame", "failed trace", "unknown fields", "missing scheduled-frame capability"],
+      },
+      responseEncoding: {
+        capability: OWNED_RESPONSE_CODEC,
+        request: { responseEncoding: OWNED_RESPONSE_ENCODING },
+        requiredResponseFields: ["type", "version", "encoding", "requestId", "protocolVersion", "responseType", "decodedBytes", "compressedBytes", "payload"],
+        additionalResponseFields: false,
+        semantics: "Exact catalog negotiation opts each request into one independent zlib stream of the complete original UTF-8 JSON response, carried as canonical padded base64 in payload. Every opted response is encoded, including refusals; no dictionaries, aliases across responses, retries or identity fallback. Requests without the field and unsolicited lifecycle observations remain unchanged. Decode before existing frame, metadata, ownership and terminal-response validation; their bounds remain unchanged.",
+        identity: "Envelope type is encodedResponse and version is 1. requestId and protocolVersion equal the decoded response; responseType equals its type. Every outer bus identity must agree as well. Declared compressedBytes and decodedBytes equal actual lengths; bounded inflate occurs before JSON parsing.",
+        physicalOutputAccounting: "The existing 6 MiB physical line and 64 MiB owned-process total-output limits count actual received wire bytes, never reconstructed JSON. The codec's 6 MiB decoded and 4 MiB compressed limits are independent; compressed bytes never substitute for decoded metadata size.",
+        failClosedWhen: ["unrequested or missing encoding", "unknown codec/version/header fields", "invalid or noncanonical base64", "oversized or mismatched lengths", "invalid checksum, dictionary, trailing stream or malformed zlib", "invalid UTF-8/JSON", "outer/decoded identity mismatch"],
+      },
+      captureFrame: {
+        request: { type: "design", command: { operation: "captureFrame", target: { type: "instance", id: "string", generation: "positive integer" }, includeImage: "boolean" } },
+        requiredCommandFields: ["operation", "target", "includeImage"],
+        additionalCommandFields: false,
+        requiredResultFields: ["operation", "ok", "frame", "snapshot", "state", "elements", "layout", "phaseDurationsMs"],
+        semantics: "Read latest exact live instance; complete one real frame, synchronously collect state/elements/layout, and strictly capture it in one foreground command without progress pumping or retries after frame completion.",
+        identity: "frame equals snapshot.frameIdentity; state/elements/layout targetIdentity equal frame.target. snapshot.correlationId equals the outer requestId; observations use requestId:state, requestId:elements, requestId:layout.",
+        failClosedWhen: ["foreign or stale instance", "deferred snapshot response", "frame/observation identity mismatch", "unqualified readback", "frame or image budget exhausted"],
+        exactPriorFrameReadback: "captureRenderWindow remains unchanged: target plus expected completed-frame identity, hiDpi:true, includeImage:boolean; stale identity is refused.",
+      },
+    },
     executableReceiptRegistry: receiptRegistryReport(),
     acceptanceBar,
   };
 }
 
-function markdown(data: ReturnType<typeof report>) {
+function markdown(data: SchemaReport): string {
   return [
     "# Script Kit DevTools Receipt Schema",
     "",
@@ -634,8 +751,20 @@ function markdown(data: ReturnType<typeof report>) {
     "| Primitive | Required fields | Fail closed when |",
     "| --- | --- | --- |",
     ...data.primitiveSchemas.map(
-      (schema) => `| ${schema.primitive} | ${schema.requiredResultFields.join(", ")} | ${schema.failClosedWhen.join(", ")} |`
+      (schema) => `| ${schema.primitive} | ${schema.requiredResultFields.join(", ")} | ${schema.failClosedWhen?.join(", ") ?? "Not declared"} |`
     ),
+    "",
+    "## Owned Evaluation Atomic Capture",
+    "",
+    JSON.stringify(data.ownedEvaluationProtocol.captureFrame, null, 2),
+    "",
+    "## Owned Evaluation Frame Acknowledgement",
+    "",
+    JSON.stringify(data.ownedEvaluationProtocol.acknowledgeFrames, null, 2),
+    "",
+    "## Owned Evaluation Response Encoding",
+    "",
+    JSON.stringify(data.ownedEvaluationProtocol.responseEncoding, null, 2),
     "",
     "## Acceptance Bar",
     "",

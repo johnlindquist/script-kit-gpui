@@ -59,15 +59,6 @@ impl Diagnostic {
         }
     }
 
-    pub fn info(path: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            severity: DiagnosticSeverity::Info,
-            message: message.into(),
-            suggestion: None,
-        }
-    }
-
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
         self
@@ -97,10 +88,6 @@ impl ThemeDiagnostics {
         self.add(Diagnostic::warning(path, message));
     }
 
-    pub fn info(&mut self, path: impl Into<String>, message: impl Into<String>) {
-        self.add(Diagnostic::info(path, message));
-    }
-
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
@@ -125,14 +112,6 @@ impl ThemeDiagnostics {
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Warning)
             .count()
-    }
-
-    pub fn is_ok(&self) -> bool {
-        !self.has_errors()
-    }
-
-    pub fn merge(&mut self, other: ThemeDiagnostics) {
-        self.diagnostics.extend(other.diagnostics);
     }
 
     pub fn format_for_log(&self) -> String {
@@ -231,6 +210,10 @@ const KNOWN_OPACITY_KEYS: &[&str] = &[
     "text_hint",
     "text_placeholder",
     "text_icon",
+    "glass_veil_opacity",
+    "glass_tint_opacity",
+    "glass_morph_duration",
+    "glass_morph_inset",
 ];
 const KNOWN_VIBRANCY_KEYS: &[&str] = &["enabled", "material", "backdrop_saturation"];
 const KNOWN_DROP_SHADOW_KEYS: &[&str] = &[
@@ -243,7 +226,8 @@ const KNOWN_DROP_SHADOW_KEYS: &[&str] = &[
     "opacity",
 ];
 const KNOWN_FONT_KEYS: &[&str] = &["mono_family", "mono_size", "ui_family", "ui_size"];
-const KNOWN_BACKGROUND_GRADIENT_KEYS: &[&str] = &["enabled", "from", "to", "angle", "opacity"];
+const KNOWN_BACKGROUND_GRADIENT_KEYS: &[&str] =
+    &["enabled", "from", "to", "angle", "opacity", "layers"];
 const VALID_MATERIALS: &[&str] = &["hud", "popover", "menu", "sidebar", "content"];
 
 /// Validate a theme JSON value and return diagnostics
@@ -357,11 +341,11 @@ fn validate_focus_aware(diags: &mut ThemeDiagnostics, path: &str, focus_aware: &
     if let Value::Object(map) = focus_aware {
         check_unknown_keys(diags, path, map.keys(), KNOWN_FOCUS_AWARE_KEYS);
 
-        if let Some(focused) = map.get("focused") {
+        if let Some(focused) = map.get("focused").filter(|value| !value.is_null()) {
             validate_focus_color_scheme(diags, &format!("{}/focused", path), focused);
         }
 
-        if let Some(unfocused) = map.get("unfocused") {
+        if let Some(unfocused) = map.get("unfocused").filter(|value| !value.is_null()) {
             validate_focus_color_scheme(diags, &format!("{}/unfocused", path), unfocused);
         }
     } else {
@@ -401,7 +385,7 @@ fn validate_focus_color_scheme(diags: &mut ThemeDiagnostics, path: &str, scheme:
             validate_color_object(diags, &format!("{}/ui", path), ui, KNOWN_UI_KEYS, &[]);
         }
 
-        if let Some(cursor) = map.get("cursor") {
+        if let Some(cursor) = map.get("cursor").filter(|value| !value.is_null()) {
             validate_cursor(diags, &format!("{}/cursor", path), cursor);
         }
 
@@ -411,7 +395,7 @@ fn validate_focus_color_scheme(diags: &mut ThemeDiagnostics, path: &str, scheme:
                 &format!("{}/terminal", path),
                 terminal,
                 KNOWN_TERMINAL_KEYS,
-                &[],
+                &["foreground", "background"],
             );
         }
     } else {
@@ -503,7 +487,32 @@ fn validate_opacity(diags: &mut ThemeDiagnostics, path: &str, opacity: &Value) {
     if let Value::Object(map) = opacity {
         check_unknown_keys(diags, path, map.keys(), KNOWN_OPACITY_KEYS);
         for (key, value) in map {
-            validate_opacity_value(diags, &format!("{}/{}", path, key), value);
+            if value.is_null()
+                && matches!(
+                    key.as_str(),
+                    "vibrancy_background"
+                        | "glass_veil_opacity"
+                        | "glass_tint_opacity"
+                        | "glass_morph_duration"
+                        | "glass_morph_inset"
+                )
+            {
+                continue;
+            }
+            let field = format!("{path}/{key}");
+            let maximum = match key.as_str() {
+                "glass_morph_duration" => 2.0,
+                "glass_morph_inset" => 0.4,
+                _ => {
+                    validate_opacity_value(diags, &field, value);
+                    continue;
+                }
+            };
+            match value.as_f64() {
+                Some(number) if number.is_finite() && (0.0..=maximum).contains(&number) => {}
+                Some(_) => diags.warning(field, format!("Value will be clamped to 0..={maximum}")),
+                None => diags.error(field, "Value must be a number"),
+            }
         }
         if let (Some(selected), Some(hover)) = (map.get("selected"), map.get("hover")) {
             validate_hover_less_than_selected(diags, path, selected, hover);
@@ -657,6 +666,25 @@ fn validate_background_gradient(diags: &mut ThemeDiagnostics, path: &str, gradie
         }
         if let Some(opacity) = map.get("opacity") {
             validate_opacity_value(diags, &format!("{}/opacity", path), opacity);
+        }
+        if let Some(layers) = map.get("layers") {
+            match layers.as_array() {
+                Some(layers) if layers.len() <= 8 => {
+                    for (index, layer) in layers.iter().enumerate() {
+                        let path = format!("{path}/layers/{index}");
+                        if layer.get("layers").is_some() {
+                            diags.error(path, "Gradient layers cannot contain nested layers");
+                        } else {
+                            validate_background_gradient(diags, &path, layer);
+                        }
+                    }
+                }
+                Some(_) => diags.error(
+                    format!("{path}/layers"),
+                    "At most eight layers are supported",
+                ),
+                None => diags.error(format!("{path}/layers"), "layers must be an array"),
+            }
         }
     } else {
         diags.error(path, "background_gradient must be an object");

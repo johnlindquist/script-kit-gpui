@@ -104,6 +104,7 @@ pub struct Dialog {
     /// This will be change when open the dialog, the focus handle is create when open the dialog.
     pub(crate) focus_handle: FocusHandle,
     pub(crate) layer_ix: usize,
+    pub(crate) layer_id: Option<crate::RootDialogId>,
     pub(crate) overlay_visible: bool,
 }
 
@@ -131,6 +132,7 @@ impl Dialog {
             overlay: true,
             keyboard: true,
             layer_ix: 0,
+            layer_id: None,
             overlay_visible: false,
             on_close: Rc::new(|_, _, _| {}),
             on_ok: None,
@@ -303,9 +305,29 @@ impl Styled for Dialog {
     }
 }
 
+fn dialog_layer_is_current(id: Option<crate::RootDialogId>, window: &Window, cx: &App) -> bool {
+    id.is_none_or(|id| {
+        window
+            .root::<Root>()
+            .flatten()
+            .is_some_and(|root| root.read(cx).is_current_dialog(id))
+    })
+}
+
+fn close_dialog_layer(id: Option<crate::RootDialogId>, window: &mut Window, cx: &mut App) -> bool {
+    match id {
+        Some(id) => Root::close_dialog_if_current(id, window, cx),
+        None => {
+            window.close_dialog(cx);
+            true
+        }
+    }
+}
+
 impl RenderOnce for Dialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl gpui::IntoElement {
         let layer_ix = self.layer_ix;
+        let layer_id = self.layer_id;
         let on_close = self.on_close.clone();
         let on_ok = self.on_ok.clone();
         let on_cancel = self.on_cancel.clone();
@@ -332,14 +354,18 @@ impl RenderOnce for Dialog {
                         let on_close = on_close.clone();
 
                         move |_, window, cx| {
+                            if !dialog_layer_is_current(layer_id, window, cx) {
+                                return;
+                            }
                             if let Some(on_ok) = &on_ok {
                                 if !on_ok(&ClickEvent::default(), window, cx) {
                                     return;
                                 }
                             }
 
-                            window.close_dialog(cx);
-                            on_close(&ClickEvent::default(), window, cx);
+                            if close_dialog_layer(layer_id, window, cx) {
+                                on_close(&ClickEvent::default(), window, cx);
+                            }
                         }
                     })
                     .into_any_element()
@@ -362,12 +388,16 @@ impl RenderOnce for Dialog {
                         let on_cancel = on_cancel.clone();
                         let on_close = on_close.clone();
                         move |_, window, cx| {
+                            if !dialog_layer_is_current(layer_id, window, cx) {
+                                return;
+                            }
                             if !on_cancel(&ClickEvent::default(), window, cx) {
                                 return;
                             }
 
-                            window.close_dialog(cx);
-                            on_close(&ClickEvent::default(), window, cx);
+                            if close_dialog_layer(layer_id, window, cx) {
+                                on_close(&ClickEvent::default(), window, cx);
+                            }
                         }
                     })
                     .into_any_element()
@@ -436,6 +466,9 @@ impl RenderOnce for Dialog {
                                 let on_cancel = on_cancel.clone();
                                 let on_close = on_close.clone();
                                 move |event, window, cx| {
+                                    if !dialog_layer_is_current(layer_id, window, cx) {
+                                        return;
+                                    }
                                     if event.position.y < TITLE_BAR_HEIGHT {
                                         return;
                                     }
@@ -444,7 +477,7 @@ impl RenderOnce for Dialog {
                                     if self.overlay_closable && event.button == MouseButton::Left {
                                         on_cancel(&ClickEvent::default(), window, cx);
                                         on_close(&ClickEvent::default(), window, cx);
-                                        window.close_dialog(cx);
+                                        close_dialog_layer(layer_id, window, cx);
                                     }
                                 }
                             })
@@ -472,10 +505,13 @@ impl RenderOnce for Dialog {
                                 let keep_open_while = keep_open_while.clone();
                                 let dialog_focus_handle = dialog_focus_handle.clone();
                                 move |_, window, cx| {
+                                    if !dialog_layer_is_current(layer_id, window, cx) {
+                                        return;
+                                    }
                                     // Close the dialog when the owner goes away.
                                     if let Some(pred) = &keep_open_while {
                                         if !pred() {
-                                            window.close_dialog(cx);
+                                            close_dialog_layer(layer_id, window, cx);
                                             return;
                                         }
                                     }
@@ -503,7 +539,10 @@ impl RenderOnce for Dialog {
                                         cx.defer(move |cx| {
                                             window_handle
                                                 .update(cx, |_, window: &mut Window, cx| {
-                                                    window.focus_next(cx);
+                                                    if dialog_layer_is_current(layer_id, window, cx)
+                                                    {
+                                                        window.focus_next(cx);
+                                                    }
                                                 })
                                                 .ok();
                                         });
@@ -511,21 +550,23 @@ impl RenderOnce for Dialog {
                                 }
                             })
                             .when(self.keyboard, |this| {
-                                this.on_action(|_: &FocusNext, window, cx| {
-                                    window.focus_next_in_dialog(cx);
+                                this.on_action(move |_: &FocusNext, window, cx| {
+                                    if dialog_layer_is_current(layer_id, window, cx) {
+                                        window.focus_next_in_dialog(cx);
+                                    }
                                 })
-                                .on_action(|_: &FocusPrev, window, cx| {
-                                    window.focus_prev_in_dialog(cx);
+                                .on_action(move |_: &FocusPrev, window, cx| {
+                                    if dialog_layer_is_current(layer_id, window, cx) {
+                                        window.focus_prev_in_dialog(cx);
+                                    }
                                 })
                                 .on_action({
                                     let on_cancel = on_cancel.clone();
                                     let on_close = on_close.clone();
                                     move |_: &Cancel, window, cx| {
-                                        window.close_dialog(cx);
-                                        // FIXME:
-                                        //
-                                        // Here some Dialog have no focus_handle, so it will not work will Escape key.
-                                        // But by now, we `cx.close_dialog()` going to close the last active model, so the Escape is unexpected to work.
+                                        if !close_dialog_layer(layer_id, window, cx) {
+                                            return;
+                                        }
                                         on_cancel(&ClickEvent::default(), window, cx);
                                         on_close(&ClickEvent::default(), window, cx);
                                     }
@@ -535,14 +576,19 @@ impl RenderOnce for Dialog {
                                     let on_close = on_close.clone();
                                     let has_footer = self.footer.is_some();
                                     move |_: &Confirm, window, cx| {
+                                        if !dialog_layer_is_current(layer_id, window, cx) {
+                                            return;
+                                        }
                                         if let Some(on_ok) = &on_ok {
                                             if on_ok(&ClickEvent::default(), window, cx) {
-                                                window.close_dialog(cx);
-                                                on_close(&ClickEvent::default(), window, cx);
+                                                if close_dialog_layer(layer_id, window, cx) {
+                                                    on_close(&ClickEvent::default(), window, cx);
+                                                }
                                             }
                                         } else if has_footer {
-                                            window.close_dialog(cx);
-                                            on_close(&ClickEvent::default(), window, cx);
+                                            if close_dialog_layer(layer_id, window, cx) {
+                                                on_close(&ClickEvent::default(), window, cx);
+                                            }
                                         }
                                     }
                                 })
@@ -579,7 +625,9 @@ impl RenderOnce for Dialog {
                                         let on_cancel = self.on_cancel.clone();
                                         let on_close = self.on_close.clone();
                                         move |_, window, cx| {
-                                            window.close_dialog(cx);
+                                            if !close_dialog_layer(layer_id, window, cx) {
+                                                return;
+                                            }
                                             on_cancel(&ClickEvent::default(), window, cx);
                                             on_close(&ClickEvent::default(), window, cx);
                                         }

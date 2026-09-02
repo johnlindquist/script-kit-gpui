@@ -1,6 +1,36 @@
 use super::*;
 
 impl ScriptListApp {
+    fn persist_profile_search_selection_for_host(&mut self, id: &str, quick_ai: bool) -> bool {
+        if self.main_services.is_production() {
+            return if quick_ai {
+                crate::profile_search::persist_quick_ai_profile_search_selection(id)
+            } else {
+                crate::profile_search::persist_profile_search_selection(id)
+            };
+        }
+        let context = crate::ai::agent_chat::profiles::AgentChatProfileContext::from_setup();
+        let selected = if quick_ai {
+            crate::ai::agent_chat::profiles::persist_quick_ai_profile_selection(
+                &mut self.main_preferences.ai,
+                id,
+                &context,
+            )
+            .is_some()
+        } else {
+            crate::ai::agent_chat::profiles::persist_agent_chat_profile_selection(
+                &mut self.main_preferences.ai,
+                id,
+                &context,
+            )
+            .is_some()
+        };
+        if selected {
+            self.mark_main_data_changed();
+        }
+        selected
+    }
+
     pub(crate) fn arm_return_to_script_list_enter_guard_from_profile_search(&mut self) {
         self.return_to_script_list_key_guard = Some(ReturnToScriptListKeyGuard {
             key: "enter",
@@ -81,6 +111,7 @@ impl ScriptListApp {
             filter: String::new(),
             selected_index: 0,
         };
+        self.note_main_route_changed();
         self.rekey_main_automation_surface_from_current_view();
         self.hovered_index = None;
         self.opened_from_main_menu = true;
@@ -130,7 +161,11 @@ impl ScriptListApp {
         &self,
         filter: &str,
     ) -> Vec<crate::profile_search::ProfileSearchResult> {
-        let prefs = crate::config::load_user_preferences();
+        let prefs = if self.main_services.is_production() {
+            crate::config::load_user_preferences()
+        } else {
+            self.main_preferences.clone()
+        };
         let ctx = crate::ai::agent_chat::profiles::AgentChatProfileContext::from_setup();
         crate::profile_search::profile_search_results(&prefs.ai, &ctx, filter)
     }
@@ -200,12 +235,20 @@ impl ScriptListApp {
         if result.profile.id == crate::profile_search::CREATE_PROFILE_ROW_ID {
             return self.create_profile_from_profile_search(cx);
         }
-        let persisted = crate::profile_search::persist_profile_search_selection(&result.profile.id);
+        let persisted = self.persist_profile_search_selection_for_host(&result.profile.id, false);
         if persisted {
-            self.refresh_agent_model_footer_labels();
+            if self.main_services.is_production() {
+                self.refresh_agent_model_footer_labels();
+            }
             self.arm_return_to_script_list_enter_guard_from_profile_search();
             self.reset_to_script_list(cx);
-            self.refresh_agent_model_footer_labels();
+            if self.main_services.is_production() {
+                self.refresh_agent_model_footer_labels();
+            } else {
+                self.spine_agent_label = Some(result.profile.name.clone());
+                self.spine_model_label = result.profile.model.clone();
+                self.mark_main_data_changed();
+            }
         }
         cx.notify();
         persisted
@@ -215,6 +258,14 @@ impl ScriptListApp {
     /// profile (mdflow format) into `<kit>/profiles/` and open it in the
     /// configured editor.
     pub(crate) fn create_profile_from_profile_search(&mut self, cx: &mut Context<Self>) -> bool {
+        // This command creates and opens a profile. Refuse the unavailable
+        // external half before creating a file or resolving operator setup.
+        if let Err(refusal) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        {
+            tracing::warn!(target: "script_kit::spine", code = refusal.code, "Profile editor launch refused");
+            return false;
+        }
         let ctx = crate::ai::agent_chat::profiles::AgentChatProfileContext::from_setup();
         match crate::ai::agent_chat::mdflow_profiles::create_mdflow_profile_from_template(&ctx) {
             Ok(path) => {
@@ -259,9 +310,7 @@ impl ScriptListApp {
         let Some(result) = self.selected_profile_search_result_owned() else {
             return false;
         };
-        let persisted = crate::profile_search::persist_quick_ai_profile_search_selection(
-            &result.profile.id,
-        );
+        let persisted = self.persist_profile_search_selection_for_host(&result.profile.id, true);
         if persisted {
             self.arm_return_to_script_list_enter_guard_from_profile_search();
             self.reset_to_script_list(cx);

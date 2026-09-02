@@ -117,9 +117,14 @@ impl ScriptListApp {
     pub(crate) fn cancel_script_execution_without_view_reset(&mut self) {
         logging::log("EXEC", "=== Canceling script execution ===");
 
-        // Send cancel message to script (Exit with cancel code)
-        // Use try_send to avoid blocking UI thread during cancellation
-        if let Some(ref sender) = self.response_sender {
+        // The default sender belongs to stdin/RPC, not to a running script.
+        // Only a script owner may receive an unsolicited cancellation Exit.
+        let script_response_sender = self
+            .response_sender
+            .as_ref()
+            .filter(|_| self.current_script_pid.is_some() || self.script_session.lock().is_some());
+        // Use try_send to avoid blocking UI thread during cancellation.
+        if let Some(sender) = script_response_sender {
             // Try to send Exit message to terminate the script cleanly
             let exit_msg = Message::Exit {
                 code: Some(1), // Non-zero code indicates cancellation
@@ -136,7 +141,7 @@ impl ScriptListApp {
                 }
             }
         } else {
-            logging::log("EXEC", "No response_sender - script may not be running");
+            logging::log("EXEC", "No active script response owner to cancel");
         }
 
         // Belt-and-suspenders: Force-kill the process group using stored PID
@@ -290,6 +295,28 @@ impl ScriptListApp {
         );
     }
 
+    fn cancel_prompt_before_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(binding) = self.prompt_completion.as_ref() {
+            let state = binding.observation();
+            if !state.retired && !state.completed {
+                if let Err(error) =
+                    binding.try_complete(crate::prompt_completion::PromptOutcome::Cancelled)
+                {
+                    self.show_error_toast(
+                        format!("Prompt cancellation was not delivered: {error}"),
+                        cx,
+                    );
+                    return false;
+                }
+                self.mark_main_data_changed();
+            }
+            if let Some(binding) = &self.prompt_completion {
+                binding.retire();
+            }
+        }
+        true
+    }
+
     fn prepare_main_window_close(
         &mut self,
         cx: &mut Context<Self>,
@@ -308,6 +335,9 @@ impl ScriptListApp {
             && matches!(self.current_view, AppView::ScriptList)
         {
             self.cancel_day_page_context_round_trip_deferred(cx);
+            return None;
+        }
+        if !self.cancel_prompt_before_close(cx) {
             return None;
         }
         logging::log("VISIBILITY", "=== Close and reset window ===");
@@ -977,22 +1007,32 @@ impl ScriptListApp {
 
     pub(crate) fn reset_script_list_filter_state(&mut self) {
         self.filter_text.clear();
-        self.computed_filter_text.clear();
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.set_menu_syntax_mode_from_filter("");
+            if self.spine_enabled {
+                self.set_spine_parse_from_filter_and_cursor("", 0);
+            }
+            self.accept_root_search_input_intent("");
+        } else {
+            self.computed_filter_text.clear();
+        }
         self.filter_coalescer.reset();
         self.pending_filter_sync = true;
     }
 
     pub(crate) fn reset_script_list_selection_state(&mut self, cx: &mut Context<Self>) {
+        self.reset_main_menu_selection_intent();
         self.invalidate_grouped_cache();
+        self.flush_pending_main_menu_query(cx);
         self.sync_list_state();
-        self.selected_index = 0;
         self.hovered_index = None;
         self.validate_selection_bounds(cx);
+        self.reset_main_menu_viewport_intent();
         self.main_list_state.scroll_to(ListOffset {
             item_ix: 0,
             offset_in_item: px(0.),
         });
-        self.last_scrolled_index = Some(0);
+        self.last_scrolled_index = Some(self.selected_index);
     }
 
     pub(crate) fn reset_script_list_filter_and_selection_state(&mut self, cx: &mut Context<Self>) {
@@ -1014,6 +1054,9 @@ impl ScriptListApp {
     ///
     /// This provides consistent UX: pressing ESC always "goes back" one step.
     pub(crate) fn go_back_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.cancel_prompt_before_close(cx) {
+            return;
+        }
         if self.opened_from_main_menu {
             logging::log(
                 "KEY",

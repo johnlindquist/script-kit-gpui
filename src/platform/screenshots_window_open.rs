@@ -52,7 +52,9 @@ pub(crate) fn audit_screenshot_pixels(image: &image::RgbaImage) -> PixelAudit {
     let mut non_transparent = 0_u64;
     let mut luma_sum = 0_f64;
     let mut max_luma = 0_f64;
-    let mut buckets = std::collections::HashSet::new();
+    // Eight buckets per RGB channel and two alpha-presence states.
+    let mut buckets = [false; 8 * 8 * 8 * 2];
+    let mut unique_bucket_count = 0;
 
     for pixel in image.pixels() {
         let [r, g, b, a] = pixel.0;
@@ -70,20 +72,21 @@ pub(crate) fn audit_screenshot_pixels(image: &image::RgbaImage) -> PixelAudit {
         luma_sum += luma;
         max_luma = max_luma.max(luma);
 
-        let bucket = (
-            r / PIXEL_AUDIT_COLOR_BUCKET_SIZE,
-            g / PIXEL_AUDIT_COLOR_BUCKET_SIZE,
-            b / PIXEL_AUDIT_COLOR_BUCKET_SIZE,
-            if a == 0 { 0 } else { 1 },
-        );
-        buckets.insert(bucket);
+        let bucket = (((usize::from(r / PIXEL_AUDIT_COLOR_BUCKET_SIZE) * 8
+            + usize::from(g / PIXEL_AUDIT_COLOR_BUCKET_SIZE)) * 8
+            + usize::from(b / PIXEL_AUDIT_COLOR_BUCKET_SIZE)) * 2)
+            + usize::from(a != 0);
+        if !buckets[bucket] {
+            buckets[bucket] = true;
+            unique_bucket_count += 1;
+        }
     }
 
     PixelAudit {
         sampled,
         non_black,
         non_transparent,
-        unique_bucket_count: buckets.len(),
+        unique_bucket_count,
         mean_luma: if sampled == 0 {
             0.0
         } else {
@@ -204,6 +207,7 @@ fn reject_blank_screenshot_if_needed(
 
 #[cfg(target_os = "macos")]
 pub(crate) fn screen_capture_access_preflight() -> Option<bool> {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::ScreenCapture) { return None; }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
@@ -219,6 +223,7 @@ pub(crate) fn screen_capture_access_preflight() -> Option<bool> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn event_synthesizing_access_preflight() -> Option<bool> {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeInput) { return None; }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightPostEventAccess() -> bool;
@@ -249,6 +254,8 @@ fn capture_and_encode_png_with_audit(
     hi_dpi: bool,
     correlation_id: &str,
 ) -> Result<NativeWindowScreenshotCapture, NativeWindowCaptureError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)
+        .map_err(|error| NativeWindowCaptureError::CaptureFailed { message: error.to_string() })?;
     const DOWNSCALE_DIVISOR: u32 = 2;
 
     if matches!(screen_capture_access_preflight(), Some(false)) {
@@ -269,12 +276,11 @@ fn capture_and_encode_png_with_audit(
             .map_err(|error| NativeWindowCaptureError::CaptureFailed {
                 message: error.to_string(),
             })?;
-    let original_width = image.width();
-    let original_height = image.height();
-
-    let (final_image, width, height) = if hi_dpi {
-        (image, original_width, original_height)
+    let final_image = if hi_dpi {
+        image
     } else {
+        let original_width = image.width();
+        let original_height = image.height();
         let new_width = (original_width / DOWNSCALE_DIVISOR).max(1);
         let new_height = (original_height / DOWNSCALE_DIVISOR).max(1);
         let resized = image::imageops::resize(
@@ -293,25 +299,62 @@ fn capture_and_encode_png_with_audit(
             downscale_divisor = DOWNSCALE_DIVISOR,
             "automation.capture_screenshot.scaled_to_1x"
         );
-        (resized, new_width, new_height)
+        resized
     };
 
     let audit = audit_screenshot_pixels(&final_image);
     reject_blank_screenshot_if_needed(&audit, correlation_id)?;
 
-    let mut png_data = Vec::new();
-    let encoder = PngEncoder::new(&mut png_data);
-    encoder
-        .write_image(&final_image, width, height, image::ExtendedColorType::Rgba8)
-        .map_err(|error| NativeWindowCaptureError::CaptureFailed {
-            message: error.to_string(),
-        })?;
+    encode_screenshot_png(&final_image, audit, usize::MAX)
+}
 
+/// Encode already audited straight-alpha RGBA8 pixels without allowing PNG output
+/// to grow past the caller's bound. Native premultiplied readback must be converted
+/// by its owner before this boundary. This helper never obtains pixels or handles.
+pub(crate) fn encode_screenshot_png(
+    image: &image::RgbaImage,
+    pixel_audit: PixelAudit,
+    max_png_bytes: usize,
+) -> Result<NativeWindowScreenshotCapture, NativeWindowCaptureError> {
+    struct BoundedPng {
+        bytes: Vec<u8>,
+        limit: usize,
+        write_failure: Option<String>,
+    }
+    impl std::io::Write for BoundedPng {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let result = (|| {
+                let len = self.bytes.len().checked_add(bytes.len())
+                    .filter(|len| *len <= self.limit)
+                    .ok_or_else(|| std::io::Error::other("png_budget_exhausted"))?;
+                if len > self.bytes.capacity() {
+                    let capacity = self.bytes.capacity().saturating_mul(2).max(4096).max(len).min(self.limit);
+                    self.bytes.try_reserve_exact(capacity - self.bytes.len())
+                        .map_err(std::io::Error::other)?;
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            })();
+            result.inspect_err(|error: &std::io::Error| {
+                self.write_failure.get_or_insert_with(|| error.to_string());
+            })
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut output = BoundedPng { bytes: Vec::new(), limit: max_png_bytes, write_failure: None };
+    let encoded = PngEncoder::new(&mut output)
+        .write_image(image, image.width(), image.height(), image::ExtendedColorType::Rgba8);
+    // The encoder's PNG writer emits IEND from Drop and discards that write's
+    // error. Never return a successful capture after any sink write failed.
+    if let Some(message) = output.write_failure {
+        return Err(NativeWindowCaptureError::CaptureFailed { message });
+    }
+    encoded.map_err(|error| NativeWindowCaptureError::CaptureFailed { message: error.to_string() })?;
     Ok(NativeWindowScreenshotCapture {
-        png_data,
-        width,
-        height,
-        pixel_audit: audit,
+        png_data: output.bytes,
+        width: image.width(),
+        height: image.height(),
+        pixel_audit,
     })
 }
 
@@ -321,6 +364,8 @@ pub(crate) fn capture_native_window_id_screenshot(
     hi_dpi: bool,
     correlation_id: &str,
 ) -> Result<NativeWindowScreenshotCapture, NativeWindowCaptureError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)
+        .map_err(|error| NativeWindowCaptureError::CaptureFailed { message: error.to_string() })?;
     let windows = Window::all().map_err(|error| NativeWindowCaptureError::CaptureFailed {
         message: error.to_string(),
     })?;
@@ -512,6 +557,7 @@ fn list_script_kit_candidates() -> Result<Vec<Candidate>, Box<dyn std::error::Er
 fn list_script_kit_candidates_for(
     resolved: Option<&crate::protocol::AutomationWindowInfo>,
 ) -> Result<Vec<Candidate>, Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let (min_width, min_height) = match resolved.and_then(|info| info.bounds.as_ref()) {
         Some(bounds) => (
             SCRIPT_KIT_CANDIDATE_MIN_WIDTH.min(bounds.width.round().max(1.0) as u32),
@@ -1006,6 +1052,7 @@ pub fn capture_window_by_title(
     title_pattern: &str,
     hi_dpi: bool,
 ) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     let windows = Window::all()?;
 
     for window in windows {
@@ -1173,6 +1220,20 @@ pub fn resolve_targeted_os_window_id(
 mod screenshots_window_open_tests {
     use super::*;
     use image::{ImageBuffer, Rgba};
+
+    #[test]
+    fn pixel_audit_distinguishes_all_color_and_alpha_buckets() {
+        let image = ImageBuffer::from_fn(1024, 1, |index, _| Rgba([
+            (((index / 128) % 8) * 32) as u8,
+            (((index / 16) % 8) * 32) as u8,
+            (((index / 2) % 8) * 32) as u8,
+            if index % 2 == 0 { 0 } else { 255 },
+        ]));
+        let audit = audit_screenshot_pixels(&image);
+        assert_eq!(audit.unique_bucket_count, 1024);
+        assert_eq!(audit.non_transparent, 512);
+        assert!(!audit.is_blank_like());
+    }
 
     #[test]
     fn pixel_audit_rejects_opaque_black_image() {

@@ -419,7 +419,7 @@ impl ScriptListApp {
             position,
             opened_log,
             failed_prefix,
-            crate::windows::focused_automation_window_id(),
+            None,
         );
     }
 
@@ -432,26 +432,31 @@ impl ScriptListApp {
         failed_prefix: &'static str,
         parent_automation_id: Option<String>,
     ) {
-        let crate::actions::ActionsWindowPlacement {
-            parent_window_handle,
-            main_bounds,
-            display_id,
-        } = placement;
         dialog.update(cx, |dialog, _cx| {
             dialog.set_skip_track_focus(true);
         });
 
         cx.spawn(async move |this, cx| {
             cx.update(|cx| {
-                match open_actions_window(
-                    cx,
-                    parent_window_handle,
-                    main_bounds,
-                    display_id,
-                    dialog,
-                    position,
-                    parent_automation_id.as_deref(),
-                ) {
+                let result = placement.parent_window_handle
+                    .update(cx, |_, window, _| {
+                        if window.is_owned_hidden() {
+                            crate::runtime_policy::WindowHostPolicy::OwnedHidden
+                        } else {
+                            crate::runtime_policy::WindowHostPolicy::Interactive
+                        }
+                    })
+                    .and_then(|host_policy| {
+                        open_actions_window(
+                            cx,
+                            placement,
+                            dialog,
+                            position,
+                            parent_automation_id.as_deref(),
+                            host_policy,
+                        )
+                    });
+                match result {
                     Ok(_handle) => {
                         logging::log("ACTIONS", opened_log);
                     }

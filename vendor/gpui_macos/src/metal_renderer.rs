@@ -514,110 +514,13 @@ impl MetalRenderer {
         }
     }
 
-    /// Renders the scene to a texture and returns the pixel data as an RGBA image.
-    /// This does not present the frame to screen - useful for visual testing
-    /// where we want to capture what would be rendered without displaying it.
-    ///
-    /// Note: This requires a layer-backed renderer. For headless rendering,
-    /// use `render_scene_to_image()` instead.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
-        let layer = self
-            .layer
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("render_to_image requires a layer-backed renderer"))?;
-        let viewport_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (viewport_size.width.ceil() as i32).into(),
-            (viewport_size.height.ceil() as i32).into(),
-        );
-        let drawable = layer
-            .next_drawable()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get drawable for render_to_image"))?;
-
-        loop {
-            let mut instance_buffer = self
-                .instance_buffer_pool
-                .lock()
-                .acquire(&self.device, self.is_unified_memory);
-
-            let command_buffer =
-                self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size);
-
-            match command_buffer {
-                Ok(command_buffer) => {
-                    let instance_buffer_pool = self.instance_buffer_pool.clone();
-                    let instance_buffer = Cell::new(Some(instance_buffer));
-                    let block = ConcreteBlock::new(move |_| {
-                        if let Some(instance_buffer) = instance_buffer.take() {
-                            instance_buffer_pool.lock().release(instance_buffer);
-                        }
-                    });
-                    let block = block.copy();
-                    command_buffer.add_completed_handler(&block);
-
-                    // Commit and wait for completion without presenting
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
-
-                    // Read pixels from the texture
-                    let texture = drawable.texture();
-                    let width = texture.width() as u32;
-                    let height = texture.height() as u32;
-                    let bytes_per_row = width as usize * 4;
-                    let buffer_size = height as usize * bytes_per_row;
-
-                    let mut pixels = vec![0u8; buffer_size];
-
-                    let region = metal::MTLRegion {
-                        origin: metal::MTLOrigin { x: 0, y: 0, z: 0 },
-                        size: metal::MTLSize {
-                            width: width as u64,
-                            height: height as u64,
-                            depth: 1,
-                        },
-                    };
-
-                    texture.get_bytes(
-                        pixels.as_mut_ptr() as *mut std::ffi::c_void,
-                        bytes_per_row as u64,
-                        region,
-                        0,
-                    );
-
-                    // Convert BGRA to RGBA (swap B and R channels)
-                    for chunk in pixels.chunks_exact_mut(4) {
-                        chunk.swap(0, 2);
-                    }
-
-                    return RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
-                        anyhow::anyhow!("Failed to create RgbaImage from pixel data")
-                    });
-                }
-                Err(err) => {
-                    log::error!(
-                        "failed to render: {}. retrying with larger instance buffer size",
-                        err
-                    );
-                    let mut instance_buffer_pool = self.instance_buffer_pool.lock();
-                    let buffer_size = instance_buffer_pool.buffer_size;
-                    if buffer_size >= 256 * 1024 * 1024 {
-                        anyhow::bail!("instance buffer size grew too large: {}", buffer_size);
-                    }
-                    instance_buffer_pool.reset(buffer_size * 2);
-                    log::info!(
-                        "increased instance buffer size to {}",
-                        instance_buffer_pool.buffer_size
-                    );
-                }
-            }
-        }
-    }
-
     /// Renders a scene to an image without requiring a window or CAMetalLayer.
     ///
     /// This is the primary method for headless rendering. It creates an offscreen
-    /// texture, renders the scene to it, and returns the pixel data as an RGBA image.
+    /// texture and renders with the same production pipelines. The BGRA8Unorm
+    /// target stores premultiplied color; the returned RGBA8 image has straight
+    /// (unassociated) alpha, as required by PNG. This conversion does not flatten
+    /// transparency or change the renderer's blend equations.
     #[cfg(any(test, feature = "test-support"))]
     pub fn render_scene_to_image(
         &mut self,
@@ -627,6 +530,10 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             anyhow::bail!("Invalid size for render_scene_to_image: {:?}", size);
         }
+        anyhow::ensure!(
+            (size.width.0 as u64) * (size.height.0 as u64) <= gpui::OWNED_HIDDEN_MAX_PIXELS,
+            "readback_pixel_limit"
+        );
 
         // Update path intermediate textures for this size
         self.update_path_intermediate_textures(size);
@@ -674,7 +581,19 @@ impl MetalRenderer {
 
                     // Commit and wait for completion
                     command_buffer.commit();
-                    command_buffer.wait_until_completed();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        match command_buffer.status() {
+                            metal::MTLCommandBufferStatus::Completed => break,
+                            metal::MTLCommandBufferStatus::Error => {
+                                anyhow::bail!("metal_readback_failed")
+                            }
+                            _ if std::time::Instant::now() >= deadline => {
+                                anyhow::bail!("metal_readback_timeout")
+                            }
+                            _ => std::thread::sleep(std::time::Duration::from_millis(1)),
+                        }
+                    }
 
                     // Read pixels from the texture
                     let width = size.width.0 as u32;
@@ -700,10 +619,7 @@ impl MetalRenderer {
                         0,
                     );
 
-                    // Convert BGRA to RGBA (swap B and R channels)
-                    for chunk in pixels.chunks_exact_mut(4) {
-                        chunk.swap(0, 2);
-                    }
+                    straight_rgba_from_bgra_readback(&mut pixels);
 
                     return RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
                         anyhow::anyhow!("Failed to create RgbaImage from pixel data")
@@ -1705,5 +1621,44 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+/// Convert the actual framebuffer representation, not its compositing policy.
+#[cfg(any(test, feature = "test-support"))]
+fn straight_rgba_from_bgra_readback(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel.fill(0);
+        } else {
+            // The existing swizzle/unpremultiply is symmetric: BGRA -> RGBA here.
+            gpui::swap_rgba_pa_to_bgra(pixel);
+        }
+    }
+}
+
+#[cfg(test)]
+mod readback_alpha_tests {
+    use super::straight_rgba_from_bgra_readback;
+
+    #[test]
+    fn readback_preserves_opaque_channels_and_clears_transparent_color() {
+        let mut pixels = [11, 22, 33, 255, 11, 22, 33, 0];
+        straight_rgba_from_bgra_readback(&mut pixels);
+        assert_eq!(pixels, [33, 22, 11, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn readback_unpremultiplies_partial_color_without_changing_alpha() {
+        let mut pixels = [16, 32, 64, 128];
+        straight_rgba_from_bgra_readback(&mut pixels);
+        assert_eq!(pixels, [127, 63, 31, 128]);
+    }
+
+    #[test]
+    fn readback_saturates_channels_instead_of_wrapping() {
+        let mut pixels = [255, 128, 200, 64];
+        straight_rgba_from_bgra_readback(&mut pixels);
+        assert_eq!(pixels, [255, 255, 255, 64]);
     }
 }

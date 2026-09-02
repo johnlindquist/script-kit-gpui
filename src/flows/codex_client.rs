@@ -452,6 +452,14 @@ fn request_owned_codex_cleanup(
 }
 
 fn ensure_child(shared: &mut Shared) -> Result<(), Box<crate::ai::reliability::AppFailureRecord>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+        .and_then(|_| crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process))
+        .map_err(|error| {
+            Box::new(crate::ai::reliability::runtime_closed_failure(
+                sk_protocol::ai_reliability::ProtocolComponent::Codex,
+                &error.to_string(),
+            ))
+        })?;
     let child_pid = shared.child.as_ref().map(Child::id);
     let leader_alive = shared
         .child

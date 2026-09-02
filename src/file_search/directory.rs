@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use tracing::{debug, instrument, warn};
 
-use super::mdfind::{CancelToken, SearchEvent};
+use super::mdfind::{CancelToken, SearchEvent, SearchFailure};
 use super::{detect_file_type, FileResult, FileType};
 
 /// Internal cap to prevent runaway directory listings
@@ -39,24 +39,75 @@ pub fn list_directory_streaming_with_options<F>(
     cancel: CancelToken,
     skip_metadata: bool,
     show_hidden: bool,
-    mut on_event: F,
+    on_event: F,
 ) where
     F: FnMut(SearchEvent),
 {
+    list_directory_streaming_impl(
+        dir_path,
+        cancel,
+        skip_metadata,
+        show_hidden,
+        |_| Ok(()),
+        on_event,
+    );
+}
+
+/// Use the native listing lifecycle with a path authority checked before IO.
+#[cfg(any(test, feature = "owned-ui-evaluation"))]
+pub fn list_directory_streaming_with_path_guard<F, G>(
+    dir_path: &str,
+    cancel: CancelToken,
+    skip_metadata: bool,
+    show_hidden: bool,
+    check_path: G,
+    on_event: F,
+) where
+    F: FnMut(SearchEvent),
+    G: Fn(&Path) -> std::io::Result<()>,
+{
+    list_directory_streaming_impl(
+        dir_path,
+        cancel,
+        skip_metadata,
+        show_hidden,
+        check_path,
+        on_event,
+    );
+}
+
+fn list_directory_streaming_impl<F, G>(
+    dir_path: &str,
+    cancel: CancelToken,
+    skip_metadata: bool,
+    show_hidden: bool,
+    check_path: G,
+    mut on_event: F,
+) where
+    F: FnMut(SearchEvent),
+    G: Fn(&Path) -> std::io::Result<()>,
+{
+    if cancel.load(Ordering::Relaxed) {
+        on_event(SearchEvent::Done(Err(SearchFailure::Cancelled)));
+        return;
+    }
     // Expand the path
     let expanded = match expand_path(dir_path) {
         Some(p) => p,
         None => {
             debug!("Failed to expand path: {}", dir_path);
-            on_event(SearchEvent::Done);
+            on_event(SearchEvent::Done(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("cannot expand directory path {dir_path}"),
+            )
+            .into())));
             return;
         }
     };
 
     let path = Path::new(&expanded);
-    if !path.is_dir() {
-        debug!("Path is not a directory: {}", expanded);
-        on_event(SearchEvent::Done);
+    if let Err(error) = check_path(path) {
+        on_event(SearchEvent::Done(Err(error.into())));
         return;
     }
 
@@ -64,18 +115,19 @@ pub fn list_directory_streaming_with_options<F>(
         Ok(entries) => entries,
         Err(e) => {
             warn!(error = %e, "Failed to read directory: {}", expanded);
-            on_event(SearchEvent::Done);
+            on_event(SearchEvent::Done(Err(e.into())));
             return;
         }
     };
 
     let mut count = 0usize;
 
-    for entry in entries.flatten() {
+    for entry in entries {
         // Check cancellation
         if cancel.load(Ordering::Relaxed) {
             debug!("Directory listing cancelled");
-            break;
+            on_event(SearchEvent::Done(Err(SearchFailure::Cancelled)));
+            return;
         }
 
         // Internal cap
@@ -83,6 +135,13 @@ pub fn list_directory_streaming_with_options<F>(
             debug!("Hit internal cap {}", MAX_DIRECTORY_ENTRIES);
             break;
         }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                on_event(SearchEvent::Done(Err(error.into())));
+                return;
+            }
+        };
 
         let entry_path = entry.path();
         let path_str = match entry_path.to_str() {
@@ -99,6 +158,11 @@ pub fn list_directory_streaming_with_options<F>(
         // Skip hidden files unless the query explicitly opted into them.
         if !show_hidden && name.starts_with('.') {
             continue;
+        }
+
+        if let Err(error) = check_path(&entry_path) {
+            on_event(SearchEvent::Done(Err(error.into())));
+            return;
         }
 
         let (size, modified) = if skip_metadata {
@@ -131,7 +195,11 @@ pub fn list_directory_streaming_with_options<F>(
     }
 
     debug!(result_count = count, "Directory listing completed");
-    on_event(SearchEvent::Done);
+    on_event(SearchEvent::Done(if cancel.load(Ordering::Relaxed) {
+        Err(SearchFailure::Cancelled)
+    } else {
+        Ok(())
+    }));
 }
 
 /// Ensure a path string ends with a trailing slash
@@ -326,9 +394,9 @@ pub fn expand_path(path: &str) -> Option<String> {
 /// * `limit` - Maximum number of results to return (clamped to internal cap)
 ///
 /// # Returns
-/// Vector of FileResult structs for directory contents
+/// Directory contents, or the actual path/read failure without a partial listing.
 #[instrument(skip_all, fields(dir_path = %dir_path, limit = limit))]
-pub fn list_directory(dir_path: &str, limit: usize) -> Vec<FileResult> {
+pub fn list_directory(dir_path: &str, limit: usize) -> std::io::Result<Vec<FileResult>> {
     list_directory_with_options(dir_path, limit, false)
 }
 
@@ -338,13 +406,13 @@ pub fn list_directory_with_options(
     dir_path: &str,
     limit: usize,
     show_hidden: bool,
-) -> Vec<FileResult> {
+) -> std::io::Result<Vec<FileResult>> {
     debug!("Starting directory listing");
 
     let effective_limit = limit.min(MAX_DIRECTORY_ENTRIES);
     if effective_limit == 0 {
         debug!("Directory listing short-circuited because limit is 0");
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Expand the path
@@ -352,30 +420,28 @@ pub fn list_directory_with_options(
         Some(p) => p,
         None => {
             debug!("Failed to expand path: {}", dir_path);
-            return Vec::new();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("cannot expand directory path {dir_path}"),
+            ));
         }
     };
 
     let path = Path::new(&expanded);
-
-    // Check if it's a valid directory
-    if !path.is_dir() {
-        debug!("Path is not a directory: {}", expanded);
-        return Vec::new();
-    }
 
     // Read directory contents
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(e) => {
             warn!(error = %e, "Failed to read directory: {}", expanded);
-            return Vec::new();
+            return Err(e);
         }
     };
 
     let mut results: Vec<FileResult> = Vec::new();
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let entry_path = entry.path();
         let path_str = match entry_path.to_str() {
             Some(s) => s.to_string(),
@@ -434,7 +500,7 @@ pub fn list_directory_with_options(
     results.truncate(effective_limit);
 
     debug!(result_count = results.len(), "Directory listing completed");
-    results
+    Ok(results)
 }
 
 /// Result of parsing a directory path with potential filter
@@ -468,6 +534,13 @@ pub fn parse_directory_path(path: &str) -> Option<ParsedDirPath> {
     // Must be a directory-style path
     if !crate::scripts::input_detection::is_directory_path(trimmed) {
         return None;
+    }
+
+    // Parsing performs metadata reads below. Owned evaluation must admit the
+    // path before even checking existence, not only before directory listing.
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        let expanded = expand_path(trimmed)?;
+        policy.require_owned_path(Path::new(&expanded)).ok()?;
     }
 
     // Normalize home root so all callers compare the same string.
@@ -561,17 +634,17 @@ fn path_contains_hidden_component(path: &str) -> bool {
 /// * `limit` - Maximum number of results to return
 ///
 /// # Returns
-/// Vector of FileResult structs matching the filter
+/// Matching directory contents, or the original directory source failure.
 #[allow(dead_code)]
 #[instrument(skip_all, fields(dir_path = %dir_path, filter = ?filter, limit = limit))]
 pub fn list_directory_filtered(
     dir_path: &str,
     filter: Option<&str>,
     limit: usize,
-) -> Vec<FileResult> {
+) -> std::io::Result<Vec<FileResult>> {
     // First get additional entries so filtering can still return enough matches.
     let show_hidden = path_requests_hidden_entries(dir_path, filter);
-    let mut results = list_directory_with_options(dir_path, limit.saturating_mul(2), show_hidden);
+    let mut results = list_directory_with_options(dir_path, limit.saturating_mul(2), show_hidden)?;
 
     // Apply filter if present
     if let Some(filter_str) = filter {
@@ -581,7 +654,7 @@ pub fn list_directory_filtered(
 
     // Apply limit after filtering
     results.truncate(limit);
-    results
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -594,6 +667,96 @@ mod tests {
             filter: filter.map(|value| value.to_string()),
             show_hidden,
         })
+    }
+
+    #[test]
+    fn directory_stream_reports_missing_source_once() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let missing = temp.path().join("missing");
+        let mut events = Vec::new();
+        list_directory_streaming_with_options(
+            missing.to_str().expect("UTF-8 path"),
+            super::super::new_cancel_token(),
+            true,
+            false,
+            |event| events.push(event),
+        );
+        assert!(
+            matches!(events.as_slice(), [SearchEvent::Done(Err(SearchFailure::Source(error)))] if error.kind() == std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn directory_stream_cancellation_after_last_row_is_not_success() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        std::fs::write(temp.path().join("one.txt"), "one").expect("write file");
+        let cancel = super::super::new_cancel_token();
+        let mut events = Vec::new();
+        list_directory_streaming_with_options(
+            temp.path().to_str().expect("UTF-8 path"),
+            cancel.clone(),
+            true,
+            false,
+            |event| {
+                if matches!(event, SearchEvent::Result(_)) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                events.push(event);
+            },
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                SearchEvent::Result(_),
+                SearchEvent::Done(Err(SearchFailure::Cancelled))
+            ]
+        ));
+    }
+
+    #[test]
+    fn guarded_directory_stream_refuses_before_directory_existence_read() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let missing = temp.path().join("not-admitted");
+        let mut events = Vec::new();
+        list_directory_streaming_with_path_guard(
+            missing.to_str().expect("UTF-8 path"),
+            super::super::new_cancel_token(),
+            false,
+            false,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |event| events.push(event),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [SearchEvent::Done(Err(SearchFailure::Source(error)))]
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn guarded_directory_stream_does_not_publish_unadmitted_children() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        std::fs::write(temp.path().join("private.txt"), "private").expect("write file");
+        let mut events = Vec::new();
+        list_directory_streaming_with_path_guard(
+            temp.path().to_str().expect("UTF-8 path"),
+            super::super::new_cancel_token(),
+            false,
+            false,
+            |path| {
+                if path == temp.path() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                }
+            },
+            |event| events.push(event),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [SearchEvent::Done(Err(SearchFailure::Source(error)))]
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[test]

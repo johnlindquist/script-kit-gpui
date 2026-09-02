@@ -12,8 +12,14 @@
 
 import { join } from "node:path";
 import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+import { runBuildOps } from "./build-ops.ts";
+import { runDesign } from "./design.ts";
+import { runStories } from "./stories.ts";
 
 const TOOLS: Record<string, { file: string; summary: string }> = {
+  design: { file: "design.ts", summary: "Owned native design loop (discover | inspect | query | act | wait | diagnose | loop | run | watch)" },
+  stories: { file: "stories.ts", summary: "Exact library and owned production stories (run | discover | diagnose)" },
+  "build-ops": { file: "build-ops.ts", summary: "Owned wrapper build/task operations (discover | inspect | query | act | wait | diagnose)" },
   targets: { file: "targets.ts", summary: "List/inspect automation windows and resolve target identity (list | inspect)" },
   elements: { file: "elements.ts", summary: "Semantic element snapshot for a target (snapshot)" },
   focus: { file: "focus.ts", summary: "Focus and keyboard-ownership inspection (inspect)" },
@@ -59,6 +65,19 @@ const entry = TOOLS[tool];
 if (!entry) {
   console.error(`Unknown tool '${tool}'. Run: bun scripts/devtools/devtools.ts list`);
   process.exit(2);
+}
+
+if (tool === "build-ops") {
+  await runBuildOps(rest);
+  process.exit(process.exitCode ?? 0);
+}
+if (tool === "design") {
+  await runDesign(rest);
+  process.exit(process.exitCode ?? 0);
+}
+if (tool === "stories") {
+  await runStories(rest);
+  process.exit(process.exitCode ?? 0);
 }
 
 const unsafeTool = ["act", "driver", "perf"].includes(tool);

@@ -394,14 +394,16 @@ impl ScriptListApp {
             cx.notify();
         } else if self.trigger_picker_state_is_menu_syntax_form_suggestion() {
             self.menu_syntax_trigger_picker_state = Default::default();
+            self.invalidate_grouped_cache();
         }
     }
 
-    fn close_menu_syntax_form_suggestions_and_trigger_picker(&mut self, _cx: &mut Context<Self>) {
+    fn close_menu_syntax_form_suggestions_and_trigger_picker(&mut self, cx: &mut Context<Self>) {
         self.close_menu_syntax_form_suggestions();
         if self.trigger_picker_state_is_menu_syntax_form_suggestion() {
             self.menu_syntax_trigger_picker_state = Default::default();
         }
+        self.flush_pending_main_menu_query(cx);
     }
 
     fn open_menu_syntax_form_suggestions_for(
@@ -586,6 +588,7 @@ impl ScriptListApp {
             state.focus(window, cx);
         });
         self.sync_menu_syntax_form_trigger_picker_state(form, window, cx);
+        self.flush_pending_main_menu_query(cx);
         cx.notify();
     }
 
@@ -657,7 +660,10 @@ impl ScriptListApp {
         if resolved_field_id.is_empty() {
             return false;
         }
-        let Some(resolved_field) = form.fields.iter().find(|field| field.id == resolved_field_id)
+        let Some(resolved_field) = form
+            .fields
+            .iter()
+            .find(|field| field.id == resolved_field_id)
         else {
             return false;
         };
@@ -714,6 +720,7 @@ impl ScriptListApp {
                 self.sync_menu_syntax_form_trigger_picker_state(&form, window, cx);
             }
         }
+        self.flush_pending_main_menu_query(cx);
         tracing::info!(
             target: "script_kit::menu_syntax_form",
             event = "menu_syntax_form_field_updated",
@@ -741,7 +748,7 @@ impl ScriptListApp {
         if self.accept_menu_syntax_form_suggestion(&form, window, cx) {
             true
         } else if form.can_submit {
-            self.execute_selected(cx);
+            let _dispatch = self.execute_selected(cx);
             true
         } else {
             true
@@ -778,7 +785,9 @@ impl ScriptListApp {
         let Some(form) = snapshot.form else {
             return false;
         };
-        let suggestions_active = self.active_menu_syntax_form_suggestion_field(&form).is_some();
+        let suggestions_active = self
+            .active_menu_syntax_form_suggestion_field(&form)
+            .is_some();
         if !self.menu_syntax_form_input_active && !suggestions_active {
             return false;
         }
@@ -1024,6 +1033,7 @@ impl ScriptListApp {
         self.menu_syntax_form_suggestion_field_id = Some(field.id.clone());
         self.menu_syntax_form_suggestion_selected_index = Some(next);
         self.sync_menu_syntax_form_trigger_picker_state(form, window, cx);
+        self.flush_pending_main_menu_query(cx);
         cx.notify();
     }
 

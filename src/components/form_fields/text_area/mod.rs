@@ -86,6 +86,7 @@ pub struct FormTextArea {
     pub cursor_position: usize,
     /// Selection anchor (char index), None if no selection
     pub selection_anchor: Option<usize>,
+    input_revision: u64,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Number of visible rows
@@ -107,6 +108,7 @@ impl FormTextArea {
             value: initial_value,
             cursor_position: cursor_pos,
             selection_anchor: None,
+            input_revision: 0,
             focus_handle: cx.focus_handle(),
             rows,
             state,
@@ -118,6 +120,36 @@ impl FormTextArea {
         &self.value
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.input_revision
+    }
+
+    fn advance_input_revision(&mut self) {
+        assert!(
+            self.input_revision < u64::MAX,
+            "form input revision exhausted"
+        );
+        self.input_revision += 1;
+    }
+
+    fn selection_state(&self) -> (usize, usize) {
+        (
+            self.selection_anchor.unwrap_or(self.cursor_position),
+            self.cursor_position,
+        )
+    }
+
+    fn record_selection_change(&mut self, previous: (usize, usize)) {
+        if self.selection_state() != previous {
+            self.advance_input_revision();
+        }
+    }
+
+    pub(crate) fn update_colors(&mut self, colors: FormFieldColors, cx: &mut Context<Self>) {
+        self.colors = colors;
+        cx.notify();
+    }
+
     /// Get the field name
     pub fn name(&self) -> &str {
         &self.field.name
@@ -125,7 +157,11 @@ impl FormTextArea {
 
     /// Set the value programmatically
     pub fn set_value(&mut self, value: String) {
-        self.cursor_position = char_len(&value);
+        let cursor_position = char_len(&value);
+        if self.value != value || self.cursor_position != cursor_position || self.has_selection() {
+            self.advance_input_revision();
+        }
+        self.cursor_position = cursor_position;
         self.selection_anchor = None;
         self.value = value.clone();
         self.state.set_value(value);
@@ -166,6 +202,9 @@ impl FormTextArea {
     /// Delete selected text, collapse cursor to start
     fn delete_selection(&mut self) {
         if let Some((start, end)) = self.selection_range() {
+            if start != end {
+                self.advance_input_revision();
+            }
             drain_char_range(&mut self.value, start, end);
             self.cursor_position = start;
             self.selection_anchor = None;
@@ -180,11 +219,13 @@ impl FormTextArea {
 
     /// Select all text
     fn select_all(&mut self) {
+        let previous = self.selection_state();
         let len = char_len(&self.value);
         if len > 0 {
             self.selection_anchor = Some(0);
             self.cursor_position = len;
         }
+        self.record_selection_change(previous);
     }
 
     // ───── Clipboard ─────
@@ -211,11 +252,13 @@ impl FormTextArea {
     // ───── Cursor movement ─────
 
     fn move_left(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if !extend_selection {
             // If selection exists, collapse to start
             if let Some((start, _)) = self.selection_range() {
                 self.cursor_position = start;
                 self.clear_selection();
+                self.record_selection_change(previous);
                 return;
             }
         } else if self.selection_anchor.is_none() {
@@ -227,14 +270,17 @@ impl FormTextArea {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_right(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         let len = char_len(&self.value);
         if !extend_selection {
             if let Some((_, end)) = self.selection_range() {
                 self.cursor_position = end;
                 self.clear_selection();
+                self.record_selection_change(previous);
                 return;
             }
         } else if self.selection_anchor.is_none() {
@@ -246,9 +292,11 @@ impl FormTextArea {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_home(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if extend_selection && self.selection_anchor.is_none() {
             self.selection_anchor = Some(self.cursor_position);
         }
@@ -256,9 +304,11 @@ impl FormTextArea {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_end(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if extend_selection && self.selection_anchor.is_none() {
             self.selection_anchor = Some(self.cursor_position);
         }
@@ -266,13 +316,16 @@ impl FormTextArea {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_up(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if !extend_selection {
             if let Some((start, _)) = self.selection_range() {
                 self.cursor_position = start;
                 self.clear_selection();
+                self.record_selection_change(previous);
                 return;
             }
         } else if self.selection_anchor.is_none() {
@@ -287,13 +340,16 @@ impl FormTextArea {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     fn move_down(&mut self, extend_selection: bool) {
+        let previous = self.selection_state();
         if !extend_selection {
             if let Some((_, end)) = self.selection_range() {
                 self.cursor_position = end;
                 self.clear_selection();
+                self.record_selection_change(previous);
                 return;
             }
         } else if self.selection_anchor.is_none() {
@@ -308,6 +364,7 @@ impl FormTextArea {
         if !extend_selection {
             self.clear_selection();
         }
+        self.record_selection_change(previous);
     }
 
     // ───── Editing ─────
@@ -315,6 +372,9 @@ impl FormTextArea {
     fn insert_text_at_cursor(&mut self, text: &str) {
         if self.has_selection() {
             self.delete_selection();
+        }
+        if !text.is_empty() {
+            self.advance_input_revision();
         }
         let byte_idx = byte_idx_from_char_idx(&self.value, self.cursor_position);
         self.value.insert_str(byte_idx, text);
@@ -326,6 +386,7 @@ impl FormTextArea {
         if self.has_selection() {
             self.delete_selection();
         } else if self.cursor_position > 0 {
+            self.advance_input_revision();
             drain_char_range(
                 &mut self.value,
                 self.cursor_position - 1,
@@ -340,6 +401,7 @@ impl FormTextArea {
         if self.has_selection() {
             self.delete_selection();
         } else if self.cursor_position < char_len(&self.value) {
+            self.advance_input_revision();
             drain_char_range(
                 &mut self.value,
                 self.cursor_position,
@@ -500,4 +562,49 @@ mod tests {
             "legacy text area key callback should forward to the unified key handler"
         );
     }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn text_area_revision_tracks_text_and_vertical_selection_aba(cx: &mut gpui::TestAppContext) {
+    let field: Field =
+        serde_json::from_value(serde_json::json!({"name": "field", "value": "ab\ncd"})).unwrap();
+    let colors = FormFieldColors::from_theme(&crate::theme::Theme::default());
+    let input = cx.new(|cx| FormTextArea::new(field, colors, 4, cx));
+    input.update(cx, |input, cx| {
+        let initial = input.revision();
+        input.set_value("ab\ncd".into());
+        input.move_right(true);
+        input.move_right(false);
+        input.delete_forward_char();
+        input.insert_text_at_cursor("");
+        input.update_colors(colors, cx);
+        assert_eq!(input.revision(), initial);
+        input.set_value("ef\ngh".into());
+        let changed = input.revision();
+        assert!(changed > initial);
+        input.set_value("ab\ncd".into());
+        assert!(input.revision() > changed);
+        let before_cursor = input.revision();
+        input.move_up(false);
+        assert!(input.revision() > before_cursor);
+        let moved = input.revision();
+        input.move_down(false);
+        assert_eq!(input.cursor_position, 5);
+        assert!(input.revision() > moved);
+        let before_selection = input.revision();
+        input.move_home(true);
+        assert!(input.revision() > before_selection);
+        let selected = input.revision();
+        input.move_home(true);
+        assert_eq!(input.revision(), selected);
+        input.insert_text_at_cursor("ab\ncd");
+        assert_eq!(input.value(), "ab\ncd");
+        assert!(!input.has_selection());
+        assert!(input.revision() > selected);
+        let before_delete = input.revision();
+        input.backspace_char();
+        assert_eq!(input.value(), "ab\nc");
+        assert!(input.revision() > before_delete);
+    });
 }

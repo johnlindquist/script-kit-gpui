@@ -90,6 +90,7 @@ fn sck_permission_hint() -> &'static str {
 #[cfg(target_os = "macos")]
 pub fn capture_active_display_screenshot_sck(
 ) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     use image::codecs::png::PngEncoder;
     use image::ImageEncoder;
     use objc::runtime::{Class, Object, NO, YES};

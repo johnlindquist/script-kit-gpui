@@ -151,6 +151,8 @@ pub fn run_scriptlet(
     scriptlet: &Scriptlet,
     options: ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     let capability_issues = crate::scripts::validate_legacy_scriptlet_capabilities(scriptlet);
     if let Some(issue) = capability_issues
         .iter()
@@ -352,6 +354,8 @@ fn create_secure_temp_script(
     suffix: &str,
     mode: TempScriptMode,
 ) -> Result<NamedTempFile, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     debug!(
         suffix = %suffix,
         temp_mode = ?mode,
@@ -524,6 +528,8 @@ pub fn execute_shell_scriptlet(
     content: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     info!(
         category = "EXEC",
         shell = %shell,
@@ -632,6 +638,8 @@ pub fn execute_with_interpreter(
     extension: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     info!(
         category = "EXEC",
         interpreter = %interpreter,
@@ -672,6 +680,8 @@ pub fn execute_applescript(
     content: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     info!(category = "EXEC", "Executing AppleScript");
 
     let mut cmd = Command::new("osascript");
@@ -700,6 +710,8 @@ pub fn execute_typescript(
     content: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     info!(category = "EXEC", "Executing TypeScript via bun");
 
     let temp_file = create_secure_temp_script(content, ".ts", TempScriptMode::InterpreterFed)?;
@@ -747,6 +759,8 @@ pub fn execute_transform(
     content: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     info!(category = "EXEC", "Executing transform scriptlet");
 
     // Get selected text
@@ -834,6 +848,8 @@ pub fn execute_open(
     content: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        .map_err(|error| error.to_string())?;
     info!(
         category = "EXEC",
         target = %content.trim(),
@@ -891,6 +907,8 @@ pub fn execute_edit(
     content: &str,
     options: &ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        .map_err(|error| error.to_string())?;
     info!(
         category = "EXEC",
         target = %content.trim(),
@@ -967,6 +985,8 @@ fn type_keystroke_applescript(text: &str) -> String {
 /// Execute type command (simulate keyboard typing)
 #[cfg(target_os = "macos")]
 pub fn execute_type(content: &str) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| error.to_string())?;
     info!(category = "EXEC", "Executing type scriptlet");
 
     let text = content.trim();
@@ -998,6 +1018,8 @@ pub fn execute_type(_content: &str) -> Result<ScriptletResult, String> {
 /// Execute submit command (paste + enter)
 #[cfg(target_os = "macos")]
 pub fn execute_submit(content: &str) -> Result<ScriptletResult, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| error.to_string())?;
     info!(category = "EXEC", "Executing submit scriptlet");
 
     // First paste the text

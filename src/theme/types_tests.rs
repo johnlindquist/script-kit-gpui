@@ -2,15 +2,91 @@
 mod tests {
     use super::*;
     use crate::config::{LayoutConfig, ScriptKitUserPreferences, ThemeSelectionPreferences};
-    use std::sync::{LazyLock, Mutex};
+    use crate::test_utils::lock_theme_cache_test;
 
-    static THEME_CACHE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    fn with_theme_test_workspace(run: impl FnOnce(&std::path::Path)) {
+        let _path_guard = crate::test_utils::SK_PATH_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let workspace = tempfile::tempdir().unwrap();
+        temp_env::with_var("SK_PATH", Some(workspace.path().as_os_str()), || {
+            run(workspace.path());
+        });
+    }
+
+    #[test]
+    fn persisted_custom_theme_wins_restart_over_current_and_legacy_presets() {
+        with_theme_test_workspace(|root| {
+            std::fs::write(
+                root.join("config.ts"),
+                concat!(
+                    "import type { Config } from '@scriptkit/sdk';\n",
+                    "export default { theme: { presetId: 'nord' } } satisfies Config;\n",
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("settings.json"),
+                r#"{"theme":{"presetId":"dracula"}}"#,
+            )
+            .unwrap();
+            let preset = try_load_theme_with_appearance(|| {
+                panic!("an explicit preset must not sample system appearance")
+            })
+            .unwrap();
+            let nord = crate::theme::presets::all_presets()
+                .into_iter()
+                .find(|preset| preset.id == "nord")
+                .unwrap()
+                .create_theme();
+            assert_eq!(preset.colors.accent.selected, nord.colors.accent.selected);
+
+            let mut custom = Theme::dark_default();
+            custom.colors.accent.selected = 0x24_68_AC;
+            custom.colors.background.main = 0x1B_22_33;
+            crate::theme::presets::write_theme_to_disk(&custom).unwrap();
+
+            assert!(crate::config::load_user_preferences().theme.preset_id.is_none());
+            let restarted = try_load_theme_with_appearance(|| true).unwrap();
+            assert_eq!(restarted.colors.accent.selected, custom.colors.accent.selected);
+            assert_eq!(restarted.colors.background.main, custom.colors.background.main);
+            assert!(!root.join(".theme-save-transaction.json").exists());
+        });
+    }
+
+    #[test]
+    fn failed_custom_save_preserves_saved_theme_and_malformed_reload_refuses() {
+        with_theme_test_workspace(|root| {
+            let _theme_guard = lock_theme_cache_test();
+            let mut saved = Theme::dark_default();
+            saved.colors.accent.selected = 0x35_79_BD;
+            crate::theme::presets::write_theme_to_disk(&saved).unwrap();
+            let publication = get_theme_snapshot();
+
+            std::fs::write(root.join("config.ts"), "export default {").unwrap();
+            let mut attempted = saved.clone();
+            attempted.colors.accent.selected = 0xAC_68_24;
+            assert!(crate::theme::presets::write_theme_to_disk(&attempted).is_err());
+            let restarted = try_load_theme_with_appearance(|| true).unwrap();
+            assert_eq!(restarted.colors.accent.selected, saved.colors.accent.selected);
+            assert!(Arc::ptr_eq(&publication, &get_theme_snapshot()));
+
+            std::fs::write(root.join("theme.json"), "{").unwrap();
+            assert!(try_load_theme_with_appearance(|| true).is_err());
+            assert!(Arc::ptr_eq(&publication, &get_theme_snapshot()));
+        });
+    }
 
     fn poison_theme_cache_with(theme: Theme) {
         let cache = &*THEME_CACHE;
         let _ = std::thread::spawn(move || {
             let mut guard = cache.lock().expect("theme cache lock should succeed");
-            guard.theme = theme;
+            guard.snapshot = Arc::new(super::super::live_edit::PublishedTheme {
+                revision: guard.snapshot.revision + 1,
+                resolved: Arc::new(super::super::live_edit::ResolvedLiveTheme::from_theme(&theme)),
+                theme: Arc::new(theme),
+            });
             panic!("intentional poison for theme cache recovery test");
         })
         .join();
@@ -23,14 +99,9 @@ mod tests {
         let mut guard = cache
             .lock()
             .expect("theme cache lock should be healthy after clear_poison");
-        guard.theme = Theme::dark_default();
+        *guard = ThemeCache::default();
     }
 
-    fn lock_theme_cache_test() -> std::sync::MutexGuard<'static, ()> {
-        THEME_CACHE_TEST_LOCK
-            .lock()
-            .expect("theme cache test lock should succeed")
-    }
 
     #[test]
     fn test_default_text_opacity_ladder_is_liquid_glass_quiet() {
@@ -134,31 +205,36 @@ mod tests {
     }
 
     #[test]
-    fn test_reload_theme_cache_recovers_from_poisoned_mutex_and_updates_cached_theme() {
+    fn atomic_publication_recovers_poison_and_rejects_stale_before_bridge_mutation() {
         let _guard = lock_theme_cache_test();
-        let loaded_theme = load_theme();
-        let mut stale_theme = loaded_theme.clone();
-        stale_theme.colors.background.main ^= 0x00_01_01;
-        stale_theme.colors.accent.selected ^= 0x00_02_02;
-
-        poison_theme_cache_with(stale_theme.clone());
-        let reloaded_theme = reload_theme_cache();
-        let cached_theme = get_cached_theme();
-
-        assert_eq!(
-            cached_theme.colors.background.main,
-            reloaded_theme.colors.background.main
-        );
-        assert_eq!(
-            cached_theme.colors.accent.selected,
-            reloaded_theme.colors.accent.selected
-        );
-        assert_ne!(
-            cached_theme.colors.background.main,
-            stale_theme.colors.background.main
-        );
-
+        poison_theme_cache_with(Theme::dark_default());
+        let baseline = get_theme_snapshot();
+        let prepared = super::super::live_edit::prepare_theme(Theme::light_default()).unwrap();
+        let mut bridge_calls = 0;
+        let publication = commit_prepared_theme(baseline.revision, prepared, |_| bridge_calls += 1).unwrap();
+        assert_eq!(bridge_calls, 1);
+        assert_eq!(publication.revision, baseline.revision + 1);
+        assert_eq!(get_theme_snapshot().theme.colors.background.main, Theme::light_default().colors.background.main);
+        let prepared = super::super::live_edit::prepare_theme(Theme::dark_default()).unwrap();
+        assert!(matches!(commit_prepared_theme(baseline.revision, prepared, |_| bridge_calls += 1),
+            Err(super::super::service::ThemePublishError::StaleRevision { .. })));
+        assert_eq!(bridge_calls, 1);
+        assert!(Arc::ptr_eq(&publication, &get_theme_snapshot()));
+        assert_eq!(baseline.theme.colors.background.main, Theme::dark_default().colors.background.main);
         clear_theme_cache_poison_and_restore();
+    }
+
+    #[test]
+    fn malformed_reload_decoding_never_changes_the_publication() {
+        let _guard = lock_theme_cache_test();
+        let baseline = get_theme_snapshot();
+        for invalid in ["{", "[]", r##"{"colors":{"background":{"main":"bad-color"}}}"##] {
+            assert!(decode_theme_json(invalid, true).is_err());
+            assert!(Arc::ptr_eq(&baseline, &get_theme_snapshot()));
+        }
+        let decoded = decode_theme_json(r##"{"appearance":"light","opacity":{"hover":-0.1}}"##, true).unwrap();
+        assert_eq!(decoded.get_opacity().hover, 0.0);
+        assert!(matches!(decoded.appearance, AppearanceMode::Light));
     }
 
     #[test]

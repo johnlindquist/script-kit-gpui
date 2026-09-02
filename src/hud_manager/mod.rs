@@ -11,6 +11,7 @@
 // --- merged from part_000.rs ---
 use crate::components::button::{Button, ButtonColors, ButtonVariant};
 use crate::logging;
+use crate::runtime_policy::{ExternalEffect, WindowHostPolicy};
 use crate::theme::get_cached_theme;
 use gpui::{
     div, point, prelude::*, px, rgb, rgba, size, App, Context, ElementId, Render, SharedString,
@@ -23,6 +24,29 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug)]
+pub struct HudHostOptions {
+    pub policy: WindowHostPolicy,
+    pub origin: Option<gpui::Point<gpui::Pixels>>,
+}
+
+impl HudHostOptions {
+    fn interactive() -> Self {
+        Self {
+            policy: WindowHostPolicy::Interactive,
+            origin: None,
+        }
+    }
+}
+
+/// The identity and typed window produced by the notification factory.
+pub struct MountedHud {
+    pub id: u64,
+    pub window: WindowHandle<HudView>,
+}
+
+const MAX_QUEUED_HUDS: usize = 16;
 // =============================================================================
 // Theme Integration - HUD colors from theme system
 // =============================================================================
@@ -156,35 +180,28 @@ pub enum HudAction {
 }
 impl HudAction {
     /// Execute the action
-    pub fn execute(&self, editor: Option<&str>) {
+    pub fn execute(&self, editor: Option<&str>) -> anyhow::Result<()> {
         match self {
             HudAction::OpenFile(path) => {
-                let editor_cmd = editor.unwrap_or("code");
-                logging::log(
-                    "HUD",
-                    &format!("Opening file {:?} with editor: {}", path, editor_cmd),
-                );
-                match std::process::Command::new(editor_cmd).arg(path).spawn() {
-                    Ok(_) => logging::log("HUD", &format!("Opened file: {:?}", path)),
-                    Err(e) => logging::log("HUD", &format!("Failed to open file: {}", e)),
-                }
+                crate::runtime_policy::check(ExternalEffect::Process)?;
+                std::process::Command::new(editor.unwrap_or("code"))
+                    .arg(path)
+                    .spawn()?;
             }
             HudAction::OpenUrl(url) => {
-                logging::log("HUD", &format!("Opening URL: {}", url));
-                if let Err(e) = open::that(url) {
-                    logging::log("HUD", &format!("Failed to open URL: {}", e));
-                }
+                crate::runtime_policy::check(ExternalEffect::OpenExternal)?;
+                open::that(url)?;
             }
-            HudAction::RunCommand(cmd) => {
-                logging::log("HUD", &format!("Running command: {}", cmd));
-                let parts: Vec<&str> = cmd.split_whitespace().collect();
-                if let Some((program, args)) = parts.split_first() {
-                    if let Err(e) = std::process::Command::new(program).args(args).spawn() {
-                        logging::log("HUD", &format!("Failed to run command: {}", e));
-                    }
-                }
+            HudAction::RunCommand(command) => {
+                crate::runtime_policy::check(ExternalEffect::Process)?;
+                let mut parts = command.split_whitespace();
+                let program = parts
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("hud_command_empty"))?;
+                std::process::Command::new(program).args(parts).spawn()?;
             }
         }
+        Ok(())
     }
 }
 /// A single HUD notification
@@ -209,7 +226,7 @@ impl HudNotification {
     }
 }
 /// The visual component rendered inside each HUD window
-struct HudView {
+pub struct HudView {
     text: String,
     #[allow(dead_code)]
     action_label: Option<String>,
@@ -220,6 +237,11 @@ struct HudView {
     /// Manager-side ID, so a click on the pill can dismiss this HUD through
     /// the same tracked path as the auto-dismiss timer.
     hud_id: u64,
+    theme_revision_seen: u64,
+    pub(crate) action_error: Option<String>,
+    pub(crate) action_completed: bool,
+    semantic_revision: u64,
+    presentation_revision: u64,
 }
 impl HudView {
     fn new(text: String, hud_id: u64) -> Self {
@@ -229,6 +251,11 @@ impl HudView {
             action: None,
             colors: HudColors::from_theme(),
             hud_id,
+            theme_revision_seen: 0,
+            action_error: None,
+            action_completed: false,
+            semantic_revision: 1,
+            presentation_revision: 1,
         }
     }
 
@@ -240,6 +267,11 @@ impl HudView {
             action: Some(action),
             colors: HudColors::from_theme(),
             hud_id,
+            theme_revision_seen: 0,
+            action_error: None,
+            action_completed: false,
+            semantic_revision: 1,
+            presentation_revision: 1,
         }
     }
 
@@ -252,12 +284,48 @@ impl HudView {
             action: None,
             colors,
             hud_id: 0,
+            theme_revision_seen: 0,
+            action_error: None,
+            action_completed: false,
+            semantic_revision: 1,
+            presentation_revision: 1,
         }
     }
 
     #[allow(dead_code)]
     fn has_action(&self) -> bool {
         self.action.is_some() && self.action_label.is_some()
+    }
+
+    pub(crate) fn semantic_state(&self) -> (&str, Option<&str>, Option<&str>, bool) {
+        (
+            &self.text,
+            self.action_label.as_deref(),
+            self.action_error.as_deref(),
+            self.action_completed,
+        )
+    }
+
+    pub(crate) fn revision_facts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.semantic_revision,
+            self.semantic_revision,
+            self.presentation_revision,
+            self.theme_revision_seen,
+        )
+    }
+
+    fn execute_action(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let result = self
+            .action
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("hud_action_missing"))
+            .and_then(|action| action.execute(None));
+        self.action_error = result.as_ref().err().map(ToString::to_string);
+        self.action_completed = result.is_ok();
+        self.semantic_revision = self.semantic_revision.saturating_add(1);
+        cx.notify();
+        result
     }
 }
 
@@ -320,28 +388,48 @@ fn hud_automation_id(hud_id: u64) -> String {
 /// Register a HUD window in the automation registry so DevTools callers can
 /// list it and target it with `captureScreenshot` (HUDs are focusless,
 /// titleless OS windows that are otherwise undiscoverable).
-fn register_hud_automation_window(hud_id: u64, text: &str, bounds: gpui::Bounds<gpui::Pixels>) {
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: hud_automation_id(hud_id),
-        kind: crate::protocol::AutomationWindowKind::Hud,
-        title: Some(format!("Script Kit HUD: {text}")),
-        focused: false,
-        visible: true,
-        semantic_surface: None,
-        bounds: Some(crate::protocol::AutomationWindowBounds {
-            x: f32::from(bounds.origin.x) as f64,
-            y: f32::from(bounds.origin.y) as f64,
-            width: f32::from(bounds.size.width) as f64,
-            height: f32::from(bounds.size.height) as f64,
-        }),
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
-    });
+fn register_hud_automation_window(
+    hud_id: u64,
+    text: &str,
+    bounds: gpui::Bounds<gpui::Pixels>,
+    handle: WindowHandle<HudView>,
+    policy: WindowHostPolicy,
+    cx: &mut App,
+) -> anyhow::Result<u64> {
+    let info = crate::windows::register_runtime_window_instance(
+        crate::protocol::AutomationWindowInfo {
+            id: hud_automation_id(hud_id),
+            kind: crate::protocol::AutomationWindowKind::Hud,
+            title: Some(format!("Script Kit HUD: {text}")),
+            focused: false,
+            visible: !policy.is_hidden(),
+            semantic_surface: Some("hud".into()),
+            bounds: Some(crate::protocol::AutomationWindowBounds {
+                x: f32::from(bounds.origin.x) as f64,
+                y: f32::from(bounds.origin.y) as f64,
+                width: f32::from(bounds.size.width) as f64,
+                height: f32::from(bounds.size.height) as f64,
+            }),
+            parent_window_id: None,
+            parent_kind: None,
+            parent_window_generation: None,
+            pid: Some(std::process::id()),
+            generation: None,
+        },
+        handle.into(),
+        cx,
+    )?;
+    info.generation
+        .ok_or_else(|| anyhow::anyhow!("hud_generation_missing"))
 }
 impl Render for HudView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let revision = crate::theme::service::theme_revision();
+        if self.theme_revision_seen != revision {
+            self.colors = HudColors::from_theme();
+            self.theme_revision_seen = revision;
+            self.presentation_revision = self.presentation_revision.saturating_add(1);
+        }
         let has_action = self.has_action();
 
         // Extract colors for use in closures (Copy trait)
@@ -355,6 +443,7 @@ impl Render for HudView {
         // Similar to Raycast's HUD - simple, elegant, non-intrusive
         div()
             .id("hud-pill")
+            .debug_selector(|| "hud-pill".to_string())
             .w_full()
             .h_full()
             .flex()
@@ -386,6 +475,7 @@ impl Render for HudView {
                     .id(ElementId::Name(SharedString::from(
                         "hud-pill-label-ellipsis",
                     )))
+                    .debug_selector(|| "hud-pill-label-ellipsis".to_string())
                     .text_sm()
                     .text_center()
                     .text_color(rgb(colors.text_primary))
@@ -402,7 +492,6 @@ impl Render for HudView {
             // Action button (only if action is present)
             .when(has_action, |el| {
                 let label = self.action_label.clone().unwrap_or_default();
-                let action = self.action.clone();
                 // Theme-aware hover overlay: white for dark mode, black for light mode
                 // Determined by checking if background color is dark (luminance < 0.5)
                 let hover_overlay = {
@@ -432,11 +521,12 @@ impl Render for HudView {
                 el.child(
                     Button::new("hud:primary-action", label, button_colors)
                         .variant(ButtonVariant::Primary)
-                        .on_click(Box::new(move |_event, _window, _cx| {
-                            if let Some(ref action) = action {
-                                action.execute(None); // KNOWN: Passes None; plumbing configured editor requires HudView config access.
+                        .on_click(Box::new(cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            if let Err(error) = this.execute_action(cx) {
+                                tracing::warn!(%error, "hud_action_refused_or_failed");
                             }
-                        })),
+                        }))),
                 )
             })
     }
@@ -452,6 +542,7 @@ struct ActiveHud {
     /// Slot index (0..MAX_SIMULTANEOUS_HUDS) for position calculation
     #[allow(dead_code)] // Used in position calculation
     slot: usize,
+    generation: Option<u64>,
 }
 /// Entry in the slot allocation array (lightweight, for tracking slot ownership)
 #[derive(Clone, Copy, Debug)]
@@ -461,12 +552,13 @@ struct HudSlotEntry {
 }
 /// Check if a duration has elapsed (used for HUD expiry)
 /// Returns true when elapsed >= duration (inclusive boundary)
+#[cfg(test)]
 fn is_duration_expired(created_at: Instant, duration: Duration) -> bool {
     created_at.elapsed() >= duration
 }
 impl ActiveHud {
-    fn is_expired(&self) -> bool {
-        is_duration_expired(self.created_at, Duration::from_millis(self.duration_ms))
+    fn is_expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.created_at) >= Duration::from_millis(self.duration_ms)
     }
 }
 /// Global HUD manager state
@@ -477,7 +569,7 @@ struct HudManagerState {
     /// Using fixed array prevents overlap from len-based stacking
     hud_slots: [Option<HudSlotEntry>; MAX_SIMULTANEOUS_HUDS],
     /// Queue of pending HUDs (if max simultaneous reached)
-    pending_queue: VecDeque<HudNotification>,
+    pending_queue: VecDeque<(HudNotification, HudHostOptions)>,
 }
 impl HudManagerState {
     fn new() -> Self {
@@ -527,19 +619,148 @@ fn get_hud_manager() -> &'static Arc<Mutex<HudManagerState>> {
 }
 /// Internal helper to show a HUD notification from a HudNotification struct.
 /// This preserves all fields including action_label and action.
-fn show_notification(notif: HudNotification, cx: &mut App) {
-    if let (Some(action_label), Some(action)) = (notif.action_label, notif.action) {
-        show_hud_with_action(
-            notif.text,
-            Some(notif.duration_ms),
-            action_label,
-            action,
-            cx,
-        );
-    } else {
-        show_hud(notif.text, Some(notif.duration_ms), cx);
+fn show_notification((notification, host): (HudNotification, HudHostOptions), cx: &mut App) {
+    if let Err(error) = open_hud_notification(notification, host, cx) {
+        tracing::warn!(%error, "hud_open_failed");
     }
 }
+
+/// The shared production factory: position and host policy are explicit, timers use GPUI's clock.
+pub fn open_hud_notification(
+    notification: HudNotification,
+    host: HudHostOptions,
+    cx: &mut App,
+) -> anyhow::Result<Option<MountedHud>> {
+    host.policy.validate()?;
+    anyhow::ensure!(
+        notification.text.len() <= 16_384 && notification.duration_ms <= 600_000,
+        "hud_notification_limit"
+    );
+    if host.policy.is_hidden() {
+        anyhow::ensure!(host.origin.is_some(), "hud_owned_origin_required");
+    }
+    let slot = {
+        let mut state = get_hud_manager().lock();
+        match state.first_free_slot() {
+            Some(slot) => slot,
+            None => {
+                anyhow::ensure!(
+                    state.pending_queue.len() < MAX_QUEUED_HUDS,
+                    "hud_queue_full"
+                );
+                state.pending_queue.push_back((notification, host));
+                return Ok(None);
+            }
+        }
+    };
+    let (message_width, message_height) = hud_dimensions_for_text(&notification.text, cx);
+    let (width, height) = if notification.has_action() {
+        (HUD_ACTION_WIDTH.max(message_width), HUD_ACTION_HEIGHT)
+    } else {
+        (message_width, message_height)
+    };
+    let origin = match host.origin {
+        Some(origin) => origin,
+        None => {
+            crate::runtime_policy::check(ExternalEffect::SystemDiscovery)?;
+            let (x, y) = calculate_hud_position(width);
+            point(px(x), px(y))
+        }
+    };
+    let bounds = gpui::Bounds {
+        origin: point(origin.x, origin.y - px(slot as f32 * HUD_STACK_GAP)),
+        size: size(px(width), px(height)),
+    };
+    let hud_id = next_hud_id();
+    let text = notification.text.clone();
+    let duration = notification.duration_ms;
+    let window = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Transparent,
+            focus: false,
+            show: !host.policy.is_hidden(),
+            kind: WindowKind::PopUp,
+            ..Default::default()
+        },
+        |_, cx| {
+            cx.new(|_| match (notification.action_label, notification.action) {
+                (Some(label), Some(action)) => {
+                    HudView::with_action(notification.text, label, action, hud_id)
+                }
+                _ => HudView::new(notification.text, hud_id),
+            })
+        },
+    )?;
+    {
+        let mut state = get_hud_manager().lock();
+        state.hud_slots[slot] = Some(HudSlotEntry { id: hud_id });
+        state.active_huds.push(ActiveHud {
+            id: hud_id,
+            window,
+            created_at: cx.background_executor().now(),
+            duration_ms: duration,
+            slot,
+            generation: None,
+        });
+    }
+    let publish = move |cx: &mut App| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            get_hud_manager()
+                .lock()
+                .active_huds
+                .iter()
+                .any(|hud| hud.id == hud_id && hud.window == window),
+            "hud_lifetime_superseded"
+        );
+        let generation =
+            register_hud_automation_window(hud_id, &text, bounds, window, host.policy, cx)?;
+        if let Some(hud) = get_hud_manager()
+            .lock()
+            .active_huds
+            .iter_mut()
+            .find(|hud| hud.id == hud_id)
+        {
+            hud.generation = Some(generation);
+        }
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            cx.background_executor()
+                .timer(Duration::from_millis(duration))
+                .await;
+            cx.update(|cx| dismiss_hud_by_id(hud_id, cx));
+        })
+        .detach();
+        Ok(())
+    };
+    if host.policy.is_hidden() {
+        if let Err(error) = publish(cx) {
+            dismiss_hud_by_id(hud_id, cx);
+            return Err(error);
+        }
+    } else {
+        window.update(cx, move |_, window, cx| {
+            window.defer(cx, move |window, cx| {
+                if let Err(error) = configure_hud_platform_window(window, false) {
+                    tracing::warn!(%error, "hud_configuration_failed");
+                    cx.defer(move |cx| dismiss_hud_by_id(hud_id, cx));
+                    return;
+                }
+                cx.defer(move |cx| {
+                    if let Err(error) = publish(cx) {
+                        tracing::warn!(%error, "hud_registration_failed");
+                        dismiss_hud_by_id(hud_id, cx);
+                    }
+                });
+            })
+        })?;
+    }
+    Ok(Some(MountedHud { id: hud_id, window }))
+}
+
 // --- merged from part_001.rs ---
 /// Show a HUD notification
 ///
@@ -552,120 +773,14 @@ fn show_notification(notif: HudNotification, cx: &mut App) {
 /// * `duration_ms` - Optional duration in milliseconds (default: 2000ms)
 /// * `cx` - GPUI App context
 pub fn show_hud(text: String, duration_ms: Option<u64>, cx: &mut App) {
-    let duration = duration_ms.unwrap_or(DEFAULT_HUD_DURATION_MS);
-
-    logging::log(
-        "HUD",
-        &format!("Showing HUD: '{}' for {}ms", text, duration),
-    );
-
-    // Allocate slot and check if we can show immediately
-    let allocated_slot = {
-        let manager = get_hud_manager();
-        let state = manager.lock();
-        state.first_free_slot()
+    let notification = HudNotification {
+        text,
+        duration_ms: duration_ms.unwrap_or(DEFAULT_HUD_DURATION_MS),
+        created_at: cx.background_executor().now(),
+        action_label: None,
+        action: None,
     };
-
-    let slot = match allocated_slot {
-        Some(s) => s,
-        None => {
-            // No free slots, queue the HUD
-            logging::log("HUD", "Max HUDs reached, queueing");
-            let manager = get_hud_manager();
-            let mut state = manager.lock();
-            state.pending_queue.push_back(HudNotification {
-                text,
-                duration_ms: duration,
-                created_at: Instant::now(),
-                action_label: None,
-                action: None,
-            });
-            return;
-        }
-    };
-
-    let (hud_width, hud_height) = hud_dimensions_for_text(&text, cx);
-
-    // Calculate position - bottom center of screen with mouse
-    let (hud_x, hud_y) = calculate_hud_position(hud_width);
-
-    // Calculate vertical offset using SLOT index (not len) - this prevents overlap
-    let stack_offset = slot as f32 * HUD_STACK_GAP;
-
-    let bounds = gpui::Bounds {
-        origin: point(px(hud_x), px(hud_y - stack_offset)),
-        size: size(px(hud_width), px(hud_height)),
-    };
-
-    let text_for_log = text.clone();
-
-    // Generate the ID before the window exists so the view can dismiss
-    // itself on click through the tracked path.
-    let hud_id = next_hud_id();
-
-    // Create the HUD window with specific options for overlay behavior.
-    // PopUp = non-activating panel, so the dismiss click below never steals
-    // focus from the frontmost app.
-    let window_result = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
-            is_movable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
-            focus: false, // Don't steal focus
-            show: true,   // Show immediately
-            kind: WindowKind::PopUp,
-            ..Default::default()
-        },
-        |_, cx| cx.new(|_| HudView::new(text, hud_id)),
-    );
-
-    match window_result {
-        Ok(window_handle) => {
-            // Configure the window as a floating overlay. HUDs accept mouse
-            // events (click_through=false) so a click can dismiss them.
-            configure_hud_window(window_handle, false, cx);
-
-            register_hud_automation_window(hud_id, &text_for_log, bounds);
-
-            // Track the active HUD and register slot
-            {
-                let manager = get_hud_manager();
-                let mut state = manager.lock();
-                // Register slot ownership
-                state.hud_slots[slot] = Some(HudSlotEntry { id: hud_id });
-                state.active_huds.push(ActiveHud {
-                    id: hud_id,
-                    window: window_handle,
-                    created_at: Instant::now(),
-                    duration_ms: duration,
-                    slot,
-                });
-            }
-
-            // Schedule cleanup after duration - use ID for dismissal
-            let duration_duration = Duration::from_millis(duration);
-            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                cx.background_executor().timer(duration_duration).await;
-
-                // IMPORTANT: All AppKit calls must happen on the main thread.
-                // cx.update() ensures we're on the main thread.
-                cx.update(|cx| {
-                    // Dismiss by ID using GPUI's WindowHandle API
-                    dismiss_hud_by_id(hud_id, cx);
-                });
-            })
-            .detach();
-
-            logging::log(
-                "HUD",
-                &format!("HUD window created for: '{}' (slot {})", text_for_log, slot),
-            );
-        }
-        Err(e) => {
-            logging::log("HUD", &format!("Failed to create HUD window: {:?}", e));
-        }
-    }
+    show_notification((notification, HudHostOptions::interactive()), cx);
 }
 /// Show a HUD notification with a clickable action button
 ///
@@ -686,130 +801,14 @@ pub fn show_hud_with_action(
     action: HudAction,
     cx: &mut App,
 ) {
-    // Action HUDs have longer default duration (3s) since user might click
-    let duration = duration_ms.unwrap_or(3000);
-
-    logging::log(
-        "HUD",
-        &format!(
-            "Showing HUD with action: '{}' [{}] for {}ms",
-            text, action_label, duration
-        ),
-    );
-
-    // Allocate slot and check if we can show immediately
-    let allocated_slot = {
-        let manager = get_hud_manager();
-        let state = manager.lock();
-        state.first_free_slot()
+    let notification = HudNotification {
+        text,
+        duration_ms: duration_ms.unwrap_or(3000),
+        created_at: cx.background_executor().now(),
+        action_label: Some(action_label),
+        action: Some(action),
     };
-
-    let slot = match allocated_slot {
-        Some(s) => s,
-        None => {
-            // No free slots, queue the HUD
-            logging::log("HUD", "Max HUDs reached, queueing action HUD");
-            let manager = get_hud_manager();
-            let mut state = manager.lock();
-            state.pending_queue.push_back(HudNotification {
-                text,
-                duration_ms: duration,
-                created_at: Instant::now(),
-                action_label: Some(action_label),
-                action: Some(action),
-            });
-            return;
-        }
-    };
-
-    let (message_width, _) = hud_dimensions_for_text(&text, cx);
-
-    // Calculate position - bottom center of screen with mouse
-    let (hud_x, hud_y) = calculate_hud_position(HUD_ACTION_WIDTH.max(message_width));
-
-    // Calculate vertical offset using SLOT index (not len) - this prevents overlap
-    let stack_offset = slot as f32 * HUD_STACK_GAP;
-
-    let hud_width = HUD_ACTION_WIDTH.max(message_width);
-
-    let bounds = gpui::Bounds {
-        origin: point(px(hud_x), px(hud_y - stack_offset)),
-        size: size(px(hud_width), px(HUD_ACTION_HEIGHT)),
-    };
-
-    let text_for_log = text.clone();
-
-    // Generate the ID before the window exists so the view can dismiss
-    // itself on click through the tracked path.
-    let hud_id = next_hud_id();
-
-    // Create the HUD window with action button
-    let window_result = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
-            is_movable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
-            focus: false, // Don't steal focus
-            show: true,   // Show immediately
-            kind: WindowKind::PopUp,
-            ..Default::default()
-        },
-        |_, cx| cx.new(|_| HudView::with_action(text, action_label, action, hud_id)),
-    );
-
-    match window_result {
-        Ok(window_handle) => {
-            // Configure the window as a floating overlay. Action HUDs need to
-            // receive mouse events for button clicks (click_through = false).
-            configure_hud_window(window_handle, false, cx);
-
-            register_hud_automation_window(hud_id, &text_for_log, bounds);
-
-            // Track the active HUD and register slot
-            {
-                let manager = get_hud_manager();
-                let mut state = manager.lock();
-                // Register slot ownership
-                state.hud_slots[slot] = Some(HudSlotEntry { id: hud_id });
-                state.active_huds.push(ActiveHud {
-                    id: hud_id,
-                    window: window_handle,
-                    created_at: Instant::now(),
-                    duration_ms: duration,
-                    slot,
-                });
-            }
-
-            // Schedule cleanup after duration - use ID for dismissal
-            let duration_duration = Duration::from_millis(duration);
-            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                cx.background_executor().timer(duration_duration).await;
-
-                // IMPORTANT: All AppKit calls must happen on the main thread.
-                // cx.update() ensures we're on the main thread.
-                cx.update(|cx| {
-                    // Dismiss by ID using GPUI's WindowHandle API
-                    dismiss_hud_by_id(hud_id, cx);
-                });
-            })
-            .detach();
-
-            logging::log(
-                "HUD",
-                &format!(
-                    "Action HUD window created for: '{}' (slot {})",
-                    text_for_log, slot
-                ),
-            );
-        }
-        Err(e) => {
-            logging::log(
-                "HUD",
-                &format!("Failed to create action HUD window: {:?}", e),
-            );
-        }
-    }
+    show_notification((notification, HudHostOptions::interactive()), cx);
 }
 fn display_for_window_center(
     bounds: (f64, f64, f64, f64),
@@ -874,33 +873,21 @@ fn calculate_hud_position(hud_width: f32) -> (f32, f32) {
 /// closing could leave a permanent ghost HUD on screen.
 ///
 /// # Arguments
-/// * `window_handle` - The freshly opened HUD window to configure
+/// * `window` - The freshly opened HUD window to configure
 /// * `click_through` - If true, window ignores mouse events (for plain HUDs).
 ///   If false, window receives mouse events (for click-to-dismiss/buttons).
-fn configure_hud_window(window_handle: WindowHandle<HudView>, click_through: bool, cx: &mut App) {
-    let update_result = window_handle.update(cx, move |_view, window, cx| {
-        // Defer so GPUI finishes internal setup after open_window before we
-        // touch the native window (same reasoning as the actions popup).
-        window.defer(cx, move |window, _cx| {
-            configure_hud_platform_window(window, click_through);
-        });
-    });
-    if update_result.is_err() {
-        logging::log("HUD", "Could not schedule HUD window configuration");
-    }
-}
-
 #[cfg(target_os = "macos")]
-fn configure_hud_platform_window(window: &mut Window, click_through: bool) {
+fn configure_hud_platform_window(window: &mut Window, click_through: bool) -> anyhow::Result<()> {
+    crate::runtime_policy::check(ExternalEffect::NativeVisibility)?;
     use cocoa::base::id;
 
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
         logging::log("HUD", "Could not resolve raw window handle for HUD window");
-        return;
+        anyhow::bail!("hud_native_handle_missing");
     };
     let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         logging::log("HUD", "HUD window handle is not an AppKit window");
-        return;
+        anyhow::bail!("hud_native_handle_not_appkit");
     };
     let ns_view = appkit.ns_view.as_ptr() as id;
 
@@ -908,13 +895,15 @@ fn configure_hud_platform_window(window: &mut Window, click_through: bool) {
     // thread; `-[NSView window]` returns its owning NSWindow or nil, and all
     // selectors below are standard NSWindow accessors/setters.
     unsafe {
+        use objc::{msg_send, sel, sel_impl};
+
         let window: id = msg_send![ns_view, window];
         if window.is_null() {
             logging::log(
                 "HUD",
                 "HUD NSView has no NSWindow yet, skipping configuration",
             );
-            return;
+            anyhow::bail!("hud_native_window_missing");
         }
 
         let theme = crate::theme::get_cached_theme();
@@ -968,114 +957,100 @@ fn configure_hud_platform_window(window: &mut Window, click_through: bool) {
             ),
         );
     }
+    Ok(())
 }
 #[cfg(not(target_os = "macos"))]
-fn configure_hud_platform_window(_window: &mut Window, _click_through: bool) {
-    logging::log(
-        "HUD",
-        "Non-macOS platform, skipping HUD window configuration",
-    );
+fn configure_hud_platform_window(_window: &mut Window, _click_through: bool) -> anyhow::Result<()> {
+    Ok(())
 }
 /// Dismiss a specific HUD by its ID
 ///
 /// Uses WindowHandle.update() + window.remove_window() for reliable window closing.
 /// Uses slot-based clearing instead of swap_remove to prevent position overlap.
-fn dismiss_hud_by_id(hud_id: u64, cx: &mut App) {
-    let manager = get_hud_manager();
+pub(crate) fn dismiss_owned_hud_instance(
+    id: &str,
+    generation: u64,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::windows::runtime_window_host_policy(id, generation)?.is_hidden(),
+        "hud_owned_host_required"
+    );
+    let handle = crate::windows::get_runtime_window_handle_for_generation(id, generation)
+        .ok_or_else(|| anyhow::anyhow!("hud_target_stale"))?;
+    let hud_id = handle.read(cx, |entity: gpui::Entity<HudView>, cx| {
+        entity.read(cx).hud_id
+    })?;
+    anyhow::ensure!(
+        get_hud_manager()
+            .lock()
+            .active_huds
+            .iter()
+            .any(|hud| hud.id == hud_id
+                && hud.generation == Some(generation)
+                && gpui::AnyWindowHandle::from(hud.window) == handle),
+        "hud_lifetime_mismatch"
+    );
+    dismiss_hud_by_id(hud_id, cx);
+    Ok(())
+}
 
-    // Find and remove the HUD with matching ID, getting its window handle for closing
-    let window_to_close: Option<WindowHandle<HudView>> = {
-        let mut state = manager.lock();
-
-        // First, release the slot (this is the key fix - clears by ID, not swap_remove)
+pub(crate) fn dismiss_hud_by_id(hud_id: u64, cx: &mut App) {
+    let hud = {
+        let mut state = get_hud_manager().lock();
+        let Some(index) = state.active_huds.iter().position(|hud| hud.id == hud_id) else {
+            return;
+        };
         state.release_slot_by_id(hud_id);
-
-        // Then find and remove from active_huds Vec (retain order, don't swap_remove)
-        if let Some(idx) = state.active_huds.iter().position(|h| h.id == hud_id) {
-            let hud = state.active_huds.remove(idx); // Use remove() to preserve order
-            Some(hud.window)
-        } else {
-            None
-        }
+        state.active_huds.remove(index)
     };
+    close_hud_lifetime(hud, cx);
+    cleanup_expired_huds(cx);
+}
 
-    // Close the window using GPUI's proper API
-    if let Some(window_handle) = window_to_close {
-        // Use WindowHandle.update() to access window.remove_window()
-        window_handle
-            .update(cx, |_view, window, cx| {
-                crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
-            })
-            .ok();
-
-        crate::windows::remove_automation_window(&hud_automation_id(hud_id));
-        logging::log("HUD", &format!("Dismissed HUD id={}", hud_id));
-
-        // Show any pending HUDs
-        cleanup_expired_huds(cx);
-    } else {
-        // HUD was already dismissed (possibly manually) - this is OK
-        logging::log(
-            "HUD",
-            &format!("HUD id={} already dismissed, skipping", hud_id),
-        );
+fn close_hud_lifetime(hud: ActiveHud, cx: &mut App) {
+    if let Some(generation) = hud.generation {
+        crate::windows::remove_runtime_window_instance(&hud_automation_id(hud.id), generation);
     }
+    let _ = hud.window.update(cx, |_, window, cx| {
+        if window.is_owned_hidden() {
+            window.remove_window();
+        } else {
+            crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
+        }
+    });
 }
 // --- merged from part_002.rs ---
 /// Clean up expired HUD windows and show pending ones
 fn cleanup_expired_huds(cx: &mut App) {
-    let manager = get_hud_manager();
-
-    // Remove expired HUDs from tracking, KEEPING their window handles so the
-    // windows can actually be closed below. Dropping them from tracking
-    // without closing (the old behavior) orphaned the OS window forever: the
-    // HUD's own dismiss timer later found nothing in `active_huds` and
-    // skipped the close, leaving a permanent on-screen HUD. This raced
-    // whenever two HUDs were shown in quick succession (e.g. the permissions
-    // flow) — the first dismissal swept the second out of tracking here just
-    // before the second's timer fired.
-    let expired: Vec<ActiveHud> = {
-        let mut state = manager.lock();
+    let now = cx.background_executor().now();
+    let expired = {
+        let mut state = get_hud_manager().lock();
         let (expired, remaining): (Vec<ActiveHud>, Vec<ActiveHud>) = state
             .active_huds
             .drain(..)
-            .partition(|hud| hud.is_expired());
+            .partition(|hud| hud.is_expired(now));
         state.active_huds = remaining;
         for hud in &expired {
             state.release_slot_by_id(hud.id);
         }
         expired
     };
-
-    // Close expired windows outside the lock.
-    for hud in &expired {
-        crate::windows::remove_automation_window(&hud_automation_id(hud.id));
-        hud.window
-            .update(cx, |_view, window, cx| {
-                crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
-            })
-            .ok();
+    for hud in expired {
+        close_hud_lifetime(hud, cx);
     }
-    if !expired.is_empty() {
-        logging::log(
-            "HUD",
-            &format!("Cleaned up {} expired HUD(s)", expired.len()),
-        );
-    }
-
-    // Show pending HUDs if we have free slots
-    let mut state = manager.lock();
-    while state.first_free_slot().is_some() {
-        if let Some(pending) = state.pending_queue.pop_front() {
-            // Drop lock before showing HUD (show_notification will acquire it)
-            drop(state);
-            // Use show_notification to preserve action_label and action
-            show_notification(pending, cx);
-            // Re-acquire for next iteration
-            state = manager.lock();
-        } else {
+    for _ in 0..MAX_QUEUED_HUDS {
+        let pending = {
+            let mut state = get_hud_manager().lock();
+            if state.first_free_slot().is_none() {
+                break;
+            }
+            state.pending_queue.pop_front()
+        };
+        let Some(pending) = pending else {
             break;
-        }
+        };
+        show_notification(pending, cx);
     }
 }
 /// Dismiss all active HUDs immediately
@@ -1084,35 +1059,14 @@ fn cleanup_expired_huds(cx: &mut App) {
 /// Must be called on the main thread (i.e., from within App context).
 #[allow(dead_code)]
 pub fn dismiss_all_huds(cx: &mut App) {
-    let manager = get_hud_manager();
-
-    // Collect window handles first, then close windows
-    let windows_to_close: Vec<WindowHandle<HudView>> = {
-        let mut state = manager.lock();
-        let windows: Vec<_> = state
-            .active_huds
-            .drain(..)
-            .map(|hud| {
-                crate::windows::remove_automation_window(&hud_automation_id(hud.id));
-                hud.window
-            })
-            .collect();
-        state.hud_slots = [None; MAX_SIMULTANEOUS_HUDS]; // Clear all slots
+    let huds = {
+        let mut state = get_hud_manager().lock();
+        state.hud_slots = [None; MAX_SIMULTANEOUS_HUDS];
         state.pending_queue.clear();
-        windows
+        std::mem::take(&mut state.active_huds)
     };
-
-    let count = windows_to_close.len();
-
-    // Close each window using GPUI's proper API
-    for window_handle in windows_to_close {
-        let _ = window_handle.update(cx, |_view, window, cx| {
-            crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
-        });
-    }
-
-    if count > 0 {
-        logging::log("HUD", &format!("Dismissed {} active HUD(s)", count));
+    for hud in huds {
+        close_hud_lifetime(hud, cx);
     }
 }
 // --- merged from part_003.rs ---
@@ -1554,33 +1508,39 @@ mod tests {
         assert!(state.pending_queue.is_empty());
 
         // Add items to queue
-        state.pending_queue.push_back(HudNotification {
-            text: "First".to_string(),
-            duration_ms: 2000,
-            created_at: Instant::now(),
-            action_label: None,
-            action: None,
-        });
+        state.pending_queue.push_back((
+            HudNotification {
+                text: "First".to_string(),
+                duration_ms: 2000,
+                created_at: Instant::now(),
+                action_label: None,
+                action: None,
+            },
+            HudHostOptions::interactive(),
+        ));
 
-        state.pending_queue.push_back(HudNotification {
-            text: "Second".to_string(),
-            duration_ms: 2000,
-            created_at: Instant::now(),
-            action_label: None,
-            action: None,
-        });
+        state.pending_queue.push_back((
+            HudNotification {
+                text: "Second".to_string(),
+                duration_ms: 2000,
+                created_at: Instant::now(),
+                action_label: None,
+                action: None,
+            },
+            HudHostOptions::interactive(),
+        ));
 
         assert_eq!(state.pending_queue.len(), 2);
 
         // Pop front should return first item
         let first = state.pending_queue.pop_front().unwrap();
-        assert_eq!(first.text, "First");
+        assert_eq!(first.0.text, "First");
 
         // Queue should still have one item
         assert_eq!(state.pending_queue.len(), 1);
 
         let second = state.pending_queue.pop_front().unwrap();
-        assert_eq!(second.text, "Second");
+        assert_eq!(second.0.text, "Second");
 
         // Queue should be empty now
         assert!(state.pending_queue.is_empty());

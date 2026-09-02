@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 
 import { createHash } from "node:crypto";
 import {
@@ -27,10 +28,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 assertNoninteractiveVisualProbe("cons-flow-ux.notes-search");
 
 const ROOT = resolve(import.meta.dir, "../../..");
-const BINARY = resolve(
-  process.env.SCRIPT_KIT_GPUI_BINARY ??
-    join(ROOT, "target-agent/artifacts/cons-flow-c08/script-kit-gpui"),
-);
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_DIR = resolve(
   process.env.CONSISTENCY_RECEIPT_DIR ?? join(ROOT, ".test-output/cons-flow-c08"),
 );
@@ -679,22 +677,20 @@ let targetObservation: RuntimeTargetObservation | null = null;
 let failure: string | null = null;
 
 try {
-  driver = await Driver.launch({
-    binary: BINARY,
-    sessionName: "cons-flow-c08-notes-search",
-    sandboxHome: true,
-    readyTimeoutMs: 30_000,
-    defaultTimeoutMs: 10_000,
-    env: {
-      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_TEST_NOTES_BRAIN_PATH: seeded.brain,
-      SCRIPT_KIT_TEST_NOTES_DB_PATH: seeded.db,
-      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-  });
+  driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY,
+  sessionName: "cons-flow-c08-notes-search",
+  sandboxHome: true,
+  readyTimeoutMs: 30_000,
+  defaultTimeoutMs: 10_000,
+  env: {
+    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_TEST_NOTES_BRAIN_PATH: seeded.brain,
+    SCRIPT_KIT_TEST_NOTES_DB_PATH: seeded.db,
+    SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  }, });
 
   await openNotes(driver, "notes-schema-init");
   await ensureNotesClosed(driver, "notes-schema-init");
@@ -908,22 +904,20 @@ try {
     destinationVerbs: hosts.map((host) => ({ host: host.host, verb: host.destination })),
   };
 
-  emptyDriver = await Driver.launch({
-    binary: BINARY,
-    sessionName: "cons-flow-c08-notes-search-empty",
-    sandboxHome: true,
-    readyTimeoutMs: 30_000,
-    defaultTimeoutMs: 10_000,
-    env: {
-      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-      SCRIPT_KIT_TEST_STATUS: "1",
-      SCRIPT_KIT_TEST_NOTES_BRAIN_PATH: emptyBrain,
-      SCRIPT_KIT_TEST_NOTES_DB_PATH: emptyDb,
-      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-    },
-  });
+  emptyDriver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY,
+  sessionName: "cons-flow-c08-notes-search-empty",
+  sandboxHome: true,
+  readyTimeoutMs: 30_000,
+  defaultTimeoutMs: 10_000,
+  env: {
+    SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
+    SCRIPT_KIT_TEST_STATUS: "1",
+    SCRIPT_KIT_TEST_NOTES_BRAIN_PATH: emptyBrain,
+    SCRIPT_KIT_TEST_NOTES_DB_PATH: emptyDb,
+    SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+    SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+    SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
+  }, });
   await openNotes(emptyDriver, "empty-schema-init");
   await ensureNotesClosed(emptyDriver, "empty-schema-init");
   await Bun.sleep(300);

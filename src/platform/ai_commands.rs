@@ -15,6 +15,7 @@
 /// A tuple of (png_data, width, height) on success.
 pub fn capture_screen_screenshot(
 ) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     #[cfg(target_os = "macos")]
     {
         let sck_error = match capture_active_display_screenshot_sck() {
@@ -403,7 +404,7 @@ fn cgimage_to_rgba(
     unsafe { CGContextRelease(context) };
 
     // Un-premultiply alpha (CGBitmapContext gives premultiplied RGBA)
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let a = pixel[3] as u16;
         if a > 0 && a < 255 {
             pixel[0] = ((pixel[0] as u16 * 255) / a).min(255) as u8;
@@ -440,6 +441,7 @@ pub struct FocusedWindowCapture {
 /// A `FocusedWindowCapture` on success.
 pub fn capture_focused_window_screenshot(
 ) -> Result<FocusedWindowCapture, Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     use image::codecs::png::PngEncoder;
     use image::ImageEncoder;
     use xcap::Window;
@@ -587,6 +589,7 @@ pub struct FocusedWindowMetadata {
 /// with `used_fallback = true` to stay consistent with the screenshot path.
 pub fn capture_focused_window_metadata(
 ) -> Result<FocusedWindowMetadata, Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     use xcap::Window;
 
     let windows = Window::all()?;
@@ -685,6 +688,7 @@ pub fn capture_focused_window_metadata(
 /// A `FocusedWindowCapture` on success with `used_fallback = false`.
 pub fn capture_script_kit_panel_screenshot(
 ) -> Result<FocusedWindowCapture, Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ScreenCapture)?;
     use image::codecs::png::PngEncoder;
     use image::ImageEncoder;
     use xcap::Window;
@@ -790,6 +794,7 @@ pub struct BrowserTabUrl {
 
 #[cfg(target_os = "macos")]
 pub fn get_focused_browser_tab_url() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)?;
     let Some(tracked) = crate::frontmost_app_tracker::get_last_real_app() else {
         return Err(
             "Frontmost app tracker has no tracked app yet — cannot identify browser".into(),
@@ -869,6 +874,7 @@ pub fn get_focused_browser_tab_url() -> Result<String, Box<dyn std::error::Error
 
 #[cfg(target_os = "macos")]
 pub fn get_any_browser_tab_url_with_source() -> Option<BrowserTabUrl> {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::SystemDiscovery) { return None; }
     if let Ok(url) = get_focused_browser_tab_url() {
         return Some(BrowserTabUrl {
             url,
@@ -974,6 +980,7 @@ pub fn get_any_browser_tab_url() -> Option<String> {
 /// No-op on non-macOS platforms.
 #[cfg(target_os = "macos")]
 pub fn hide_cursor_until_mouse_moves() {
+    if !native_effect_allowed(crate::runtime_policy::ExternalEffect::NativeInput) { return; }
     // SAFETY: NSCursor.setHiddenUntilMouseMoves: is a class method that is
     // safe to call from any thread (it's one of the few AppKit methods that is).
     // It takes a BOOL value type and returns void.

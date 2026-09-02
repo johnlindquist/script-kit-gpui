@@ -4,8 +4,9 @@ import {
   receiptRegistryReport,
   validateReceipt,
 } from "./lib/receipt-schema.ts";
-import { diagnostic } from "./lib/privacy.ts";
+import { diagnostic, productStatic } from "./lib/privacy.ts";
 import { pickWindows } from "./lib/target-identity.ts";
+import { emptyOwnedCleanup } from "../agentic/artifact-lifecycle.ts";
 
 function proofTransaction(extra: Record<string, unknown> = {}) {
   return {
@@ -83,6 +84,37 @@ describe("executable receipt registry", () => {
     expect(ids).toContain("devtools.elements.snapshot");
     expect(ids).toContain("devtools.keyboard.inspect");
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test("compiled discovery metadata is not mistaken for complete runtime family evidence", () => {
+    const discovery = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.design",
+      command: "design.discover",
+      classification: "ok",
+      evidenceClass: "STATIC_INVENTORY",
+      provesRuntimeBehavior: false,
+      artifactReference: {
+        manifestPath: "target-agent/artifacts/catalogue-fixture/manifest.json",
+        manifestSha256: "a".repeat(64),
+      },
+      observation: productStatic({ fixtures: [{ id: "main.script-list" }] }),
+      assertions: [{ id: "catalogue_observed", pass: true }],
+      cleanup: emptyOwnedCleanup(),
+      errors: [],
+      warnings: [],
+    };
+    const inspected = prepareValidatedReceipt("devtools.design.run", discovery);
+    expect(inspected.exitCode).toBe(0);
+    expect(inspected.receipt.provesRuntimeBehavior).toBe(false);
+    const claimedCampaign = prepareValidatedReceipt("devtools.design.run", {
+      ...discovery,
+      command: "design.run",
+      evidenceClass: "DIRECT_RUNTIME_PROOF",
+      provesRuntimeBehavior: true,
+    });
+    expect(claimedCampaign.exitCode).not.toBe(0);
+    expect(claimedCampaign.validation.errors).toContain("complete_122_fixture_inventory_required");
   });
 
   test("positive layout receipt becomes EVALUABLE_PASS", () => {
@@ -684,8 +716,8 @@ describe("executable receipt registry", () => {
         renderedSafeViewport: forged,
       });
       expect(prepared.exitCode, name).not.toBe(0);
-      expect(["INVALID_SCHEMA", "INVALID_GENERATION"], name)
-        .toContain(prepared.receipt.disposition);
+      expect(prepared.receipt.disposition === "INVALID_SCHEMA" ||
+        prepared.receipt.disposition === "INVALID_GENERATION", name).toBe(true);
     }
   });
 
@@ -805,7 +837,8 @@ describe("executable receipt registry", () => {
   });
 
   test("ReceiptEnvelopeV2 is complete and pass is derived from disposition", () => {
-    const prepared = prepareValidatedReceipt("devtools.layout.measure", baseReceipt());
+    const cleanup = emptyOwnedCleanup();
+    const prepared = prepareValidatedReceipt("devtools.layout.measure", baseReceipt({ cleanup }));
     expect(prepared.receipt.schemaVersion).toBe(2);
     expect(typeof prepared.receipt.receiptId).toBe("string");
     expect(typeof prepared.receipt.runId).toBe("string");
@@ -815,8 +848,17 @@ describe("executable receipt registry", () => {
     expect(typeof prepared.receipt.evidence).toBe("object");
     expect(typeof prepared.receipt.interference).toBe("object");
     expect((prepared.receipt.cleanup as Record<string, unknown>).closed).toBe(true);
+    expect(prepared.receipt.cleanup).toMatchObject(cleanup);
     expect((prepared.receipt.producerValidation as Record<string, unknown>).valid).toBe(true);
     expect(prepared.receipt.pass).toBe(true);
+  });
+
+  test("a missing cleanup observation is not normalized into successful closure", () => {
+    const prepared = prepareValidatedReceipt("devtools.layout.measure", baseReceipt());
+    expect(prepared.receipt.cleanup).toMatchObject({
+      closed: false,
+      survivors: [{ kind: "owned-resources", identity: "unknown", observation: "unknown" }],
+    });
   });
 
   test("an evaluable failure exits two rather than masquerading as success", () => {

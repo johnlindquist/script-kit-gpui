@@ -23,6 +23,7 @@ fn resolve_existing_path(path: &Path, action: &str) -> Result<PathBuf, String> {
 ///
 /// On non-macOS platforms, opens the containing folder with the system default handler.
 pub fn reveal_in_finder(path: &Path) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal).map_err(|error| error.to_string())?;
     let resolved_path = resolve_existing_path(path, "reveal_in_finder")?;
     reveal_in_finder_impl(&resolved_path)
 }
@@ -182,6 +183,7 @@ fn reveal_in_finder_impl(path: &Path) -> Result<(), String> {
 ///
 /// On macOS, this uses `NSWorkspace.openURL` with a `file://` URL.
 pub fn open_in_default_app(path: &Path) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal).map_err(|error| error.to_string())?;
     let resolved_path = resolve_existing_path(path, "open_in_default_app")?;
     open_in_default_app_impl(&resolved_path)
 }
@@ -324,10 +326,22 @@ fn open_in_default_app_impl(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Copy application text to its actual destination: the system clipboard in
+/// normal mode, or the bounded process-local sink under the owned policy.
+/// Local copies are not available to system clipboard reads or native paste.
+pub fn copy_text(text: &str) -> Result<crate::runtime_policy::CopyReceipt, String> {
+    crate::runtime_policy::route_text_copy(
+        crate::runtime_policy::owned_evaluation(),
+        text,
+        copy_text_to_clipboard,
+    )
+}
+
 /// Copy text to the system clipboard.
 ///
 /// On macOS this uses `NSPasteboard`. On other platforms it falls back to `arboard`.
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard).map_err(|error| error.to_string())?;
     copy_text_to_clipboard_impl(text)
 }
 
@@ -471,6 +485,7 @@ fn copy_text_to_clipboard_impl(text: &str) -> Result<(), String> {
 /// the main thread during a mouse event (typically from an `on_drag` callback).
 #[cfg(target_os = "macos")]
 pub fn begin_native_file_drag(path: &str) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput).map_err(|error| error.to_string())?;
     use cocoa::base::{id, nil};
     use cocoa::foundation::{NSArray, NSPoint, NSString};
     use objc::{class, msg_send, sel, sel_impl};

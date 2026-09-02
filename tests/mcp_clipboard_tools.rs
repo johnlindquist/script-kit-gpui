@@ -164,6 +164,7 @@ fn clipboard_pin_unpin_delete_round_trips_against_history_db() {
         assert_eq!(pin_payload["result"]["pinned"], true);
         assert!(
             get_clipboard_history_meta(10, 0)
+                .expect("read pinned clipboard metadata")
                 .iter()
                 .any(|entry| entry.id == id && entry.pinned),
             "pin should mark the entry as pinned in history metadata"
@@ -175,6 +176,7 @@ fn clipboard_pin_unpin_delete_round_trips_against_history_db() {
         assert_eq!(unpin_payload["result"]["unpinned"], true);
         assert!(
             get_clipboard_history_meta(10, 0)
+                .expect("read unpinned clipboard metadata")
                 .iter()
                 .any(|entry| entry.id == id && !entry.pinned),
             "unpin should clear the pinned flag"

@@ -1079,7 +1079,7 @@ pub(crate) fn render_conversation_copy_button(
 
     let actions = style.actions;
     let theme_colors = &theme.colors;
-    let hover_bg = crate::theme::hover_overlay_bg(theme, actions.button_hover_bg_alpha as u8);
+    let hover_bg = crate::theme::hover_overlay_bg(theme, actions.button_hover_bg_alpha.get());
     let hover_opacity = actions.button_hover_opacity;
     let accent = theme_colors.accent.selected;
     let icon_color = theme_colors.text.secondary;

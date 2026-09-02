@@ -8,6 +8,230 @@
  */
 
 import { resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, lstatSync, realpathSync } from "node:fs";
+import { join, relative } from "node:path";
+import { assertOutputOwnership, type OutputClaim } from "../../agentic/artifact-lifecycle.ts";
+import { isVerifiedArtifact, type VerifiedArtifact } from "../../agentic/build-artifact.ts";
+
+declare const ownedEvaluationBrand: unique symbol;
+export interface OwnedEvaluationPermit { readonly [ownedEvaluationBrand]: true }
+export interface EvaluationLimits {
+  readonly maxWindows: number;
+  readonly maxRequests: number;
+  readonly maxFrames: number;
+  readonly maxLifetimeMs: number;
+  readonly maxImagePixels: number;
+  readonly maxPngBytes: number;
+  readonly maxRetainedImages: number;
+  readonly maxLogBytes: number;
+}
+export const OWNED_EVALUATION_LIMITS: EvaluationLimits = Object.freeze({
+  maxWindows: 8, maxRequests: 4096, maxFrames: 2048, maxLifetimeMs: 600_000,
+  maxImagePixels: 4_194_304, maxPngBytes: 4_194_304, maxRetainedImages: 8,
+  maxLogBytes: 8_388_608,
+});
+export const OWNED_EVALUATION_GUARDS = Object.freeze([
+  "earlyBootstrap", "applicationEffects", "nativePlatform", "hiddenWindows",
+  "localInput", "ownedStorage", "boundedProgress", "renderReadback",
+] as const);
+export const OWNED_EVALUATION_POLICY_SHA256 = createHash("sha256").update(JSON.stringify({
+  version: 1, limits: OWNED_EVALUATION_LIMITS, guards: OWNED_EVALUATION_GUARDS,
+})).digest("hex");
+export interface OwnedEvaluationFacts {
+  readonly artifact: VerifiedArtifact;
+  readonly claim: OutputClaim;
+  readonly fixtureIds: readonly string[];
+  readonly limits: EvaluationLimits;
+  readonly nativeGlass: "platform-default" | "disabled";
+  readonly launchNonce: string;
+  readonly policySha256: string;
+  readonly platform: NodeJS.Platform;
+  readonly architecture: string;
+}
+const evaluationPermits = new WeakMap<OwnedEvaluationPermit, { facts: OwnedEvaluationFacts; consumed: boolean }>();
+
+export function issueOwnedEvaluationPermit(
+  artifact: VerifiedArtifact, claim: OutputClaim, requestedFixtureIds: readonly string[],
+  options: { maxLifetimeMs?: number; nativeGlass?: "platform-default" | "disabled" } = {},
+): OwnedEvaluationPermit {
+  if (!isVerifiedArtifact(artifact) || artifact.manifest.artifactKind !== "application" ||
+      artifact.manifest.target.packageName !== "script-kit-gpui" ||
+      artifact.manifest.target.targetName !== "script-kit-gpui" ||
+      !artifact.manifest.target.features.includes("owned-ui-evaluation")) {
+    throw new NoninteractiveSafetyError("ownedEvaluation", "verified evaluator application required");
+  }
+  assertOutputOwnership(claim);
+  if (requestedFixtureIds.length > 512 || new Set(requestedFixtureIds).size !== requestedFixtureIds.length ||
+      requestedFixtureIds.some(id => !/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,159}$/.test(id))) {
+    throw new NoninteractiveSafetyError("ownedEvaluation", "invalid fixture subset");
+  }
+  const maxLifetimeMs = options.maxLifetimeMs === undefined ? OWNED_EVALUATION_LIMITS.maxLifetimeMs : options.maxLifetimeMs;
+  if (Object.keys(options).some(key => key !== "maxLifetimeMs" && key !== "nativeGlass") ||
+      !Number.isSafeInteger(maxLifetimeMs) || maxLifetimeMs <= 0 || maxLifetimeMs > OWNED_EVALUATION_LIMITS.maxLifetimeMs) {
+    throw new NoninteractiveSafetyError("ownedEvaluation", "lifetime must be a positive safe integer within the existing maximum");
+  }
+  const nativeGlass = options.nativeGlass === undefined ? "platform-default" : options.nativeGlass;
+  if (nativeGlass !== "platform-default" && nativeGlass !== "disabled") {
+    throw new NoninteractiveSafetyError("ownedEvaluation", "nativeGlass must be platform-default or disabled");
+  }
+  const limits = maxLifetimeMs === OWNED_EVALUATION_LIMITS.maxLifetimeMs ? OWNED_EVALUATION_LIMITS :
+    Object.freeze({ ...OWNED_EVALUATION_LIMITS, maxLifetimeMs });
+  const policySha256 = createHash("sha256").update(JSON.stringify({ version: 1, limits, guards: OWNED_EVALUATION_GUARDS })).digest("hex");
+  // Output ownership is keyed by this exact object; sealing must not clone it.
+  Object.freeze(claim.plan);
+  Object.freeze(claim.owner);
+  Object.freeze(claim);
+  const permit = Object.freeze({}) as OwnedEvaluationPermit;
+  evaluationPermits.set(permit, { consumed: false, facts: Object.freeze({
+    artifact, claim,
+    fixtureIds: Object.freeze([...requestedFixtureIds]), limits, nativeGlass,
+    launchNonce: randomUUID(), policySha256,
+    platform: process.platform, architecture: process.arch,
+  }) });
+  return permit;
+}
+
+export function consumeOwnedEvaluationPermit(permit: OwnedEvaluationPermit): OwnedEvaluationFacts {
+  const entry = evaluationPermits.get(permit);
+  if (!entry || entry.consumed) throw new NoninteractiveSafetyError("ownedEvaluation", "forged or consumed permit");
+  assertOutputOwnership(entry.facts.claim);
+  if (entry.facts.platform !== process.platform || entry.facts.architecture !== process.arch)
+    throw new NoninteractiveSafetyError("ownedEvaluation", "host identity changed");
+  entry.consumed = true;
+  return entry.facts;
+}
+
+/** No inherited values, credentials, live preferences, model links or CI forgery. */
+export function ownedEvaluationEnvironment(facts: OwnedEvaluationFacts, directory: string): Record<string, string> {
+  assertOutputOwnership(facts.claim);
+  const relation = relative(facts.claim.root, directory);
+  if (!relation || relation.startsWith("..") || relation.startsWith("/")) throw new NoninteractiveSafetyError("ownedEvaluation", "environment directory must remain within the bound output claim");
+  const directoryStat = lstatSync(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || realpathSync(directory) !== resolve(directory))
+    throw new NoninteractiveSafetyError("ownedEvaluation", "environment directory is not a canonical owned directory");
+  const home = join(directory, "home");
+  const paths = { HOME: home, SK_PATH: join(home, ".scriptkit"), CODEX_HOME: join(home, ".codex"),
+    XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"),
+    XDG_CACHE_HOME: join(home, ".cache"), TMPDIR: join(directory, "tmp") };
+  for (const path of Object.values(paths)) mkdirSync(path, { recursive: true, mode: 0o700 });
+  return { ...paths, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "en_US.UTF-8", TZ: "UTC",
+    RUST_LOG: "warn", SCRIPT_KIT_NONINTERACTIVE: "1", SCRIPT_KIT_OWNED_EVALUATION: "1",
+    SCRIPT_KIT_OWNED_EVALUATION_ROOT: directory,
+    SCRIPT_KIT_OWNED_EVALUATION_NONCE: facts.launchNonce,
+    SCRIPT_KIT_OWNED_EVALUATION_POLICY_SHA256: facts.policySha256,
+    SCRIPT_KIT_OWNED_EVALUATION_BINARY_SHA256: facts.artifact.manifest.binarySha256,
+    SCRIPT_KIT_OWNED_EVALUATION_MANIFEST_SHA256: facts.artifact.reference.manifestSha256,
+    SCRIPT_KIT_OWNED_EVALUATION_FIXTURES: JSON.stringify(facts.fixtureIds),
+    SCRIPT_KIT_OWNED_EVALUATION_LIMITS: JSON.stringify(facts.limits),
+    ...(facts.nativeGlass === "disabled" ? { SCRIPT_KIT_DEBUG_NO_GLASS: "1" } : {}),
+    ...Object.fromEntries(incompatibleOptIns.map(key => [key, "0"])),
+  };
+}
+
+function assertOwnedExpectedTarget(target: ProtocolCommand | null, value: unknown, commandType: string): void {
+  const expected = object(value);
+  const revisions = ["windowGeneration", "targetGeneration", "surfaceGeneration", "dataGeneration", "presentationRevision", "themeRevision", "frameGeneration"];
+  if (!target || target.type !== "instance" || typeof target.id !== "string" || !target.id ||
+      !Number.isSafeInteger(target.generation) || Number(target.generation) <= 0 || !expected ||
+      expected.windowId !== target.id || expected.windowGeneration !== target.generation ||
+      typeof expected.appViewVariant !== "string" || !expected.appViewVariant ||
+      Object.keys(expected).some(key => !["windowId", "appViewVariant", ...revisions].includes(key)) ||
+      revisions.some(key => !Number.isSafeInteger(expected[key]) || Number(expected[key]) < 0))
+    throw new NoninteractiveSafetyError(commandType, "exact target expectation required");
+}
+
+export function assertOwnedEvaluationCommand(permit: OwnedEvaluationPermit, command: ProtocolCommand): void {
+  const entry = evaluationPermits.get(permit);
+  if (!entry?.consumed) throw new NoninteractiveSafetyError("ownedEvaluation", "launch capability not consumed");
+  const type = String(command.type);
+  if (type === "design") {
+    const body = object(command.command);
+    if (!body || !["bootstrap", "catalog", "mount", "captureFrame", "acknowledgeFrames", "applyTheme", "revertTheme", "unmount", "end", "diagnose", "fixtureControl", "probeSafety", "sdkPrompt"].includes(String(body.operation)))
+      throw new NoninteractiveSafetyError(type, "unknown evaluator operation");
+    if (body.operation === "mount" && !entry.facts.fixtureIds.includes(String(body.fixtureId)))
+      throw new NoninteractiveSafetyError(type, "fixture outside sealed subset");
+    if (body.operation === "sdkPrompt" && !entry.facts.fixtureIds.includes("sdk.arg-roundtrip.v1"))
+      throw new NoninteractiveSafetyError(type, "SDK fixture outside sealed subset");
+    if (body.operation === "captureFrame") {
+      const target = object(body.target);
+      if (!target || target.type !== "instance" || typeof target.id !== "string" || !target.id ||
+          !Number.isSafeInteger(target.generation) || Number(target.generation) <= 0)
+        throw new NoninteractiveSafetyError(type, "exact mounted instance required");
+      if (typeof body.includeImage !== "boolean" || Object.keys(body).some(key => !["operation", "target", "includeImage", "scheduled", "frameCursor"].includes(key)))
+        throw new NoninteractiveSafetyError(type, "invalid atomic capture command");
+      if (Object.hasOwn(body, "scheduled")) {
+        const scheduled = object(body.scheduled);
+        if (!scheduled || Object.keys(scheduled).some(key => !["expected", "afterFrameGeneration", "afterNotificationEpoch"].includes(key)) ||
+            !Number.isSafeInteger(scheduled.afterFrameGeneration) || Number(scheduled.afterFrameGeneration) < 0 ||
+            !Number.isSafeInteger(scheduled.afterNotificationEpoch) || Number(scheduled.afterNotificationEpoch) < 0)
+          throw new NoninteractiveSafetyError(type, "invalid scheduled capture command");
+        assertOwnedExpectedTarget(target, scheduled.expected, type);
+      }
+    }
+    if (body.operation === "acknowledgeFrames") {
+      if (!entry.facts.fixtureIds.includes("main-search-contract") ||
+          Object.keys(body).some(key => !["operation", "target", "expected", "cursor"].includes(key)))
+        throw new NoninteractiveSafetyError(type, "frame acknowledgement outside sealed fixture");
+      assertOwnedExpectedTarget(object(body.target), body.expected, type);
+      const cursor = object(body.cursor);
+      if (!cursor || Object.keys(cursor).some(key => !["traceGeneration", "afterFrameGeneration"].includes(key)) ||
+          [cursor.traceGeneration, cursor.afterFrameGeneration].some(value => !Number.isSafeInteger(value) || Number(value) < 0))
+        throw new NoninteractiveSafetyError(type, "invalid frame acknowledgement cursor");
+    }
+    if (body.operation === "fixtureControl" && object(body.control)?.family === "search") {
+      if (!entry.facts.fixtureIds.includes("main-search-contract") ||
+          Object.keys(body).some(key => !["operation", "target", "expected", "control"].includes(key)))
+        throw new NoninteractiveSafetyError(type, "search control outside sealed fixture");
+      assertOwnedExpectedTarget(object(body.target), body.expected, type);
+      const control = object(body.control)!;
+      const operation = control.operation;
+      const field = operation === "prepare" ? "scenario" : operation === "release" ? "runIds" : operation === "advance" ? "milliseconds" : null;
+      if (!field || Object.keys(control).some(key => !["family", "operation", field].includes(key)) ||
+          (operation === "prepare" && (typeof control.scenario !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(control.scenario))) ||
+          (operation === "release" && (!Array.isArray(control.runIds) || control.runIds.length < 1 || control.runIds.length > 128 ||
+            new Set(control.runIds).size !== control.runIds.length || control.runIds.some(id => !Number.isSafeInteger(id) || Number(id) <= 0))) ||
+          (operation === "advance" && (!Number.isSafeInteger(control.milliseconds) || Number(control.milliseconds) < 0 || Number(control.milliseconds) > 1000)))
+        throw new NoninteractiveSafetyError(type, "invalid search control command");
+    }
+    return;
+  }
+  if (!["getState", "getElements", "getLayoutInfo", "getLogs", "getAgentChatState", "listAutomationWindows",
+    "simulateGpuiEvent", "batch", "waitFor", "captureRenderWindow"].includes(type))
+    throw new NoninteractiveSafetyError(type, "operation is not evaluator-local");
+  if (["getLogs", "listAutomationWindows"].includes(type)) return;
+  const target = object(command.target ?? object(command.request)?.target);
+  if (!target || target.type !== "instance" || typeof target.id !== "string" ||
+      !Number.isSafeInteger(target.generation) || Number(target.generation) <= 0)
+    throw new NoninteractiveSafetyError(type, "exact mounted instance required");
+  if (type === "simulateGpuiEvent" && /^(mouse|scroll)/.test(String(object(command.event)?.type))) {
+    assertOwnedExpectedTarget(target, command.expected, type);
+    const frame = object(command.expectedFrame); const requested = object(frame?.requestedTarget); const frameTarget = object(frame?.target);
+    if (!frame || !requested || !frameTarget || Object.keys(frame).some(key => !["pid", "processStartTime", "processInstanceId", "sessionGeneration", "binarySha256", "manifestSha256", "requestedTarget", "target", "nativeWindowId"].includes(key)) ||
+        Object.keys(requested).some(key => !["type", "id", "generation"].includes(key)) ||
+        requested.type !== "instance" || requested.id !== target.id || requested.generation !== target.generation ||
+        !Number.isSafeInteger(frame.pid) || Number(frame.pid) <= 0 ||
+        ["processStartTime", "processInstanceId", "sessionGeneration"].some(key => typeof frame[key] !== "string" || !frame[key]) ||
+        ["binarySha256", "manifestSha256"].some(key => typeof frame[key] !== "string" || !/^[a-f0-9]{64}$/.test(String(frame[key]))) ||
+        Number(frameTarget.frameGeneration) <= 0 || Object.keys(object(command.expected)!).some(key => frameTarget[key] !== object(command.expected)![key]))
+      throw new NoninteractiveSafetyError(type, "exact completed pointer frame required");
+    assertOwnedExpectedTarget(target, frameTarget, type);
+  }
+  if (type === "captureRenderWindow") {
+    const request = object(command.request);
+    if (request && Object.hasOwn(request, "probes")) {
+      assertOwnedExpectedTarget(target, request.expected, type);
+      if (Object.keys(request).some(key => !["target", "expected", "hiDpi", "includeImage", "probes"].includes(key)) ||
+          Number(object(request.expected)!.frameGeneration) <= 0 ||
+          request.hiDpi !== true || typeof request.includeImage !== "boolean" || !Array.isArray(request.probes) ||
+          request.probes.length < 1 || request.probes.length > 64 || request.probes.some(value => {
+            const probe = object(value);
+            return !probe || Object.keys(probe).some(key => key !== "x" && key !== "y") ||
+              [probe.x, probe.y].some(coordinate => !Number.isSafeInteger(coordinate) || Number(coordinate) < 0 || Number(coordinate) > 0xffffffff);
+          })) throw new NoninteractiveSafetyError(type, "invalid retained pixel probes");
+    }
+  }
+}
 
 type ProtocolCommand = Record<string, unknown>;
 

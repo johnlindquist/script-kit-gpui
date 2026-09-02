@@ -130,6 +130,8 @@ impl AppOpenHandlerAction {
     }
 
     fn run(self, path: std::path::PathBuf) -> Result<(), String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+            .map_err(|error| error.to_string())?;
         match self {
             Self::ShowInfoInFinder => crate::file_search::show_info(&path.to_string_lossy()),
             Self::ShowPackageContents => std::process::Command::new("open")
@@ -270,6 +272,10 @@ impl ScriptListApp {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
+                        crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::OpenExternal,
+                        )
+                        .map_err(|error| error.to_string())?;
                         std::process::Command::new("open")
                             .arg(&path)
                             .spawn()
@@ -311,6 +317,14 @@ impl ScriptListApp {
 
                 match path_result {
                     Ok(path) => {
+                        if let Err(error) = crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::OpenExternal,
+                        ) {
+                            return DispatchOutcome::error(
+                                crate::action_helpers::ERROR_ACTION_FAILED,
+                                open_action.failure_message(error),
+                            );
+                        }
                         let trace_id = trace_id.to_string();
                         cx.spawn(async move |this, cx| {
                             let result = cx
@@ -412,6 +426,24 @@ impl ScriptListApp {
                         );
                     }
                 };
+                if let Err(error) =
+                    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+                {
+                    return DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        error.to_string(),
+                    );
+                }
+                if lifecycle_action == AppLifecycleHandlerAction::Restart {
+                    if let Err(error) = crate::runtime_policy::check(
+                        crate::runtime_policy::ExternalEffect::OpenExternal,
+                    ) {
+                        return DispatchOutcome::error(
+                            crate::action_helpers::ERROR_ACTION_FAILED,
+                            error.to_string(),
+                        );
+                    }
+                }
 
                 if lifecycle_action == AppLifecycleHandlerAction::ForceQuit {
                     let weak_entity = cx.entity().downgrade();
@@ -499,21 +531,12 @@ impl ScriptListApp {
 fn quit_app_by_name(name: &str) -> Result<(), String> {
     let lifecycle_script = AppLifecycleAppleScriptAction::Quit;
     let escaped_name = crate::utils::escape_applescript_string(name);
-    std::process::Command::new("osascript")
-        .args([
-            "-e",
-            &format!(r#"tell application "{}" to quit"#, escaped_name),
-        ])
-        .output()
-        .map_err(|e| lifecycle_script.osascript_failure_message(e))
-        .and_then(|output| {
-            if output.status.success() {
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(format!("AppleScript quit failed: {}", stderr.trim()))
-            }
-        })
+    crate::platform::run_osascript(
+        &format!(r#"tell application "{}" to quit"#, escaped_name),
+        "quit_app",
+    )
+    .map(|_| ())
+    .map_err(|e| lifecycle_script.osascript_failure_message(e))
 }
 
 /// Force quit an application using its bundle identifier or name.
@@ -544,18 +567,9 @@ end tell"#
         )
     };
 
-    std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .output()
+    crate::platform::run_osascript(&script, "force_quit_app")
+        .map(|_| ())
         .map_err(|e| lifecycle_script.osascript_failure_message(e))
-        .and_then(|output| {
-            if output.status.success() {
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(format!("Force quit failed: {}", stderr.trim()))
-            }
-        })
 }
 
 #[cfg(test)]

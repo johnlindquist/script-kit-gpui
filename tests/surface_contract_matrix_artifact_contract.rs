@@ -41,7 +41,7 @@ fn surface_kind_names() -> Vec<String> {
 fn matrix_entries() -> Vec<serde_json::Value> {
     let parsed: serde_json::Value =
         serde_json::from_str(MATRIX_JSON).expect("surface contract matrix must be valid JSON");
-    assert_eq!(parsed["schemaVersion"], 1);
+    assert_eq!(parsed["schemaVersion"], 2);
     assert_eq!(
         parsed["generatedFrom"],
         "src/main_sections/app_view_state.rs"

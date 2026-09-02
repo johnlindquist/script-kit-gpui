@@ -13,7 +13,7 @@
 pub mod automation_registry;
 pub mod automation_runtime_handles;
 pub mod automation_surface_collector;
-pub(crate) mod automation_transaction_provider;
+pub mod automation_transaction_provider;
 mod registry;
 pub mod types;
 
@@ -21,14 +21,16 @@ pub use automation_registry::{
     automation_window_by_id, focused_automation_window, focused_automation_window_id,
     list_automation_windows, register_attached_popup, register_attached_popup_instance,
     remove_automation_window, remove_automation_window_if_generation, resolve_automation_window,
-    set_automation_bounds, set_automation_focus, set_automation_visibility,
-    update_automation_semantic_surface, upsert_automation_window,
+    set_automation_bounds, set_automation_bounds_if_generation, set_automation_focus,
+    set_automation_visibility, update_automation_semantic_surface, upsert_automation_window,
 };
 pub use automation_runtime_handles::{
-    get_runtime_window_handle, get_runtime_window_handle_for_generation,
+    accepts_main_window_input, get_runtime_window_handle, get_runtime_window_handle_for_generation,
     get_valid_runtime_window_handle, get_valid_runtime_window_handle_for_generation,
-    remove_runtime_window_handle, remove_runtime_window_handle_if_generation,
-    upsert_runtime_window_handle, upsert_runtime_window_handle_instance,
+    register_runtime_window_instance, remove_runtime_window_handle,
+    remove_runtime_window_handle_if_generation, remove_runtime_window_instance,
+    runtime_window_host_policy, upsert_runtime_window_handle,
+    upsert_runtime_window_handle_instance, with_runtime_window_dispatch,
 };
 pub use registry::{
     clear_window, close_window_with_bounds, get_valid_window, get_window, is_window_open,

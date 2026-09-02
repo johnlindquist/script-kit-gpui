@@ -285,6 +285,14 @@ unsafe fn cleanup_start_capture_resources(
 pub fn start_capture(
     width: u32,
 ) -> std::result::Result<(mpsc::Receiver<CVPixelBuffer>, CaptureHandle), WebcamStartError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Device).map_err(
+        |error| WebcamStartError::InputInitFailed {
+            attempted: "start capture",
+            failed: "runtime effect policy",
+            state: "not_started",
+            details: error.to_string(),
+        },
+    )?;
     let (tx, rx) = mpsc::sync_channel::<CVPixelBuffer>(1);
 
     // Register our delegate class (once)

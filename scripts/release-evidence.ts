@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
+import { readReceiptDocument, resolveReceiptDetails } from "./devtools/lib/receipt-artifact.ts";
 import { SDK_SYSTEM_INPUT_TESTS } from "../tests/sdk/system-input-tests.ts";
 import {
   GENERATED_BYTE_COMPARE_OUTPUT_PATHS,
@@ -113,6 +114,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/devtools/focus.test.ts",
   "scripts/devtools/scroll.test.ts",
   "scripts/devtools/receipt-schema.test.ts",
+  "scripts/devtools/receipt-artifact.test.ts",
   "scripts/devtools/runtime-task-proof.test.ts",
   "scripts/devtools/workflow-task-proof.test.ts",
   "scripts/devtools/family-fixtures.test.ts",
@@ -251,6 +253,8 @@ const REQUIRED_RUNTIME_PROOF_FOUNDATION_OWNERS = [
   "scripts/devtools/scroll.ts",
   "scripts/devtools/scroll.test.ts",
   "scripts/devtools/lib/receipt-schema.ts",
+  "scripts/devtools/lib/receipt-artifact.ts",
+  "scripts/devtools/receipt-artifact.test.ts",
   "scripts/devtools/receipt-schema.test.ts",
   "scripts/devtools/lib/runtime-task-proof.ts",
   "scripts/devtools/runtime-task-proof.test.ts",
@@ -926,7 +930,7 @@ function releaseArchiveMembers(zipPath: string): ReleaseArchiveMembers {
 }
 
 function readJson(path: string): Record<string, any> {
-  const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const value: unknown = resolveReceiptDetails(readReceiptDocument(path), path);
   requireCondition(value !== null && typeof value === "object" && !Array.isArray(value),
     `${path} must contain a JSON object`);
   return value as Record<string, any>;
@@ -1148,6 +1152,76 @@ function integrationSuiteSummary(path: string): {
   };
 }
 
+function bunJunitProofFiles(xml: string, tests: number, assertions: number, fileCount: number): Set<string> {
+  // Bun's passing reporter is a single root, nested file-bound suites, and
+  // self-closing testcases. Deliberately reject other XML/JUnit dialects,
+  // failure/skipped bodies, and anything left outside this producer grammar.
+  const root = xml.match(/^<\?xml version="1\.0" encoding="UTF-8"\?>\s*<testsuites name="bun test" tests="(\d+)" assertions="(\d+)" failures="0" skipped="0" time="\d+(?:\.\d+)?">([\s\S]*)<\/testsuites>\s*$/);
+  requireCondition(root, "proof gate has malformed, failing, or duplicate Bun JUnit root evidence");
+  requireCondition(Number(root[1]) === tests && Number(root[2]) === assertions,
+    "proof gate Bun JUnit totals disagree with the console summary");
+
+  const attribute = '(?:[^"<&]|&(?:amp|lt|gt|quot|apos|#\\d+|#x[\\da-fA-F]+);)*';
+  const suiteTag = new RegExp(`^<testsuite name="(${attribute})" file="([^"<&]+)"(?: line="\\d+")? tests="(\\d+)" assertions="(\\d+)" failures="0" skipped="0" time="\\d+(?:\\.\\d+)?" hostname="${attribute}">`);
+  const caseTag = new RegExp(`^<testcase name="${attribute}"(?: classname="${attribute}")? time="\\d+(?:\\.\\d+)?" file="([^"<&]+)" line="\\d+" assertions="(\\d+)"\\s*/>`);
+  const stack: Array<{
+    file: string;
+    tests: number;
+    assertions: number;
+    observedTests: number;
+    observedAssertions: number;
+  }> = [];
+  const files = new Set<string>();
+  let observedTests = 0;
+  let observedAssertions = 0;
+  let remaining = root[3].trim();
+  while (remaining) {
+    if (remaining.startsWith("</testsuite>")) {
+      const suite = stack.pop();
+      requireCondition(suite && suite.tests === suite.observedTests &&
+        suite.assertions === suite.observedAssertions,
+      "proof gate Bun JUnit suite totals disagree with executed testcases");
+      const parent = stack.at(-1);
+      if (parent) {
+        parent.observedTests += suite.observedTests;
+        parent.observedAssertions += suite.observedAssertions;
+      } else {
+        requireCondition(suite.observedTests > 0,
+          `proof gate Bun JUnit file executed no passing testcases: ${suite.file}`);
+        files.add(suite.file);
+        observedTests += suite.observedTests;
+        observedAssertions += suite.observedAssertions;
+      }
+      remaining = remaining.slice("</testsuite>".length).trimStart();
+      continue;
+    }
+    const suite = remaining.match(suiteTag);
+    if (suite) {
+      const parent = stack.at(-1);
+      requireCondition(parent ? suite[2] === parent.file : suite[1] === suite[2] && !files.has(suite[2]),
+        "proof gate Bun JUnit has a duplicate or mismatched file suite");
+      stack.push({
+        file: suite[2], tests: Number(suite[3]), assertions: Number(suite[4]),
+        observedTests: 0, observedAssertions: 0,
+      });
+      remaining = remaining.slice(suite[0].length).trimStart();
+      continue;
+    }
+    const testcase = remaining.match(caseTag);
+    const parent = stack.at(-1);
+    requireCondition(testcase && parent && testcase[1] === parent.file &&
+      Number.isSafeInteger(Number(testcase[2])),
+    "proof gate Bun JUnit has malformed, failing, skipped, or mismatched testcase evidence");
+    parent.observedTests += 1;
+    parent.observedAssertions += Number(testcase[2]);
+    remaining = remaining.slice(testcase[0].length).trimStart();
+  }
+  requireCondition(stack.length === 0 && observedTests === tests &&
+    observedAssertions === assertions && files.size === fileCount,
+  "proof gate Bun JUnit executed testcase or file totals disagree with the console summary");
+  return files;
+}
+
 function proofSuiteSummary(path: string): {
   passed: number;
   failed: number;
@@ -1156,10 +1230,12 @@ function proofSuiteSummary(path: string): {
   assertions: number;
 } {
   const output = readFileSync(path, "utf8").replace(/\x1b\[[0-9;]*m/g, "");
-  const passed = output.match(/^\s*(\d+)\s+pass\s*$/m);
-  const failed = output.match(/^\s*(\d+)\s+fail\s*$/m);
-  const assertions = output.match(/^\s*(\d+)\s+expect\(\)\s+calls\s*$/m);
-  const totals = output.match(/^Ran\s+(\d+)\s+tests?\s+across\s+(\d+)\s+files?\./m);
+  const junitStart = output.search(/\[verify\] (?:BEGIN|END) bun-junit|<\?xml\b|<\/?testsuites?\b|<testcase\b/);
+  const consoleOutput = junitStart < 0 ? output : output.slice(0, junitStart);
+  const passed = consoleOutput.match(/^\s*(\d+)\s+pass\s*$/m);
+  const failed = consoleOutput.match(/^\s*(\d+)\s+fail\s*$/m);
+  const assertions = consoleOutput.match(/^\s*(\d+)\s+expect\(\)\s+calls\s*$/m);
+  const totals = consoleOutput.match(/^Ran\s+(\d+)\s+tests?\s+across\s+(\d+)\s+files?\./m);
   requireCondition(passed && failed && assertions && totals,
     "proof gate requires complete executed Bun test, assertion, and file summaries");
   const passedCount = Number(passed[1]);
@@ -1167,12 +1243,25 @@ function proofSuiteSummary(path: string): {
   const assertionCount = Number(assertions[1]);
   const executedCount = Number(totals[1]);
   const fileCount = Number(totals[2]);
-  requireCondition(passedCount > 0 && assertionCount > 0 && fileCount > 0,
+  requireCondition([passedCount, failedCount, assertionCount, executedCount, fileCount].every(Number.isSafeInteger) &&
+    passedCount > 0 && assertionCount > 0 && fileCount > 0,
     "proof gate must execute nonzero tests, assertions, and files");
   requireCondition(failedCount === 0 && passedCount === executedCount,
     "proof gate contains failing or unaccounted behavior tests");
+  let junitFiles: Set<string> | undefined;
+  if (junitStart >= 0) {
+    let xml = output.slice(junitStart).trim();
+    if (xml.startsWith("[verify] BEGIN bun-junit\n") || xml.startsWith("[verify] BEGIN bun-junit\r\n")) {
+      const parts = xml.split(/\r?\n\[verify\] END bun-junit(?:\r?\n|$)/);
+      requireCondition(parts.length === 2 &&
+        !/bun-junit|<\?xml\b|<\/?testsuites?\b|<testcase\b/.test(parts[1]),
+      "proof gate requires exactly one complete native Bun JUnit reporter");
+      xml = parts[0].slice("[verify] BEGIN bun-junit".length).trim();
+    }
+    junitFiles = bunJunitProofFiles(xml, executedCount, assertionCount, fileCount);
+  }
   for (const suite of REQUIRED_PROOF_SUITES) {
-    requireCondition(output.includes(`${suite}:`),
+    requireCondition(junitFiles ? junitFiles.has(suite) : consoleOutput.includes(`${suite}:`),
       `proof gate is missing its required directly executed fixture suite: ${suite}`);
   }
   return {
@@ -1272,7 +1361,7 @@ function authoritativeSurfaceBindings(
   if (cached) return cached;
 
   const registry = readJson(contractPath) as unknown as SurfaceContractRegistry;
-  requireCondition(registry.schemaVersion === 1 && Array.isArray(registry.entries),
+  requireCondition(registry.schemaVersion === 2 && Array.isArray(registry.entries),
     "direct_matrix requires the complete canonical generated surface-contract registry");
   const build = buildCoverageBindingSet(buildCanonicalMappings(registry));
   const validation = validateCoverageBindingSet(build.set);
@@ -1303,6 +1392,7 @@ function directRuntimeCoverage(
   const paths = new Set<string>();
   const identities = new Set<string>();
   const rawReceipts = observation.primitiveReceipts.map((entry: any) => {
+    if (entry?.receipt && typeof entry.receipt === "object") entry = { ...entry, receipt: resolveReceiptDetails(entry.receipt) };
     requireCondition(entry && typeof entry === "object" &&
       typeof entry.path === "string" && entry.path.length > 0 &&
       !isAbsolute(entry.path) && !entry.path.split("/").includes("..") &&

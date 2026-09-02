@@ -1,6 +1,64 @@
+/// One-shot introspection: log NSGlassEffectView's declared properties so we
+/// can discover any rim/style knobs Apple exposes (macOS 26 API surface is
+/// underdocumented). Debug aid; logs once per process.
+#[cfg(target_os = "macos")]
+unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Class) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        #[link(name = "objc")]
+        extern "C" {
+            fn class_copyPropertyList(
+                cls: *const objc::runtime::Class,
+                out_count: *mut u32,
+            ) -> *mut *const std::ffi::c_void;
+            fn property_getName(property: *const std::ffi::c_void) -> *const std::os::raw::c_char;
+            fn property_getAttributes(
+                property: *const std::ffi::c_void,
+            ) -> *const std::os::raw::c_char;
+            fn free(ptr: *mut std::ffi::c_void);
+        }
+        let mut count: u32 = 0;
+        let list = class_copyPropertyList(glass_class as *const _, &mut count);
+        if list.is_null() {
+            return;
+        }
+        let mut names = Vec::new();
+        for index in 0..count as usize {
+            let property = *list.add(index);
+            let name = property_getName(property);
+            let attrs = property_getAttributes(property);
+            if !name.is_null() {
+                let attr_text = if attrs.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(attrs)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                names.push(format!(
+                    "{}[{}]",
+                    std::ffi::CStr::from_ptr(name).to_string_lossy(),
+                    attr_text,
+                ));
+            }
+        }
+        free(list as *mut std::ffi::c_void);
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_effect_view_properties",
+            properties = %names.join(","),
+            "NSGlassEffectView declared properties"
+        );
+    });
+}
+
 struct GpuiFooterOverlaySlot {
     handle: WindowHandle<GpuiFooterOverlay>,
     parent_window_handle: AnyWindowHandle,
+    info: crate::protocol::AutomationWindowInfo,
+    presentation_revision: u64,
+    applied_theme_revision: u64,
 }
 
 /// Stable automation-registry identity for the GPUI footer overlay window so
@@ -18,12 +76,6 @@ fn automation_bounds_from_gpui(bounds: Bounds<Pixels>) -> crate::protocol::Autom
     }
 }
 
-static MAIN_WINDOW_GPUI_FOOTER_OVERLAY: OnceLock<Mutex<Option<GpuiFooterOverlaySlot>>> =
-    OnceLock::new();
-
-static MAIN_WINDOW_GPUI_FOOTER_OVERLAY_FIDELITY: OnceLock<
-    Mutex<Option<crate::protocol::FidelityPaintTargetSnapshot>>,
-> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AppKitFidelityCaptureOutcome {
@@ -58,29 +110,17 @@ fn appkit_fidelity_inventory_blocker(
         .then_some(crate::protocol::FidelityCaptureStatus::DuplicateIdentifiers)
 }
 
-fn clear_main_footer_overlay_fidelity_snapshot() {
-    let storage = MAIN_WINDOW_GPUI_FOOTER_OVERLAY_FIDELITY.get_or_init(|| Mutex::new(None));
-    if let Ok(mut snapshot) = storage.lock() {
-        *snapshot = None;
-    }
+fn clear_footer_overlay_fidelity_snapshot(parent: AnyWindowHandle) {
+    if let Some(host) = FOOTER_HOSTS.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&parent.window_id()) { host.fidelity = None; }
 }
 
-fn store_main_footer_overlay_fidelity_snapshot(
-    snapshot: crate::protocol::FidelityPaintTargetSnapshot,
-) {
-    let storage = MAIN_WINDOW_GPUI_FOOTER_OVERLAY_FIDELITY.get_or_init(|| Mutex::new(None));
-    if let Ok(mut current) = storage.lock() {
-        *current = Some(snapshot);
-    }
+fn store_footer_overlay_fidelity_snapshot(parent: AnyWindowHandle, snapshot: crate::protocol::FidelityPaintTargetSnapshot) {
+    if let Some(host) = FOOTER_HOSTS.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&parent.window_id()) { host.fidelity = Some(snapshot); }
 }
 
-pub(crate) fn main_footer_overlay_fidelity_snapshot(
-) -> Option<crate::protocol::FidelityPaintTargetSnapshot> {
-    MAIN_WINDOW_GPUI_FOOTER_OVERLAY_FIDELITY
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|snapshot| snapshot.clone())
+pub(crate) fn main_footer_overlay_fidelity_snapshot() -> Option<crate::protocol::FidelityPaintTargetSnapshot> {
+    let handle = main_footer_handle()?;
+    FOOTER_HOSTS.lock().ok()?.get(&handle.window_id())?.fidelity.clone()
 }
 
 #[cfg(target_os = "macos")]
@@ -672,10 +712,7 @@ pub(crate) fn activate_native_main_footer_button(
     window: &Window,
     semantic_id: &str,
 ) -> NativeFooterActivationReceipt {
-    let config = MAIN_WINDOW_FOOTER_LAST_CONFIG
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
+    let config = footer_config_for_window(window.window_handle());
     let Some(config) = config else {
         return NativeFooterActivationReceipt::blocked(semantic_id, "missing_footer_config");
     };

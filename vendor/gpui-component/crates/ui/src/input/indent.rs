@@ -268,6 +268,7 @@ impl InputState {
             cx.propagate();
             return;
         };
+        let selection_update = self.begin_selection_update();
 
         let tab_indent = self.mode.tab_size().to_string();
         let selected_range = self.selected_range;
@@ -319,6 +320,7 @@ impl InputState {
             self.selected_range =
                 (selected_range.start + added_len..selected_range.end + added_len).into();
         }
+        self.end_selection_update(selection_update);
     }
 
     pub(super) fn outdent(&mut self, block: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -326,6 +328,7 @@ impl InputState {
             cx.propagate();
             return;
         };
+        let selection_update = self.begin_selection_update();
 
         let tab_indent = self.mode.tab_size().to_string();
         let selected_range = self.selected_range;
@@ -393,6 +396,7 @@ impl InputState {
                 self.selected_range = (new_offset..new_offset).into();
             }
         }
+        self.end_selection_update(selection_update);
     }
 }
 

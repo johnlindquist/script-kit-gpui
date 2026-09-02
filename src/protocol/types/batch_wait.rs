@@ -288,6 +288,14 @@ pub struct TransactionError {
     pub suggestion: Option<String>,
 }
 
+impl std::fmt::Display for TransactionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TransactionError {}
+
 impl TransactionError {
     /// Create an action-failed error from a message string.
     pub fn action_failed(message: impl Into<String>) -> Self {

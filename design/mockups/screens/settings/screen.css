@@ -16,14 +16,9 @@
  *   divider: visible false (divider_height 0)
  *   content column padded by DesignSpacing.padding_xs (--sk-spacing-padding-xs)
  *     top+bottom, then one persistent first section header ("Settings" /
- *     "Results") in the LEGACY 26px slot with 6px top padding
- *     (render_section_header uses default_main_menu(), NOT the themed 28/4 —
- *     conflict settingsSection.firstSlotLegacyVsThemed), then 44px ListItem
+ *     "Results") using the active main-menu section metrics, then ListItem
  *     rows in a tracked scroll column.
- *   Rows paint ICONLESS: the authored lucide hints never resolve through
- *     IconKind::from_icon_hint → icon_name_from_str, and ListItem does not
- *     mount the icon slot for icon: None — names start at the 18px inner
- *     row padding origin (conflict settingsRows.authoredIconHintsVsResolvedNone).
+ *   Rows are structurally iconless by SettingsRowIconPolicy::Iconless.
  *   Footer: GPUI reserves the 32px footer RAIL (native-footer spacer); the
  *     36px AppKit host is a SEPARATE overlay window. The flex reservation
  *     stays 32 so the list viewport matches the GPUI-only capture.
@@ -105,16 +100,6 @@ body {
   padding-block: var(--sk-spacing-padding-xs);
 }
 
-/* render_section_header paints the LEGACY default_main_menu() first-section
- * branch — 26px slot / 6px top padding — NOT the themed InfoBarBase 28/4
- * the shared rule uses (settingsSection.firstSlotLegacyVsThemed). */
-.sk-window--settings .sk-section-slot[data-first="true"] {
-  height: var(--sk-list-item-default-first-section-slot-height);
-}
-
-.sk-window--settings .sk-section-slot[data-first="true"] .sk-section-header {
-  padding-top: var(--sk-list-item-default-first-section-padding-top);
-}
 
 /* GPUI reserves the 32px footer RAIL in its own layout
  * (render_native_main_window_footer_spacer); the 36px AppKit host is a

@@ -3,9 +3,26 @@ impl ScriptListApp {
         &self,
         outcome: &mut ElementCollectionOutcome,
         limit: usize,
-        cx: &Context<Self>,
     ) {
-        let footer = self.active_footer_snapshot(cx);
+        let target = crate::get_main_window_handle().and_then(|handle| {
+            crate::windows::list_automation_windows()
+                .into_iter()
+                .find(|target| {
+                    target.generation.is_some_and(|generation| {
+                        crate::windows::get_runtime_window_handle_for_generation(
+                            &target.id,
+                            generation,
+                        ) == Some(handle)
+                    })
+                })
+        });
+        let Some(target) = target else {
+            outcome
+                .warnings
+                .push("footer_target_unregistered".to_string());
+            return;
+        };
+        let footer = self.active_footer_snapshot(&target);
         let row_kind = match footer.owner.as_str() {
             "native" => Some("nativeFooterRow"),
             "prompt" => Some("promptFooterRow"),

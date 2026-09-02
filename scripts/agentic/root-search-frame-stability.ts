@@ -1,566 +1,150 @@
 #!/usr/bin/env bun
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { Driver } from "../devtools/driver";
-import { assertNoninteractiveProtocolCommand } from "../devtools/lib/operator-safety.ts";
+import { OwnedEvaluationClient } from "../devtools/lib/owned-evaluation.ts";
+import { readArtifactReference } from "../devtools/design.ts";
+import { DriverLifecycleError, normalizeProtocolResponse, unknownOwnedCleanup, type Json } from "../devtools/driver.ts";
+import { verifyImmutableArtifact } from "./build-artifact.ts";
+import { claimOutput, validateOutputTarget, beginManagedTask, finalizeManagedTask, materializeAtomic, writeJsonArtifactAtomic,
+  validateArtifact, buildArtifactLifecycle, commitFinalReceipt, type ArtifactSpec, type OwnedCleanup } from "./artifact-lifecycle.ts";
 import { assertPerformanceContract } from "../devtools/lib/performance-contract.ts";
-import {
-  buildArtifactLifecycle,
-  claimOutput,
-  commitFinalReceipt,
-  materializeAtomic,
-  validateArtifact,
-  validateOutputTarget,
-  writeJsonArtifactAtomic,
-  type ArtifactReceipt,
-  type ArtifactSpec,
-} from "./artifact-lifecycle";
-
-type Json = Record<string, any>;
+import type { AutomationInstance } from "../devtools/lib/target-identity.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
-
-function argValue(name: string): string | null {
-  const index = process.argv.indexOf(name);
-  return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : null;
+const args = Bun.argv.slice(2);
+const arg = (name: string) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+const fixtureId = "main.root-search-frame-stability";
+const negativeControlContract = { kind: "synthetic_semantic_fingerprint_mutation", appliedAfterProviderSettlement: true, nativeShiftObserved: false };
+const help = "root-search-frame-stability --artifact <reference.json> --receipt <fresh-receipt.json> [--query zzqxframeproof] [--inject-forbidden-shift] [--describe-contract]\nUses the sealed owned evaluator, never CI forgery, inherited launch env or native capture.";
+const safety = { startsApplication: false, runtimeStartsApplication: true, runtimeRequiresSandboxHome: true, runtimeRequiresHiddenWindow: true,
+  runtimeRequiresNoninteractive: true, runtimeRequiresCiEnvironment: false, runtimeRequiresSealedEvaluatorPermit: true,
+  revealsWindow: false, focusesWindow: false, drivesNativeInput: false, capturesScreen: false };
+if (args.includes("--help") || args.includes("-h")) { console.log(help); process.exit(0); }
+if (args.includes("--describe-contract")) {
+  const contract = { schemaVersion: 1, tool: "root-search-frame-stability", evidenceClass: "STATIC_INVENTORY", runtimeEvidenceClass: "RUNTIME_HIDDEN",
+    metricKind: "semantic_frame_identity", observationClass: "SEMANTIC_FRAME", observationPoint: "stateResult.mainWindowPreflight.semanticFingerprint", measuresPaint: false,
+    fixtureId, negativeControl: negativeControlContract, safety };
+  assertPerformanceContract(contract); console.log(JSON.stringify(contract)); process.exit(0);
 }
-
-function usage(): string {
-  return `Usage: bun scripts/agentic/root-search-frame-stability.ts --binary <path> --receipt <path> [options]
-
-Required:
-  --binary <path>             Stable script-kit-gpui artifact to launch
-  --receipt <path>            JSON receipt output path
-
-Options:
-  --session <name>            Session label (uniquified per process/run)
-  --query <text>              Root query (default: zzqxframeproof)
-  --timeout <ms>              Protocol timeout (default: 10000)
-  --poll <ms>                 Sample interval (default: 25)
-  --inject-forbidden-shift    Deterministically fail the frame-identity gate
-  --describe-contract         Print static hidden-runtime safety/metric metadata
-  -h, --help                  Show this help
-
-Runtime app launch requires CI=true, SCRIPT_KIT_NONINTERACTIVE=1, and
-SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1. Static inspection never starts the app.`;
+if (process.env.SCRIPT_KIT_NONINTERACTIVE !== "1") throw new Error("refused before app launch: SCRIPT_KIT_NONINTERACTIVE=1 is required");
+if (!arg("--artifact") || !arg("--receipt")) throw new Error(help);
+const reference = readArtifactReference(arg("--artifact")!);
+const artifact = verifyImmutableArtifact(repoRoot, reference, { kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui",
+  sourcePolicy: args.includes("--packaged") ? "clean-exact-head" : "current-content" });
+if (args.includes("--packaged") && !artifact.manifest.derivation) throw new Error("packaged_root_frame_requires_signed_bundle_derivation");
+const query = arg("--query") ?? "zzqxframeproof";
+const timeoutMs = Number(arg("--timeout") ?? "10000");
+if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new Error("invalid root-frame timeout");
+const claim = claimOutput(validateOutputTarget({ repoRoot, candidate: resolve(arg("--receipt")!), kind: "receipt", probeId: "root-search-frame-stability" }));
+const task = beginManagedTask(claim, "evidence-run", [reference]);
+const inject = args.includes("--inject-forbidden-shift");
+let hiddenStates = 0;
+function requireHidden(state: Json): void {
+  if (state.windowVisible !== false) throw new Error("hidden root identity not observed"); hiddenStates++;
 }
-
-if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log(usage());
-  process.exit(0);
-}
-if (process.argv.includes("--describe-contract")) {
-  const contract = {
-    schemaVersion: 1,
-    tool: "root-search-frame-stability",
-    evidenceClass: "STATIC_INVENTORY",
-    runtimeEvidenceClass: "RUNTIME_HIDDEN",
-    metricKind: "semantic_frame_identity",
-    observationClass: "SEMANTIC_FRAME",
-    observationPoint: "stateResult.mainWindowPreflight.semanticFingerprint",
-    measuresPaint: false,
-    safety: {
-      startsApplication: false,
-      runtimeStartsApplication: true,
-      runtimeRequiresSandboxHome: true,
-      runtimeRequiresHiddenWindow: true,
-      runtimeRequiresNoninteractive: true,
-      runtimeRequiresCiEnvironment: true,
-      runtimeRequiresIsolatedAppLaunchOptIn:
-        "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1",
-      revealsWindow: false,
-      focusesWindow: false,
-      drivesNativeInput: false,
-      capturesScreen: false,
-    },
-  };
-  assertPerformanceContract(contract);
-  console.log(JSON.stringify(contract, null, 2));
-  process.exit(0);
-}
-if (process.env.SCRIPT_KIT_NONINTERACTIVE !== "1") {
-  throw new Error(
-    "hidden root frame benchmark refused before app launch; " +
-      "SCRIPT_KIT_NONINTERACTIVE=1 is required for the capture-free sandbox",
-  );
-}
-if (process.env.SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH !== "1") {
-  throw new Error(
-    "hidden root frame benchmark refused before app launch; " +
-      "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1 is required for an explicitly approved isolated CI run",
-  );
-}
-if (process.env.CI !== "true") {
-  throw new Error(
-    "hidden root frame benchmark refused before app launch; " +
-      "CI=true is required and operator-local app launches are forbidden",
-  );
-}
-assertNoninteractiveProtocolCommand({ type: "getState", target: { type: "main" } });
-
-const binaryArg = argValue("--binary");
-const receiptArg = argValue("--receipt");
-if (!binaryArg || !receiptArg) {
-  console.error(usage());
-  throw new Error("--binary and --receipt are required");
-}
-
-const binary = resolve(repoRoot, binaryArg);
-const receiptPath = resolve(repoRoot, receiptArg);
-const outputPlan = validateOutputTarget({
-  repoRoot,
-  candidate: receiptPath,
-  kind: "receipt",
-  probeId: "root-search-frame-stability",
-});
-const sessionLabel = argValue("--session") ?? "root-search-frame-stability";
-const sessionName = `${sessionLabel}-${process.pid}-${Date.now()}`;
-const query = argValue("--query") ?? "zzqxframeproof";
-const timeoutMs = Number(argValue("--timeout") ?? "10000");
-const pollMs = Number(argValue("--poll") ?? "25");
-const injectForbiddenShift = process.argv.includes("--inject-forbidden-shift");
-const fixtureResultPath = `/tmp/${query}-late-provider-result.txt`;
-let hiddenStateAssertionCount = 0;
-
-if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-  throw new Error(`--timeout must be a positive number, got ${JSON.stringify(timeoutMs)}`);
-}
-if (!Number.isFinite(pollMs) || pollMs <= 0) {
-  throw new Error(`--poll must be a positive number, got ${JSON.stringify(pollMs)}`);
-}
-
-function git(args: string[]): string {
-  const result = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
-  if (result.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
-  }
-  return result.stdout.trim();
-}
-
-function binarySha256(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function elementsFingerprint(elementsResult: Json): string {
-  const elements = Array.isArray(elementsResult.elements) ? elementsResult.elements : [];
-  return elements
-    .filter((element: Json) => typeof element.semanticId === "string")
-    .map((element: Json) =>
-      [
-        element.role ?? "",
-        element.semanticId,
-        element.text ?? "",
-        element.index ?? "",
-        element.action ?? "",
-      ].join(":"),
-    )
-    .join("|");
-}
-
-function requirePreflight(state: Json, label: string): Json {
-  requireHiddenState(state, label);
+export function semanticFrame(state: Json, elements: Json): Json {
   const preflight = state.mainWindowPreflight;
-  if (!preflight) {
-    throw new Error(`${label}: missing mainWindowPreflight in getState receipt`);
-  }
-  for (const field of [
-    "selectedResultKey",
-    "selectedResultRole",
-    "visibleResultKeyFingerprint",
-    "visibleRowFingerprint",
-    "visibleResultCount",
-    "visibleResults",
-    "enterAction",
-  ]) {
-    if (!(field in preflight)) {
-      throw new Error(`${label}: mainWindowPreflight missing ${field}`);
-    }
-  }
-  return preflight;
+  const fields = ["selectedIndex", "selectedResultKey", "selectedResultRole", "visibleResultKeyFingerprint", "visibleRowFingerprint", "visibleResultCount", "visibleResults", "enterAction"];
+  if (!preflight || fields.some(field => !(field in preflight))) throw new Error("mainWindowPreflight semantic fields unavailable");
+  if (!Array.isArray(elements.elements)) throw new Error("semantic elements unavailable");
+  return { ...Object.fromEntries(fields.map(field => [field, preflight[field]])), elementsFingerprint: elements.elements
+    .filter((element: Json) => typeof element.semanticId === "string")
+    .map((element: Json) => [element.role ?? "", element.semanticId, element.text ?? "", element.index ?? "", element.action ?? ""].join(":"))
+    .join("|") };
 }
-
-function requireHiddenState(state: Json, label: string): void {
-  if (state.windowVisible !== false) {
-    throw new Error(
-      `${label}: hidden semantic proof refused a visible or unknown window state: ${JSON.stringify({
-        windowVisible: state.windowVisible ?? null,
-      })}`,
-    );
-  }
-  hiddenStateAssertionCount += 1;
+export function assertSameSemanticFrame(before: Json, after: Json): void {
+  if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error("visible semantic frame shifted while provider resolved");
 }
-
-async function comparable(driver: Driver, state: Json, tag: string): Promise<Json> {
-  const preflight = requirePreflight(state, tag);
-  const elements = (await driver.getElements(
-    { target: { type: "main" } },
-    { timeoutMs },
-  )) as Json;
-  return {
-    selectedIndex: preflight.selectedIndex,
-    selectedResultKey: preflight.selectedResultKey ?? null,
-    selectedResultRole: preflight.selectedResultRole,
-    visibleResultKeyFingerprint: preflight.visibleResultKeyFingerprint,
-    visibleRowFingerprint: preflight.visibleRowFingerprint,
-    visibleResultCount: preflight.visibleResultCount,
-    visibleResults: preflight.visibleResults,
-    enterAction: preflight.enterAction,
-    elementsFingerprint: elementsFingerprint(elements),
-  };
-}
-
-function assertSameFrame(baseline: Json, sample: Json, label: string) {
-  const before = JSON.stringify(baseline);
-  const after = JSON.stringify(sample);
-  if (before !== after) {
-    throw new Error(
-      `${label}: visible frame changed while provider resolved\nbefore=${before}\nafter=${after}`,
-    );
-  }
-}
-
-function numericField(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function hasWarmRootFileCache(status: Json): boolean {
-  return numericField(status.cacheEntryCount) > 0 && numericField(status.cacheResultCount) > 0;
-}
-
-function requireRootFileStatus(state: Json, label: string): Json {
-  const status = state.rootFileSearch;
-  if (status?.query !== query) {
-    throw new Error(
-      `${label}: root file search did not track query ${JSON.stringify(query)}: ${JSON.stringify(status)}`,
-    );
-  }
-  if (status?.mode !== "GlobalQuery") {
-    throw new Error(`${label}: expected GlobalQuery root file mode, got ${JSON.stringify(status)}`);
-  }
-  return status;
-}
-
-function classifyRootFileBaseline(status: Json): Json {
-  if (status.visibleLoading !== true) {
-    throw new Error(`baseline is not an early visible loading frame: ${JSON.stringify(status)}`);
-  }
-  if (status.loading === true) {
-    return { kind: "loading", observedLoading: true, observedAsyncHandoff: false };
-  }
-  if (
-    status.loading === false &&
-    status.visibleResultCount === 0 &&
-    numericField(status.generation) >= 1 &&
-    hasWarmRootFileCache(status)
-  ) {
-    return {
-      kind: "settled-provider-early-visible-loading",
-      observedLoading: false,
-      observedAsyncHandoff: true,
-      generation: status.generation,
-      cacheEntryCount: status.cacheEntryCount,
-      cacheResultCount: status.cacheResultCount,
-      visibleResultCount: status.visibleResultCount,
-    };
-  }
-  throw new Error(
-    `unsupported root file baseline; expected loading frame or settled-provider early visible-loading frame: ${JSON.stringify(status)}`,
-  );
-}
-
-async function sampleUntilRootFileSettled(
-  driver: Driver,
-  baseline: Json,
-  baselineProof: Json,
-  samples: Json[],
-): Promise<Json> {
-  const deadline = Date.now() + timeoutMs;
-  let observedLoading = baselineProof.observedLoading === true;
-  let observedAsyncHandoff = baselineProof.observedAsyncHandoff === true;
-  let settledStableSamples = 0;
-  let injected = false;
-  const requiredSettledStableSamples =
-    baselineProof.kind === "settled-provider-early-visible-loading" ? 2 : 1;
-
-  while (Date.now() < deadline) {
-    const state = (await driver.getState({ timeoutMs })) as Json;
-    requireHiddenState(state, `provider-sample-${samples.length}`);
-    const status = state.rootFileSearch;
-    if (status?.query === query && status?.mode === "GlobalQuery") {
-      if (status.loading === true) observedLoading = true;
-
-      const observedFrame = await comparable(driver, state, `sample-${samples.length}`);
-      const frame =
-        injectForbiddenShift && !injected
-          ? { ...observedFrame, visibleRowFingerprint: "__injected_forbidden_shift__" }
-          : observedFrame;
-      if (injectForbiddenShift && !injected) injected = true;
-      samples.push({ rootFileSearch: status, frame, injectionApplied: frame !== observedFrame });
-      assertSameFrame(baseline, frame, `samples[${samples.length - 1}]`);
-
-      if (status.loading === false) {
-        if (!hasWarmRootFileCache(status)) {
-          throw new Error(`provider settled without warming cache; status=${JSON.stringify(status)}`);
-        }
-        observedAsyncHandoff = true;
-        if (!observedLoading && baselineProof.kind !== "settled-provider-early-visible-loading") {
-          throw new Error(
-            `provider settled without an accepted async handoff proof; baselineProof=${JSON.stringify(
-              baselineProof,
-            )} status=${JSON.stringify(status)}`,
-          );
-        }
-        settledStableSamples += 1;
-        if (observedAsyncHandoff && settledStableSamples >= requiredSettledStableSamples) {
-          return state;
-        }
-      }
-    }
-    await Bun.sleep(Math.max(25, pollMs));
-  }
-  throw new Error(`root file search did not settle for ${JSON.stringify(query)}`);
-}
-
-const claim = claimOutput(outputPlan);
-const receipt: Json = {
-  schemaVersion: 3,
-  gateId: "root-frame-stable",
-  evidenceClass: "RUNTIME_HIDDEN",
-  metricKind: "semantic_frame_identity",
-  observationClass: "SEMANTIC_FRAME",
-  observationPoint: "stateResult.mainWindowPreflight.semanticFingerprint",
-  measuresPaint: false,
-  status: "fail",
-  behavior: { status: "fail", failure: null },
-  query,
-  injectForbiddenShift,
-  receiptPath,
-  provenance: {
-    binary,
-    binarySha256: binarySha256(binary),
-    gitSha: git(["rev-parse", "HEAD"]),
-    sourceDirty: git(["status", "--porcelain"]).length > 0,
-  },
-  session: { name: sessionName, pid: null },
-  safety: {
-    startsApplication: true,
-    isolatedCiLaunchAuthorized: true,
-    sandboxHome: true,
-    windowRevealAllowed: false,
-    windowFocusAllowed: false,
-    nativeInputAllowed: false,
-    screenCaptureAllowed: false,
-    hiddenStateAssertionCount: 0,
-  },
-  samples: [],
-};
-
-let driver: Driver | null = null;
+let client: OwnedEvaluationClient | undefined;
+let cleanup: OwnedCleanup = unknownOwnedCleanup(false);
+const receipt: Json = { schemaVersion: 3, gateId: "root-frame-stable", evidenceClass: "RUNTIME_HIDDEN", metricKind: "semantic_frame_identity",
+  observationClass: "SEMANTIC_FRAME", observationPoint: "stateResult.mainWindowPreflight.semanticFingerprint", measuresPaint: false,
+  status: "error", behavior: { status: "fail", failure: null }, samples: [], query, fixtureId, injectForbiddenShift: inject,
+  delayedProvider: { status: "pending" }, stableSemanticFrames: { status: "pending" },
+  negativeControl: inject ? { ...negativeControlContract, applied: false } : null,
+  provenance: { artifactReference: reference, binary: artifact.executablePath, binarySha256: artifact.manifest.binarySha256,
+    gitSha: artifact.manifest.source.gitHead, sourceDirty: artifact.manifest.source.repositoryDirty, source: artifact.manifest.source,
+    derivation: artifact.manifest.derivation ?? null }, safety: { ...safety, startsApplication: true, hiddenStateAssertionCount: 0 } };
 try {
-  driver = await Driver.launch({
-    binary,
-    sandboxHome: true,
-    sessionName,
-    readyTimeoutMs: timeoutMs,
-    defaultTimeoutMs: timeoutMs,
-    env: {
-      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1",
-      SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-      SCRIPT_KIT_STARTUP_READY_LOG: "1",
-      SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1",
-      SCRIPT_KIT_ROOT_FILE_SEARCH_TEST_PROVIDER: JSON.stringify({
-        query,
-        delayMs: 250,
-        results: [
-          {
-            path: fixtureResultPath,
-            name: `${query}-late-provider-result.txt`,
-            fileType: "document",
-            size: 42,
-            modified: 1,
-          },
-        ],
-      }),
-    },
-  });
-  receipt.session.pid = driver.pid ?? null;
-  const initialState = (await driver.getState({ timeoutMs })) as Json;
-  requireHiddenState(initialState, "initial protocol-ready state");
-  await driver.setFilterAndWait(query, { timeoutMs });
-
-  const before = (await driver.getState({ timeoutMs })) as Json;
-  const beforeRootFileSearch = requireRootFileStatus(before, "before");
-  const baselineProof = classifyRootFileBaseline(beforeRootFileSearch);
-  const baseline = await comparable(driver, before, "before");
-  receipt.baselineProof = baselineProof;
-  receipt.baseline = {
-    inputValue: before.inputValue,
-    rootFileSearch: beforeRootFileSearch,
-    mainWindowPreflight: baseline,
-  };
-
-  const settled = await sampleUntilRootFileSettled(
-    driver,
-    baseline,
-    baselineProof,
-    receipt.samples,
-  );
-  const settledFrame = await comparable(driver, settled, "settled");
-  assertSameFrame(baseline, settledFrame, "settled");
-  receipt.settled = {
-    inputValue: settled.inputValue,
-    rootFileSearch: settled.rootFileSearch,
-    mainWindowPreflight: settledFrame,
-  };
+  client = await OwnedEvaluationClient.launch(repoRoot, reference, claim, [fixtureId], args.includes("--packaged") ? "clean-exact-head" : "current-content");
+  const target: AutomationInstance = await client.mount(fixtureId);
+  receipt.requestedTarget = target; receipt.session = { name: client.driver.sessionName, ...client.driver.processIdentity };
+  requireHidden(await client.inspect(target));
+  await client.act(target, { type: "setInput", text: query });
+  const before = await client.inspect(target); requireHidden(before);
+  const status = before.rootFileSearch;
+  if (status?.query !== query || status.mode !== "GlobalQuery" || status.providerLoading !== true || status.loading !== true)
+    throw new Error("early_global_query_provider_loading_frame_required");
+  if (status.visibleResultCount !== 0 || status.cacheEntryCount !== 0 || status.cacheResultCount !== 0)
+    throw new Error("delayed_provider_must_start_without_published_or_cached_results");
+  if (status.visibleLoading !== false) throw new Error("passive_provider_must_not_own_visible_loading");
+  receipt.delayedProvider.initial = status;
+  const baseline = semanticFrame(before, await client.query(target, "elements")); receipt.baseline = baseline;
+  const deadline = performance.now() + timeoutMs;
+  let settled = false;
+  for (let index = 0; index < 200 && performance.now() < deadline; index++) {
+    await client.frame(target);
+    const state = await client.inspect(target); requireHidden(state);
+    const provider = state.rootFileSearch;
+    if (provider?.query !== query || provider.mode !== "GlobalQuery" || provider.generation !== status.generation)
+      throw new Error("provider_query_identity_changed");
+    const frame = semanticFrame(state, await client.query(target, "elements"));
+    receipt.samples.push({ rootFileSearch: provider, frame, injectionApplied: false });
+    assertSameSemanticFrame(baseline, frame);
+    if (provider.visibleResultCount !== 0) throw new Error("passive_provider_published_visible_results");
+    if (provider.visibleLoading !== false) throw new Error("passive_provider_must_not_own_visible_loading");
+    if (provider.providerLoading === false && provider.loading === false) {
+      if (provider.cacheEntryCount !== 1 || provider.cacheResultCount !== 1)
+        throw new Error("delayed_root_file_provider_completed_without_expected_result");
+      settled = true; receipt.settled = frame;
+      receipt.delayedProvider = { status: "pass", initial: status, completed: provider };
+      break;
+    }
+  }
+  if (!settled) throw new Error("delayed_root_file_provider_did_not_settle");
+  receipt.completedFrame = await client.frame(target);
+  receipt.stableSemanticFrames = { status: "pass", sampledFrames: receipt.samples.length };
+  if (inject) {
+    // Validator sensitivity only: never replace a real sample or claim a native shift.
+    const candidateFrame = { ...receipt.settled, visibleRowFingerprint: "__injected_forbidden_shift__" };
+    receipt.negativeControl = { ...negativeControlContract, applied: true, candidateFrame };
+    assertSameSemanticFrame(baseline, candidateFrame);
+    throw new Error("forbidden_shift_negative_control_was_not_rejected");
+  }
   receipt.behavior.status = "pass";
 } catch (error) {
   receipt.behavior.failure = error instanceof Error ? error.message : String(error);
+  if (error instanceof DriverLifecycleError) cleanup = error.cleanup;
 } finally {
-  receipt.safety.hiddenStateAssertionCount = hiddenStateAssertionCount;
-  receipt.cleanup = {
-    attempted: driver !== null,
-    hidden: false,
-    hiddenState: null,
-    closed: false,
-    error: null,
-  };
-  if (driver) {
-    try {
-      driver.send({ type: "hide", requestId: `root-frame-cleanup-hide-${Date.now()}` });
-      await driver.waitForState(
-        { windowVisible: false },
-        { timeoutMs, pollIntervalMs: pollMs },
-      );
-      const hiddenState = (await driver.getState({ timeoutMs })) as Json;
-      if (hiddenState.windowVisible !== false) {
-        throw new Error(`cleanup state remained visible: ${JSON.stringify(hiddenState)}`);
-      }
-      receipt.cleanup.hidden = true;
-      receipt.cleanup.hiddenState = hiddenState;
-    } catch (error) {
-      const cleanupError = error instanceof Error ? error.message : String(error);
-      receipt.cleanup.error = cleanupError;
-      receipt.behavior.failure ??= `cleanup: ${cleanupError}`;
-    }
-    try {
-      await driver.close();
-      if (driver.alive) {
-        throw new Error(`owned driver process ${driver.pid ?? "unknown"} survived close`);
-      }
-      receipt.cleanup.closed = true;
-    } catch (error) {
-      const closeError = error instanceof Error ? error.message : String(error);
-      receipt.cleanup.error = receipt.cleanup.error
-        ? `${receipt.cleanup.error}; close: ${closeError}`
-        : `close: ${closeError}`;
-      receipt.behavior.failure ??= `close: ${closeError}`;
-    }
-  }
-  const correlations = driver?.matchedResponses.map(({ requestId, expectedType }) => ({
-    requestId,
-    expectedType: expectedType ?? "__missing_expected_type__",
-  })) ?? [];
+  if (client) { try { cleanup = await client.close(); } catch { cleanup = client.cleanup; } }
+  try { cleanup = finalizeManagedTask(task, cleanup).cleanup; } catch { cleanup = { ...cleanup, closed: false, referencesFinalized: false }; }
+  receipt.cleanup = cleanup; receipt.safety.hiddenStateAssertionCount = hiddenStates;
+  const correlations = client?.driver.matchedResponses.map(({ requestId, expectedType }) => ({ requestId, expectedType: expectedType! })) ?? [];
   const specs: ArtifactSpec[] = [
-    {
-      id: "app-log",
-      sourceName: "app.log",
-      required: true,
-      mediaType: "text/plain",
-      kind: "text",
-      acceptedTextMarkers: ["STARTUP_READY ", "APP_READY|"],
-    },
-    {
-      id: "protocol-responses",
-      sourceName: "protocol-responses.ndjson",
-      required: true,
-      mediaType: "application/x-ndjson",
-      kind: "ndjson",
-      correlations,
-    },
-    {
-      id: "lifecycle",
-      sourceName: "lifecycle.json",
-      required: true,
-      mediaType: "application/json",
-      kind: "json",
-    },
+    { id: "app-log", sourceName: "app.log", required: true, mediaType: "text/plain", kind: "text", acceptedTextMarkers: ['"operation":"bootstrap"'] },
+    { id: "protocol-responses", sourceName: "protocol-responses.ndjson", required: true, mediaType: "application/x-ndjson", kind: "ndjson", correlations },
+    { id: "lifecycle", sourceName: "lifecycle.json", required: true, mediaType: "application/json", kind: "json" },
   ];
-  const artifacts: ArtifactReceipt[] = [];
-  const writersFinalized = receipt.cleanup.closed === true
-    && driver?.alive === false
-    && driver.finalization.processExited === true
-    && driver.finalization.streamsDrained === true
-    && driver.finalization.logWriterClosed === true;
-  const lifecycleProof = {
-    schemaVersion: 1,
-    probeId: "root-search-frame-stability",
-    runId: claim.owner.runId,
-    finalizationKind: "driver-close",
-    hidden: receipt.cleanup.hidden === true,
-    processExited: driver?.finalization.processExited ?? false,
-    streamsDrained: driver?.finalization.streamsDrained ?? false,
-    logWriterClosed: driver?.finalization.logWriterClosed ?? false,
-    aliveAfterClose: driver?.alive ?? false,
-    completedAt: new Date().toISOString(),
-  };
   try {
-    if (driver && driver.alive === false && driver.finalization.logWriterClosed) {
-      materializeAtomic(claim, {
-        sourceRoot: dirname(driver.logPath),
-        sourceName: basename(driver.logPath),
-        destinationName: "app.log",
-      });
-      materializeAtomic(claim, {
-        sourceRoot: driver.sessionDir,
-        sourceName: "protocol-responses.ndjson",
-        destinationName: "protocol-responses.ndjson",
-      });
+    if (client?.driver.finalization.logWriterClosed) {
+      materializeAtomic(claim, { sourceRoot: dirname(client.driver.logPath), sourceName: basename(client.driver.logPath), destinationName: "app.log" });
+      const records: string[] = [];
+      for (const line of readFileSync(client.driver.logPath, "utf8").split("\n")) {
+        let parsed: Json;
+        try { parsed = JSON.parse(line); } catch { continue; }
+        // Malformed encoded evidence must fail preservation, not disappear as a non-JSON log line.
+        const record = normalizeProtocolResponse(parsed);
+        if (typeof record?.requestId === "string" && typeof record?.type === "string")
+          records.push(record === parsed ? line : JSON.stringify(record));
+      }
+      writeFileSync(join(claim.artifactsRoot, "protocol-responses.ndjson"), records.join("\n") + "\n", { flag: "wx", mode: 0o600 });
     }
-    writeJsonArtifactAtomic(claim, "lifecycle.json", lifecycleProof);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    receipt.cleanup.error = receipt.cleanup.error
-      ? `${receipt.cleanup.error}; artifacts: ${message}`
-      : `artifacts: ${message}`;
-  }
-  for (const spec of specs) {
-    artifacts.push(validateArtifact(
-      join(claim.artifactsRoot, spec.destinationName ?? spec.sourceName),
-      spec,
-      claim.artifactsRoot,
-    ));
-  }
-  receipt.artifactLifecycle = buildArtifactLifecycle({
-    claim,
-    finalizationKind: "driver-close",
-    writersFinalized,
-    specs,
-    artifacts,
-  });
-  const lifecycleValid = receipt.artifactLifecycle.allRequiredValid === true
-    && receipt.artifactLifecycle.allRecordedPathsReadable === true;
-  receipt.status = receipt.behavior.status === "pass"
-    && receipt.cleanup.hidden === true
-    && lifecycleValid
-    ? "pass"
-    : "error";
-  receipt.failure = [receipt.behavior.failure, receipt.cleanup.error]
-    .filter(Boolean)
-    .join("; ") || null;
-  if (receipt.status !== "pass") {
-    receipt.failurePreservation = {
-      outputRootPreserved: true,
-      sessionRootPreserved: Boolean(driver && existsSync(driver.sessionDir)),
-      stagingPreserved: false,
-      paths: [claim.root, ...(driver && existsSync(driver.sessionDir) ? [driver.sessionDir] : [])],
-      reason: receipt.failure ?? "artifact lifecycle validation failed",
-    };
-  }
+    writeJsonArtifactAtomic(claim, "lifecycle.json", { ...cleanup, schemaVersion: 1, probeId: "root-search-frame-stability", runId: claim.owner.runId, finalizationKind: "driver-close" });
+  } catch (error) { receipt.behavior.failure ??= `artifact_preservation_failed:${String(error)}`; }
+  const artifacts = specs.map(spec => validateArtifact(join(claim.artifactsRoot, spec.sourceName), spec, claim.artifactsRoot));
+  receipt.artifactLifecycle = buildArtifactLifecycle({ claim, finalizationKind: "driver-close", writersFinalized: cleanup.closed, specs, artifacts });
+  receipt.status = receipt.behavior.status === "pass" && cleanup.closed && receipt.artifactLifecycle.allRequiredValid && receipt.artifactLifecycle.allRecordedPathsReadable ? "pass" : "error";
+  receipt.failure = receipt.behavior.failure ?? (!cleanup.closed ? "INVALID_CLEANUP" : null);
   commitFinalReceipt(claim, receipt, specs, artifacts);
 }
-
-console.log(JSON.stringify(receipt, null, 2));
-process.exit(receipt.status === "pass" ? 0 : 1);
+console.log(JSON.stringify(receipt)); process.exit(receipt.status === "pass" ? 0 : 1);

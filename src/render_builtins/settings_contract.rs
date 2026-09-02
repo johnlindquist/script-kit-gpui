@@ -422,13 +422,6 @@ pub fn resolved_settings_hub_layout_for(
     }
 }
 
-/// Compatibility arity for the design-contract exporter (integration-owned
-/// caller); resolves the ACTIVE main-menu theme internally. Prefer
-/// [`resolved_settings_hub_layout_for`] in render code.
-pub fn resolved_settings_hub_layout(spacing: crate::designs::DesignSpacing) -> SettingsHubLayout {
-    resolved_settings_hub_layout_for(spacing, crate::designs::current_main_menu_theme().def())
-}
-
 /// Narrow contract summary for the design-token exporter — row census,
 /// section labels, and the STRUCTURAL iconless truth (GEO-007). The icon
 /// counts are structural zeros derived from the icon-field-free
@@ -654,10 +647,6 @@ mod settings_hub_contract_behavior {
         let menu_def = crate::designs::current_main_menu_theme().def();
         let layout = resolved_settings_hub_layout_for(spacing, menu_def);
         assert_eq!(layout.section, menu_def.section_metrics());
-        // The compatibility arity resolves the SAME active theme.
-        let compat = resolved_settings_hub_layout(spacing);
-        assert_eq!(compat.section, layout.section);
-        assert_eq!(compat.list_padding_y, layout.list_padding_y);
     }
 
     #[test]

@@ -343,6 +343,35 @@ mod tests {
     }
 
     #[test]
+    fn fresh_history_cache_proof_requires_current_success_without_a_worker() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(30);
+        let mut cache = RootBrowserHistorySnapshotState::default();
+        assert!(fresh_root_browser_history_cache_status(&cache, now, ttl).is_none());
+        cache.snapshot = Some(RootBrowserHistorySnapshot {
+            captured_at: now - ttl,
+            hits: Arc::new(Vec::new()),
+        });
+        cache.generation = 7;
+        let status = fresh_root_browser_history_cache_status(&cache, now, ttl).unwrap();
+        assert_eq!((status.generation, status.cached_count), (7, 0));
+        assert!(fresh_root_browser_history_cache_status(
+            &cache,
+            now + Duration::from_nanos(1),
+            ttl
+        )
+        .is_none());
+        cache.refresh_in_flight = true;
+        assert!(fresh_root_browser_history_cache_status(&cache, now, ttl).is_none());
+        cache.refresh_in_flight = false;
+        cache.refresh_needed = true;
+        assert!(fresh_root_browser_history_cache_status(&cache, now, ttl).is_none());
+        cache.refresh_needed = false;
+        cache.last_refresh_error = Some("failed".into());
+        assert!(fresh_root_browser_history_cache_status(&cache, now, ttl).is_none());
+    }
+
+    #[test]
     fn canceled_browser_history_generation_preserves_snapshot_for_current_query() {
         let previous_rows = Arc::new(Vec::new());
         let mut cache = RootBrowserHistorySnapshotState {
@@ -353,6 +382,7 @@ mod tests {
             refresh_in_flight: true,
             generation: 7,
             last_refresh_error: Some("previous failure".to_owned()),
+            ..Default::default()
         };
 
         assert!(discard_root_browser_history_refresh_from_state(

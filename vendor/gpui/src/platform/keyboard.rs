@@ -39,3 +39,15 @@ impl PlatformKeyboardMapper for DummyKeyboardMapper {
         None
     }
 }
+
+/// Stable local keyboard facts for explicitly injected evaluation input.
+pub struct OwnedHiddenKeyboardLayout;
+
+impl PlatformKeyboardLayout for OwnedHiddenKeyboardLayout {
+    fn id(&self) -> &str {
+        "owned-hidden-local"
+    }
+    fn name(&self) -> &str {
+        "Owned local keyboard"
+    }
+}

@@ -18,6 +18,14 @@ pub(crate) const ABOUT_SURFACE_EXEMPTION: &str =
 /// capture_key_down handler and the simulateKey dispatcher.
 pub(crate) const BRAIN_MEMORY_PREVIEW_PROMPT_ID: &str = "brain-memory-preview";
 
+#[derive(Debug, Clone, Default)]
+pub(crate) enum KitStoreBrowseState {
+    #[default]
+    Ready,
+    Loading,
+    Failed(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum MigrateBoardPhase {
     Unavailable(String),
@@ -1029,6 +1037,10 @@ impl AppView {
     pub(crate) fn main_view_header_input_policy(&self) -> MainViewHeaderInputPolicy {
         match self {
             AppView::ScriptList
+            | AppView::ArgPrompt { .. }
+            | AppView::MiniPrompt { .. }
+            | AppView::SelectPrompt { .. }
+            | AppView::PathPrompt { .. }
             | AppView::ClipboardHistoryView { .. }
             | AppView::AppLauncherView { .. }
             | AppView::WindowSwitcherView { .. }
@@ -1060,19 +1072,15 @@ impl AppView {
             AppView::DayPage { .. } => MainViewHeaderInputPolicy::ViewOwnedContextOnly,
             AppView::About { .. }
             | AppView::ActionsDialog
-            | AppView::ArgPrompt { .. }
             | AppView::DivPrompt { .. }
             | AppView::FormPrompt { .. }
             | AppView::TermPrompt { .. }
             | AppView::EditorPrompt { .. }
-            | AppView::SelectPrompt { .. }
-            | AppView::PathPrompt { .. }
             | AppView::EnvPrompt { .. }
             | AppView::DropPrompt { .. }
             | AppView::TemplatePrompt { .. }
             | AppView::HotkeyPrompt { .. }
             | AppView::ChatPrompt { .. }
-            | AppView::MiniPrompt { .. }
             | AppView::MicroPrompt { .. }
             | AppView::NamingPrompt { .. }
             | AppView::CreateAiPresetView { .. }

@@ -91,6 +91,66 @@ impl ScriptListApp {
 
         let mut components = Vec::new();
 
+        let arg_geometry = if matches!(
+            self.current_view,
+            AppView::ArgPrompt { .. } | AppView::MiniPrompt { .. }
+        ) {
+            use crate::window_resize::arg_layout::{self, ArgPresentationMode};
+            let mode = if matches!(self.current_view, AppView::MiniPrompt { .. }) {
+                ArgPresentationMode::Mini
+            } else {
+                ArgPresentationMode::Full
+            };
+            let choice_count = if layout_view_type == crate::window_resize::ViewType::ArgPromptWithChoices {
+                layout_item_count.max(1)
+            } else {
+                layout_item_count
+            };
+            let inputs = arg_layout::current_arg_layout_inputs(mode, choice_count, window_height);
+            let recorded = self.arg_prompt_geometry.get();
+            let current = recorded.filter(|geometry| {
+                actual_window_size.is_some()
+                    && geometry.is_current(
+                        self.main_revisions,
+                        self.show_bun_warning,
+                        gpui::size(gpui::px(window_width), gpui::px(window_height)),
+                        inputs,
+                    )
+            });
+            let Some(geometry) = current else {
+                // A cold or invalidated receipt must not claim rows at the
+                // warning-free origin while the real shell has not repainted.
+                let status = if recorded.is_some() { "stale" } else { "unavailable" };
+                return LayoutInfo {
+                    window_width,
+                    window_height,
+                    prompt_type: prompt_type.to_string(),
+                    components: vec![LayoutComponentInfo::new(
+                        "ArgPromptGeometryState",
+                        LayoutComponentType::Container,
+                    )
+                    .with_bounds(0.0, 0.0, window_width, window_height)
+                    .with_measurement(status, "window")
+                    .with_explanation(format!(
+                        "Arg/Mini shell geometry is {status}; viewport, row, and header geometry require a current production prepaint allocation."
+                    ))],
+                    fidelity: None,
+                    handler_form: None,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+            };
+            Some(geometry)
+        } else {
+            None
+        };
+        let (main_x, main_y, main_width) = arg_geometry
+            .map(|geometry| (
+                f32::from(geometry.shell_bounds.origin.x),
+                f32::from(geometry.shell_bounds.origin.y),
+                f32::from(geometry.shell_bounds.size.width),
+            ))
+            .unwrap_or((0.0, 0.0, window_width));
+
         // Layout constants (same as build_component_bounds)
         use crate::ui::chrome as chrome_tokens;
         const BUTTON_HEIGHT: f32 = 28.0;
@@ -116,6 +176,7 @@ impl ScriptListApp {
                     height: window_height as f64,
                 }),
                 parent_window_id: None,
+                parent_window_generation: None,
                 parent_kind: None,
                 pid: None,
                 generation: None,
@@ -144,6 +205,7 @@ impl ScriptListApp {
                         height: window_height as f64,
                     }),
                     parent_window_id: None,
+                    parent_window_generation: None,
                     parent_kind: None,
                     pid: None,
                     generation: None,
@@ -175,8 +237,10 @@ impl ScriptListApp {
         } else {
             window_width
         };
-        let content_top = header_height;
-        let content_height = window_height - header_height;
+        let content_top = main_y + header_height;
+        let content_height = arg_geometry
+            .map(|geometry| geometry.resolved.viewport_height)
+            .unwrap_or(window_height - header_height);
 
         // Root container
         components.push(
@@ -197,7 +261,7 @@ impl ScriptListApp {
 
         components.push(
             LayoutComponentInfo::new("MainViewHeader", LayoutComponentType::Header)
-                .with_bounds(0.0, 0.0, window_width, header_height)
+                .with_bounds(main_x, main_y, main_width, header_height)
                 .with_visual_style(
                     chrome_tokens::CHROME_LAYER_FUNCTIONAL,
                     chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
@@ -226,9 +290,9 @@ impl ScriptListApp {
         components.push(
             LayoutComponentInfo::new("MainViewContextZone", LayoutComponentType::Container)
                 .with_bounds(
-                    header_metrics.context_x,
-                    header_metrics.context_y,
-                    (window_width - shell_horizontal_padding * 2.0 + context_outset_x * 2.0)
+                    main_x + header_metrics.context_x,
+                    main_y + header_metrics.context_y,
+                    (main_width - shell_horizontal_padding * 2.0 + context_outset_x * 2.0)
                         .max(0.0),
                     header_metrics.context_height,
                 )
@@ -248,15 +312,15 @@ impl ScriptListApp {
                 ),
         );
 
-        let input_width = (window_width - (shell_horizontal_padding * 2.0)).max(0.0);
+        let input_width = (main_width - (shell_horizontal_padding * 2.0)).max(0.0);
         let input_text_inset_left =
             crate::components::main_view_chrome::main_view_input_text_inset_left(menu_def);
         if let Some(input_height) = header_metrics.input_height {
             components.push(
                 LayoutComponentInfo::new("MainViewInput", LayoutComponentType::Input)
                     .with_bounds(
-                        header_metrics.input_x,
-                        header_metrics.input_y,
+                        main_x + header_metrics.input_x,
+                        main_y + header_metrics.input_y,
                         input_width,
                         input_height,
                     )
@@ -282,8 +346,8 @@ impl ScriptListApp {
                     )
                     .with_visual_token("chrome.mainViewInput")
                     .with_hit_bounds(
-                        header_metrics.input_x,
-                        header_metrics.input_y,
+                        main_x + header_metrics.input_x,
+                        main_y + header_metrics.input_y,
                         input_width,
                         input_height,
                     )
@@ -300,7 +364,7 @@ impl ScriptListApp {
         components.push({
             let component =
                 LayoutComponentInfo::new("MainViewMain", LayoutComponentType::Container)
-                    .with_bounds(0.0, content_top, window_width, content_height)
+                    .with_bounds(main_x, content_top, main_width, content_height)
                     .with_visual_style(
                         chrome_tokens::CHROME_LAYER_CONTENT,
                         chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
@@ -1289,145 +1353,14 @@ impl ScriptListApp {
         // modeled rows all project from the SAME resolver the resize owner
         // and renderers consume (`window_resize::arg_layout`) — never from
         // the retired 40px `LIST_ITEM_HEIGHT + ARG_LIST_PADDING_Y` model.
-        if matches!(
-            self.current_view,
-            AppView::ArgPrompt { .. } | AppView::MiniPrompt { .. }
-        ) {
-            use crate::window_resize::arg_layout::{
-                self, ArgPresentationMode, ARG_LIST_VIEWPORT_MEASUREMENT_ID,
-                ARG_ROW_MEASUREMENT_ID_PREFIX, MINI_LIST_VIEWPORT_MEASUREMENT_ID,
-                MINI_ROW_MEASUREMENT_ID_PREFIX,
-            };
-
-            let mode = if matches!(self.current_view, AppView::MiniPrompt { .. }) {
-                ArgPresentationMode::Mini
-            } else {
-                ArgPresentationMode::Full
-            };
-            let filtered_len = self.filtered_arg_choices().len();
-            let resolved = arg_layout::resolved_arg_layout(arg_layout::current_arg_layout_inputs(
-                mode,
-                filtered_len,
+        if let Some(geometry) = arg_geometry {
+            self.append_arg_prompt_layout_components(
+                &geometry,
+                window_width,
                 window_height,
-            ));
-            let (viewport_id, row_id_prefix) = match mode {
-                ArgPresentationMode::Mini => (
-                    MINI_LIST_VIEWPORT_MEASUREMENT_ID,
-                    MINI_ROW_MEASUREMENT_ID_PREFIX,
-                ),
-                ArgPresentationMode::Full => (
-                    ARG_LIST_VIEWPORT_MEASUREMENT_ID,
-                    ARG_ROW_MEASUREMENT_ID_PREFIX,
-                ),
-            };
-
-            let header_h = resolved.header_chrome_height;
-            let viewport_top = header_h;
-            let viewport_h = resolved.viewport_height;
-            let footer_top = window_height - resolved.footer_reservation_height;
-
-            components.push(
-                LayoutComponentInfo::new("ArgPromptHeader", LayoutComponentType::Header)
-                    .with_geometry_identity(
-                        "layout:arg-prompt-header",
-                        None,
-                        crate::list_item::geometry_roles::GeometryRole::MainHeaderChrome
-                            .to_protocol(),
-                    )
-                    .with_bounds(0.0, 0.0, window_width, header_h)
-                    .with_depth(1)
-                    .with_parent("Window")
-                    .with_explanation(format!(
-                        "Minimal prompt shell header: padding({}) * 2 + input row({}) + divider({}) = {}px.",
-                        crate::ui::chrome::HEADER_PADDING_Y,
-                        crate::panel::HEADER_BUTTON_HEIGHT
-                            .max(crate::window_resize::layout::ARG_INPUT_LINE_HEIGHT),
-                        crate::panel::HEADER_DIVIDER_HEIGHT,
-                        header_h
-                    )),
+                &header_metrics,
+                &mut components,
             );
-            components.push(
-                LayoutComponentInfo::new(viewport_id, LayoutComponentType::List)
-                    .with_geometry_identity(
-                        format!("layout:{viewport_id}"),
-                        None,
-                        crate::list_item::geometry_roles::GeometryRole::ContentViewport
-                            .to_protocol(),
-                    )
-                    .with_bounds(0.0, viewport_top, window_width, viewport_h)
-                    .with_depth(1)
-                    .with_parent("Window")
-                    .with_explanation(format!(
-                        "Choice-list viewport excludes the rendered footer reservation. \
-                         rowSlotHeight={} visibleRowCapacity={} intendedVisibleRows={} \
-                         listPaddingTop={} listPaddingBottom={} choiceCount={}",
-                        resolved.row_slot_height,
-                        resolved.visible_row_capacity,
-                        resolved.intended_visible_rows,
-                        resolved.list_padding_top,
-                        resolved.list_padding_bottom,
-                        filtered_len
-                    )),
-            );
-            // The derived footer reservation is its own measurement. Its
-            // protocol role is pending IR-01 (renderedFooterReservation); it
-            // must NOT borrow a painted footer owner's role.
-            components.push(
-                LayoutComponentInfo::new("ArgFooterReservation", LayoutComponentType::Panel)
-                    .with_geometry_identity(
-                        "layout:arg-footer-reservation",
-                        None,
-                        crate::list_item::geometry_roles::GeometryRole::RenderedFooterReservation
-                            .to_protocol(),
-                    )
-                    .with_bounds(
-                        0.0,
-                        footer_top,
-                        window_width,
-                        resolved.footer_reservation_height,
-                    )
-                    .with_depth(1)
-                    .with_parent("Window")
-                    .with_explanation(format!(
-                        "Derived safe-viewport exclusion sourced from the native footer owner \
-                         (height {}px). Distinct measurement; not an alias of the painted footer.",
-                        resolved.footer_reservation_height
-                    )),
-            );
-
-            // Visible modeled rows at the current scroll offset.
-            let scroll_offset_y = {
-                let state = self.arg_list_scroll_handle.0.borrow();
-                (-state.base_handle.offset().y.as_f32()).max(0.0)
-            };
-            let first_visible = (scroll_offset_y / resolved.row_slot_height).floor() as usize;
-            let last_visible =
-                ((scroll_offset_y + viewport_h) / resolved.row_slot_height).ceil() as usize;
-            for ix in first_visible..last_visible.min(filtered_len) {
-                let row_y = viewport_top + (ix as f32 * resolved.row_slot_height) - scroll_offset_y;
-                let selected = ix == self.arg_selected_index;
-                components.push(
-                    LayoutComponentInfo::new(
-                        format!("{row_id_prefix}:{ix}"),
-                        LayoutComponentType::ListItem,
-                    )
-                    .with_geometry_identity(
-                        format!("layout:{row_id_prefix}:{ix}"),
-                        None,
-                        crate::list_item::geometry_roles::GeometryRole::RowSlot.to_protocol(),
-                    )
-                    .with_bounds(0.0, row_y, window_width, resolved.row_slot_height)
-                    .with_depth(2)
-                    .with_parent(viewport_id)
-                    .with_explanation(format!(
-                        "Modeled {} row {} at the resolved {}px row slot{}.",
-                        mode.as_str(),
-                        ix,
-                        resolved.row_slot_height,
-                        if selected { " (selected)" } else { "" }
-                    )),
-                );
-            }
 
             return LayoutInfo {
                 window_width,
@@ -2256,137 +2189,7 @@ impl ScriptListApp {
         }
     }
 
-    fn build_handler_form_layout_info(
-        &self,
-        content_top: f32,
-        content_height: f32,
-        window_width: f32,
-    ) -> Option<serde_json::Value> {
-        if !matches!(self.current_view, AppView::ScriptList)
-            || !self.menu_syntax_capture_form_owns_input()
-        {
-            return None;
-        }
-        let form = self
-            .menu_syntax_main_hint_snapshot(&self.filter_text, false)?
-            .form?;
-
-        const OUTER_PADDING_X: f32 = 18.0;
-        const OUTER_PADDING_TOP: f32 = 12.0;
-        const TITLE_BLOCK_HEIGHT: f32 = 72.0;
-        const FIELD_HEIGHT: f32 = 68.0;
-        const FIELD_GAP: f32 = 8.0;
-        const SIDEBAR_WIDTH: f32 = 180.0;
-        const SIDEBAR_GAP: f32 = 8.0;
-
-        let offset = self.menu_syntax_main_hint_scroll_handle.offset();
-        let max_offset = self.menu_syntax_main_hint_scroll_handle.max_offset();
-        let scroll_offset_y = (-offset.y.as_f32()).max(0.0);
-        let viewport = serde_json::json!({
-            "x": OUTER_PADDING_X,
-            "y": content_top + OUTER_PADDING_TOP,
-            "width": (window_width - (OUTER_PADDING_X * 2.0)).max(0.0),
-            "height": (content_height - OUTER_PADDING_TOP).max(0.0),
-        });
-        let viewport_top = content_top + OUTER_PADDING_TOP;
-        let viewport_bottom = content_top + content_height;
-        let form_top = content_top + OUTER_PADDING_TOP + TITLE_BLOCK_HEIGHT;
-        let content_width = (window_width - (OUTER_PADDING_X * 2.0)).max(0.0);
-        let sidebar_field_id = self.menu_syntax_form_suggestion_field_id.as_deref();
-        let field_width = content_width;
-
-        let mut focused_visibility = serde_json::Value::Null;
-        let fields = form
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| {
-                let y = form_top + (index as f32 * (FIELD_HEIGHT + FIELD_GAP)) - scroll_offset_y;
-                let bottom = y + FIELD_HEIGHT;
-                let visible_top = y.max(viewport_top);
-                let visible_bottom = bottom.min(viewport_bottom);
-                let visible_height = (visible_bottom - visible_top).clamp(0.0, FIELD_HEIGHT);
-                let visible_ratio = if FIELD_HEIGHT > 0.0 {
-                    visible_height / FIELD_HEIGHT
-                } else {
-                    0.0
-                };
-                let fully_visible = visible_ratio >= 0.999;
-                let semantic_id = format!("handler-form:{}:{}", form.target, field.id);
-                let bounds = serde_json::json!({
-                    "x": OUTER_PADDING_X,
-                    "y": y,
-                    "width": field_width,
-                    "height": FIELD_HEIGHT,
-                });
-                let field_info = serde_json::json!({
-                    "semanticId": semantic_id,
-                    "fieldId": field.id,
-                    "index": index,
-                    "focused": field.focused && self.menu_syntax_form_input_active,
-                    "fullyVisible": fully_visible,
-                    "visibleRatio": visible_ratio,
-                    "handlerFormFieldBounds": bounds,
-                });
-                if field.focused && self.menu_syntax_form_input_active {
-                    focused_visibility = serde_json::json!({
-                        "semanticId": format!("handler-form:{}:{}", form.target, field.id),
-                        "index": index,
-                        "fullyVisible": fully_visible,
-                        "visibleRatio": visible_ratio,
-                        "bounds": bounds,
-                    });
-                }
-                field_info
-            })
-            .collect::<Vec<_>>();
-
-        let suggestions = sidebar_field_id.and_then(|field_id| {
-            form.fields
-                .iter()
-                .any(|field| field.id == field_id)
-                .then(|| {
-                    let field_count = form.fields.len() as f32;
-                    let sidebar_height = (field_count * FIELD_HEIGHT
-                        + (field_count - 1.0).max(0.0) * FIELD_GAP)
-                        .min((content_height - OUTER_PADDING_TOP - TITLE_BLOCK_HEIGHT).max(0.0));
-                    serde_json::json!({
-                        "ownerFieldId": field_id,
-                        "role": "listbox",
-                        "surface": "menuSyntaxTriggerPicker",
-                        "bounds": {
-                            "x": OUTER_PADDING_X + field_width + SIDEBAR_GAP,
-                            "y": form_top - scroll_offset_y,
-                            "width": SIDEBAR_WIDTH,
-                            "height": sidebar_height,
-                        }
-                    })
-                })
-        });
-
-        Some(serde_json::json!({
-            "target": form.target,
-            "source": "menuSyntaxMainHint.form",
-            "scrollContainerId": "menu-syntax-main-hint-scroll",
-            "scrollOffsetY": scroll_offset_y,
-            "maxScrollOffsetY": max_offset.y.as_f32().max(0.0),
-            "viewport": viewport,
-            "focusedSemanticId": if self.menu_syntax_form_input_active {
-                form.fields
-                    .iter()
-                    .find(|field| field.focused)
-                    .map(|field| format!("handler-form:{}:{}", form.target, field.id))
-            } else {
-                None
-            },
-            "focusedIndex": if self.menu_syntax_form_input_active {
-                Some(form.focused_index)
-            } else {
-                None
-            },
-            "handlerFormFocusedVisibility": focused_visibility,
-            "fields": fields,
-            "suggestions": suggestions,
-        }))
-    }
 }
+
+include!("build_layout_info_handler_form.rs");
+include!("build_layout_info_arg.rs");

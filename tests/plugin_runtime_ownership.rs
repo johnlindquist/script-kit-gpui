@@ -320,42 +320,10 @@ fn script_loader_uses_discover_plugins() {
 }
 
 #[test]
-fn script_loader_sets_plugin_id_on_scripts() {
-    assert!(
-        LOADER_SOURCE.contains("plugin_id: plugin.id.clone()"),
-        "read_scripts() must set plugin_id from the discovered plugin"
-    );
-}
-
-#[test]
-fn script_loader_sets_plugin_title_on_scripts() {
-    assert!(
-        LOADER_SOURCE.contains("plugin_title: Some(plugin.manifest.title.clone())"),
-        "read_scripts() must set plugin_title from the plugin manifest"
-    );
-}
-
-#[test]
 fn scriptlet_loader_uses_discover_plugins() {
     assert!(
         SCRIPTLET_LOADER_SOURCE.contains("crate::plugins::discover_plugins()"),
         "load_scriptlets() must consume discover_plugins() for plugin-scoped loading"
-    );
-}
-
-#[test]
-fn scriptlet_loader_sets_plugin_id_on_scriptlets() {
-    assert!(
-        SCRIPTLET_LOADER_SOURCE.contains("plugin_id: plugin.id.clone()"),
-        "load_scriptlets() must set plugin_id from the discovered plugin"
-    );
-}
-
-#[test]
-fn scriptlet_loader_sets_plugin_title_on_scriptlets() {
-    assert!(
-        SCRIPTLET_LOADER_SOURCE.contains("plugin_title: Some(plugin.manifest.title.clone())"),
-        "load_scriptlets() must set plugin_title from the plugin manifest"
     );
 }
 

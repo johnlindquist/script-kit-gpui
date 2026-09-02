@@ -1,6 +1,7 @@
 use crate::computer_use::window_observation::ComputerUseWindowObservationV1;
 use crate::protocol::{
-    AutomationInspectSnapshot, AutomationWindowTarget, PixelProbe, TargetWindowBounds,
+    AutomationInspectSnapshot, AutomationTargetIdentitySnapshot, AutomationWindowTarget,
+    CompletedFrameIdentity, PixelProbe, TargetWindowBounds,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,11 +32,20 @@ pub struct ComputerUseCaptureNativeWindowRequest {
     pub correlation_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComputerUseCaptureRenderWindowRequest {
     pub target: AutomationWindowTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<AutomationTargetIdentitySnapshot>,
+    #[serde(rename = "hiDpi", default)]
     pub hi_dpi: bool,
+    #[serde(default)]
     pub include_image: bool,
+    /// Native-resolution probes of the exact retained frame, never a new draw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<PixelProbe>,
+    #[serde(default)]
     pub correlation_id: String,
 }
 
@@ -105,7 +115,13 @@ pub struct ComputerUseCaptureRenderWindowSnapshot {
     pub correlation_id: String,
     pub target: AutomationWindowTarget,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_identity: Option<CompletedFrameIdentity>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_durations_ms: std::collections::BTreeMap<String, f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<ComputerUseNativeWindowCaptureInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pixel_probes: Vec<crate::protocol::PixelProbeResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ComputerUseCaptureNativeWindowError>,
     pub warnings: Vec<String>,
@@ -313,7 +329,10 @@ mod tests {
             status: ComputerUseCaptureRenderWindowStatus::Unsupported,
             correlation_id: "render-1".to_string(),
             target: AutomationWindowTarget::Focused,
+            frame_identity: None,
+            phase_durations_ms: Default::default(),
             capture: None,
+            pixel_probes: Vec::new(),
             error: Some(ComputerUseCaptureNativeWindowError {
                 code: "gpui_readback_unavailable",
                 message: "GPUI render readback is not implemented yet".to_string(),

@@ -25,7 +25,7 @@ use crate::designs::{MainMenuThemeDef, MainMenuThemeVariant};
 use crate::list_item::{resolved_main_menu_row_fill, ListItemMetricsOverride, MainMenuRowFillBase};
 use crate::theme::{AppChromeColors, Theme};
 
-pub const TOKENS_SCHEMA_VERSION: u32 = 1;
+pub const TOKENS_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +94,12 @@ pub enum TokenValue {
         css: String,
     },
     Number {
+        value: f64,
+    },
+    AlphaByte {
+        value: u8,
+    },
+    NormalizedOpacity {
         value: f64,
     },
     FontWeight {
@@ -848,11 +854,16 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         popup.search.cursor_width,
         "ActionsPopupSearchTokens.cursor_width",
     );
-    b.source_len(
+    b.add(
         "actionsDialog.search.caretHeight",
-        "--sk-actions-dialog-caret-height",
-        popup.search.cursor_height,
-        "ActionsPopupSearchTokens.cursor_height",
+        TokenStage::Resolved,
+        Some("--sk-actions-dialog-caret-height"),
+        TokenValue::Length {
+            value: popup.search.resolved_cursor_height() as f64,
+        },
+        Some("ActionsPopupSearchTokens::resolved_cursor_height"),
+        false,
+        &["actionsDialog.search.fontSize"],
     );
     b.add(
         "actionsDialog.search.paddingYExtra",
@@ -1689,6 +1700,8 @@ pub fn render_css(bundle: &DesignTokenBundle) -> String {
             TokenValue::Length { value } => format_px(*value),
             TokenValue::Color { css, .. } => css.clone(),
             TokenValue::Number { value } => trim_float(*value),
+            TokenValue::AlphaByte { value } => value.to_string(),
+            TokenValue::NormalizedOpacity { value } => trim_float(*value),
             TokenValue::FontWeight { value } => trim_float(*value),
             TokenValue::DurationMs { value } => format!("{value}ms"),
             TokenValue::Text { value } => format!("\"{value}\""),

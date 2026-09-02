@@ -21,18 +21,6 @@ pub(crate) struct ElementCollectionOutcome {
     pub warnings: Vec<String>,
 }
 
-struct FilterableRowsCollection<'a> {
-    input_name: &'a str,
-    input_value: String,
-    list_name: &'a str,
-    empty_state_id: &'static str,
-    empty_text: &'a str,
-    empty_icon_hint: &'static str,
-    rows: &'a [String],
-    selected_index: usize,
-    limit: usize,
-}
-
 impl ElementCollectionOutcome {
     const VERSION: u32 = 1;
 
@@ -114,45 +102,6 @@ impl ElementCollectionOutcome {
 }
 
 impl ScriptListApp {
-    fn info_state_elements(
-        snapshot: &crate::components::InfoStateSemanticSnapshot,
-    ) -> Vec<protocol::ElementInfo> {
-        let mut root = protocol::ElementInfo::panel(snapshot.id);
-        root.semantic_id = format!("info-state:{}", snapshot.id);
-        root.text = snapshot.accessible_prefix.map(str::to_string);
-        root.value = snapshot.default_icon_hint.map(str::to_string);
-        root.role = Some("info-state".to_string());
-        root.kind = Some(snapshot.semantic_kind.to_string());
-        root.source = Some("InfoState".to_string());
-        root.source_name = Some(snapshot.id.to_string());
-        root.selectable = Some(false);
-        root.status_kind = Some(snapshot.semantic_kind.to_string());
-
-        let mut elements = Vec::with_capacity(snapshot.cues.len() + 1);
-        elements.push(root);
-        elements.extend(snapshot.cues.iter().enumerate().map(|(index, cue)| {
-            protocol::ElementInfo {
-                semantic_id: format!("info-cue:{}", cue.semantic_id),
-                element_type: protocol::ElementType::Panel,
-                text: Some(cue.cue_text.clone()),
-                value: cue.canonical_shortcut.clone(),
-                content: None,
-                selected: Some(false),
-                focused: Some(false),
-                index: Some(index),
-                role: Some("guidance-cue".to_string()),
-                kind: Some(cue.cue_kind.to_string()),
-                source: Some("InfoState".to_string()),
-                source_name: Some(snapshot.id.to_string()),
-                selectable: Some(false),
-                status_kind: Some(snapshot.semantic_kind.to_string()),
-                action_disabled: None,
-                style: None,
-            }
-        }));
-        elements
-    }
-
     fn menu_syntax_guidance_elements(
         snapshot: &crate::menu_syntax::MenuSyntaxMainHintSnapshot,
     ) -> Vec<protocol::ElementInfo> {
@@ -250,18 +199,29 @@ impl ScriptListApp {
                     .chain(list_elements)
                     .take(limit)
                     .collect();
-                ElementCollectionOutcome::complete(
+                let mut projection = ElementCollectionOutcome::complete(
                     "scriptList",
                     elements,
                     context_count + list_total,
-                )
+                );
+                projection.version = 2;
+                projection
             }
 
             AppView::AgentChatView { entity } => {
                 let focused_text_elements = entity
                     .read(cx)
                     .collect_focused_text_mini_elements(limit, cx);
-                if !focused_text_elements.is_empty() {
+                if entity.read(cx).shows_setup_card(cx) {
+                    // Initial and runtime setup both render the real setup card.
+                    let elements = crate::windows::automation_surface_collector::collect_agent_chat_conversation_elements(entity, cx);
+                    let total_count = elements.len();
+                    ElementCollectionOutcome::complete(
+                        "agentChat",
+                        elements.into_iter().take(limit).collect(),
+                        total_count,
+                    )
+                } else if !focused_text_elements.is_empty() {
                     ElementCollectionOutcome::complete(
                         "focusedTextMini",
                         focused_text_elements.clone(),
@@ -1847,7 +1807,7 @@ impl ScriptListApp {
             }
         }
 
-        self.append_footer_elements(&mut outcome, limit, cx);
+        self.append_footer_elements(&mut outcome, limit);
         outcome
     }
 
@@ -2566,25 +2526,34 @@ impl ScriptListApp {
     }
 
     pub(crate) fn script_list_visible_row_labels_from_cache(&self) -> (Vec<String>, Option<usize>) {
-        let (grouped_items, flat_results) = self.cached_grouped_results_snapshot();
-        let selected_grouped_index =
-            crate::list_item::coerce_selection(&grouped_items, self.selected_index);
+        let selected = self
+            .resolved_main_menu_selected_subject()
+            .map(|subject| match subject {
+                ResolvedMainMenuSelection::SearchResult { row, .. }
+                | ResolvedMainMenuSelection::Calculator { row, .. } => row.grouped_index,
+            });
         let mut selected_row_index = None;
-        let mut row_names = Vec::new();
-
-        for (grouped_index, item) in grouped_items.iter().enumerate() {
-            let crate::list_item::GroupedListItem::Item(result_idx) = item else {
-                continue;
-            };
-            let Some(result) = flat_results.get(*result_idx) else {
-                continue;
-            };
-            if Some(grouped_index) == selected_grouped_index {
-                selected_row_index = Some(row_names.len());
-            }
-            row_names.push(Self::script_list_result_label(result));
-        }
-
+        let row_names = self
+            .main_menu_committed_rows()
+            .iter()
+            .filter(|row| row.eligibility.selectable)
+            .filter_map(|row| {
+                let label = match row.subject {
+                    MainMenuRowSubject::SearchResult { flat_index } => {
+                        Self::script_list_result_label(
+                            self.main_menu_committed_results().get(flat_index)?,
+                        )
+                    }
+                    MainMenuRowSubject::Calculator => {
+                        format!("= {}", self.main_menu_committed_calculator()?.formatted)
+                    }
+                };
+                if Some(row.grouped_index) == selected {
+                    selected_row_index = row.selectable_ordinal;
+                }
+                Some(label)
+            })
+            .collect();
         (row_names, selected_row_index)
     }
 
@@ -2596,11 +2565,12 @@ impl ScriptListApp {
         let (grouped_items, flat_results) = self.cached_grouped_results_snapshot();
         let source_statuses = self.cached_source_statuses_snapshot();
         let selected_grouped_index =
-            crate::list_item::coerce_selection(&grouped_items, self.selected_index);
-        let total_rows = grouped_items
-            .iter()
-            .filter(|item| matches!(item, crate::list_item::GroupedListItem::Item(_)))
-            .count();
+            self.resolved_main_menu_selected_subject()
+                .map(|subject| match subject {
+                    ResolvedMainMenuSelection::SearchResult { row, .. }
+                    | ResolvedMainMenuSelection::Calculator { row, .. } => row.grouped_index,
+                });
+        let total_rows = self.main_menu_committed_rows().len();
         let handler_form = self
             .menu_syntax_main_hint_snapshot(&self.filter_text, false)
             .and_then(|snapshot| snapshot.form);
@@ -2608,6 +2578,18 @@ impl ScriptListApp {
             .as_ref()
             .map_or(0usize, |form| form.fields.len());
         let mut total_count = total_rows + source_statuses.len() + handler_form_field_count + 2;
+        if include_headers {
+            total_count += grouped_items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item,
+                        crate::list_item::GroupedListItem::SectionHeader(..)
+                            | crate::list_item::GroupedListItem::ReservedSectionSlot
+                    )
+                })
+                .count();
+        }
         let mut elements = Vec::with_capacity(limit.min(total_count));
 
         Self::push_limited_element(
@@ -2624,137 +2606,6 @@ impl ScriptListApp {
             limit,
             protocol::ElementInfo::list("results", total_rows),
         );
-
-        if let Some(snapshot) = self
-            .menu_syntax_object_selector_state
-            .snapshot
-            .as_ref()
-            .filter(|_| self.menu_syntax_object_selector_state.owns_main_list())
-        {
-            if let Some(list) = elements
-                .iter_mut()
-                .find(|element| element.semantic_id == "list:results")
-            {
-                list.semantic_id = "list:menu-syntax-object-selector".to_string();
-                list.text = Some(format!("{} rows", snapshot.rows.len()));
-                list.value = Some("menuSyntaxObjectSelector".to_string());
-                list.kind = Some("menuSyntaxObjectSelector".to_string());
-                list.source = Some("ScriptList".to_string());
-            }
-
-            let selected_row_id = self
-                .selected_index
-                .checked_sub(1)
-                .and_then(|index| snapshot.rows.get(index))
-                .map(|row| row.id.as_str())
-                .or(self
-                    .menu_syntax_object_selector_state
-                    .selected_row_id
-                    .as_deref());
-
-            for (index, row) in snapshot.rows.iter().enumerate() {
-                if elements.len() >= limit {
-                    break;
-                }
-                elements.push(protocol::ElementInfo {
-                    semantic_id: protocol::generate_semantic_id("choice", index, &row.id),
-                    element_type: protocol::ElementType::Choice,
-                    text: Some(row.title.clone()),
-                    value: Some(row.token.clone().unwrap_or_else(|| row.id.clone())),
-                    content: None,
-                    selected: Some(selected_row_id == Some(row.id.as_str())),
-                    focused: None,
-                    index: Some(index),
-                    role: Some("menu-syntax-object-selector-row".to_string()),
-                    kind: Some("menuSyntaxObjectSelector".to_string()),
-                    source: Some("menuSyntaxObjectSelector".to_string()),
-                    source_name: Some("ScriptList".to_string()),
-                    selectable: Some(row.enabled),
-                    status_kind: None,
-                    action_disabled: (!row.enabled).then(|| "disabled".to_string()),
-                    style: None,
-                });
-            }
-
-            return (elements, snapshot.rows.len() + 2);
-        }
-
-        if let Some(snapshot) = self
-            .menu_syntax_trigger_picker_state
-            .snapshot
-            .as_ref()
-            .filter(|_| self.menu_syntax_trigger_picker_state.owns_main_list())
-        {
-            if let Some(list) = elements
-                .iter_mut()
-                .find(|element| element.semantic_id == "list:results")
-            {
-                list.semantic_id = "list:menu-syntax-trigger-picker".to_string();
-                list.text = Some(format!("{} rows", snapshot.rows.len()));
-                list.value = Some("menuSyntaxTriggerPicker".to_string());
-                list.kind = Some("menuSyntaxTriggerPicker".to_string());
-                list.source = Some("ScriptList".to_string());
-            }
-
-            // The rendered picker leads with a persistent section header
-            // (filtering_cache pushes it from the same mode mapping); report
-            // it so header-stability probes see what users see.
-            if include_headers && elements.len() < limit {
-                let (section_label, _icon) = snapshot.mode.main_list_section();
-                elements.push(protocol::ElementInfo {
-                    semantic_id: protocol::generate_semantic_id("section", 0, section_label),
-                    element_type: protocol::ElementType::Panel,
-                    text: Some(section_label.to_string()),
-                    value: None,
-                    content: None,
-                    selected: Some(false),
-                    focused: None,
-                    index: None,
-                    role: Some("sectionHeader".to_string()),
-                    kind: Some("sectionHeader".to_string()),
-                    source: None,
-                    source_name: None,
-                    selectable: Some(false),
-                    status_kind: None,
-                    action_disabled: None,
-                    style: None,
-                });
-            }
-
-            for (index, row) in snapshot.rows.iter().enumerate() {
-                if elements.len() >= limit {
-                    break;
-                }
-                elements.push(protocol::ElementInfo {
-                    semantic_id: protocol::generate_semantic_id("choice", index, &row.id),
-                    element_type: protocol::ElementType::Choice,
-                    text: Some(row.title.clone()),
-                    value: Some(row.token.clone().unwrap_or_else(|| row.id.clone())),
-                    content: None,
-                    selected: Some(
-                        self.menu_syntax_trigger_picker_state
-                            .selected_row_id
-                            .as_deref()
-                            == Some(row.id.as_str()),
-                    ),
-                    focused: None,
-                    index: Some(index),
-                    role: Some("menu-syntax-trigger-row".to_string()),
-                    kind: Some("menuSyntaxTriggerPicker".to_string()),
-                    source: Some("menuSyntaxTriggerPicker".to_string()),
-                    source_name: Some("ScriptList".to_string()),
-                    selectable: Some(row.enabled),
-                    status_kind: None,
-                    action_disabled: (!row.enabled).then(|| "disabled".to_string()),
-                    style: None,
-                });
-            }
-
-            return (
-                elements,
-                snapshot.rows.len() + 2 + usize::from(include_headers),
-            );
-        }
 
         if let Some(form) = handler_form.as_ref() {
             for (index, field) in form.fields.iter().enumerate() {
@@ -2874,9 +2725,60 @@ impl ScriptListApp {
                     }
                 }
                 crate::list_item::GroupedListItem::ReservedSectionSlot => {
-                    // Visual rhythm only: never expose an empty accessibility heading.
+                    if include_headers {
+                        elements.push(protocol::ElementInfo {
+                            semantic_id: "main-list-reserved-slot".to_string(),
+                            element_type: protocol::ElementType::Panel,
+                            text: None,
+                            value: Some(
+                                serde_json::json!({
+                                    "groupedIndex": grouped_index, "selectableOrdinal": null,
+                                    "selectable": false, "activatable": false, "selected": false,
+                                })
+                                .to_string(),
+                            ),
+                            content: None,
+                            selected: Some(false),
+                            focused: None,
+                            index: None,
+                            role: Some("presentation".to_string()),
+                            kind: Some("reservedSectionSlot".to_string()),
+                            source: Some("mainMenu".to_string()),
+                            source_name: None,
+                            selectable: Some(false),
+                            status_kind: None,
+                            action_disabled: Some("presentationOnly".to_string()),
+                            style: None,
+                        });
+                    }
                 }
                 crate::list_item::GroupedListItem::Item(result_idx) => {
+                    let Some(row) = self
+                        .main_menu_committed_rows()
+                        .iter()
+                        .find(|row| row.grouped_index == grouped_index)
+                    else {
+                        continue;
+                    };
+                    if matches!(row.subject, MainMenuRowSubject::Calculator) {
+                        let Some(calculator) = self.main_menu_committed_calculator() else {
+                            continue;
+                        };
+                        let mut element = protocol::ElementInfo::redacted_choice(
+                            row.selectable_ordinal.unwrap_or(row_index),
+                            &format!("= {}", calculator.formatted),
+                            &calculator.formatted,
+                            Some(grouped_index) == selected_grouped_index,
+                            protocol::ElementContentKind::UserContent,
+                        );
+                        element.semantic_id = row.semantic_id.clone();
+                        element.kind = Some("calculator".to_string());
+                        element.role = Some("row".to_string());
+                        element.selectable = Some(row.eligibility.selectable);
+                        elements.push(element);
+                        row_index += 1;
+                        continue;
+                    }
                     let Some(result) = flat_results.get(*result_idx) else {
                         continue;
                     };
@@ -2937,7 +2839,11 @@ impl ScriptListApp {
                         .is_none()
                         .then(|| result.source_name().map(str::to_string))
                         .flatten();
-                    element.selectable = Some(true);
+                    element.semantic_id = row.semantic_id.clone();
+                    element.index = row.selectable_ordinal;
+                    element.selectable = Some(row.eligibility.selectable);
+                    element.action_disabled = (!row.eligibility.activatable)
+                        .then(|| "main_menu_row_not_activatable".to_string());
                     if let scripts::SearchResult::File(file_match) = result {
                         element.kind =
                             Some(root_file_semantic_kind(file_match.file.file_type).to_string());

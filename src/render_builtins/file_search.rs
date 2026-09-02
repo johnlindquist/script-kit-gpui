@@ -102,6 +102,8 @@ struct FileSearchThumbnailPreviewImage {
     image: Arc<gpui::RenderImage>,
     width: u32,
     height: u32,
+    #[cfg(feature = "owned-ui-evaluation")]
+    content_hash: String,
 }
 
 #[derive(Debug)]
@@ -240,9 +242,19 @@ fn load_file_search_thumbnail_preview(
 ) -> Result<FileSearchThumbnailPreviewImage, FileSearchThumbnailLoadFailure> {
     use anyhow::Context as _;
     use image::GenericImageView as _;
+    #[cfg(feature = "owned-ui-evaluation")]
+    use sha2::{Digest as _, Sha256};
 
     if !file_search_thumbnail_is_decodable_extension(path) {
         return Err(FileSearchThumbnailLoadFailure::UnsupportedFormat);
+    }
+
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy
+            .require_owned_path(std::path::Path::new(path))
+            .map_err(|error| FileSearchThumbnailLoadFailure::UnableToGenerate {
+                reason: error.to_string(),
+            })?;
     }
 
     let metadata = std::fs::metadata(path)
@@ -286,7 +298,7 @@ fn load_file_search_thumbnail_preview(
     }
 
     let mut bgra = decoded_image.to_rgba8();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 
@@ -297,6 +309,8 @@ fn load_file_search_thumbnail_preview(
         image: Arc::new(render_image),
         width,
         height,
+        #[cfg(feature = "owned-ui-evaluation")]
+        content_hash: format!("{:x}", Sha256::digest(&image_bytes)),
     })
 }
 
@@ -433,41 +447,100 @@ fn render_file_search_loading_skeleton(
 }
 
 impl ScriptListApp {
+    pub(crate) fn file_search_preview_request_is_current(
+        &self,
+        request: &FileSearchPreviewRequest,
+    ) -> bool {
+        if request.binding.query != self.root_search.query_stamp() {
+            return false;
+        }
+        let AppView::FileSearchView {
+            query,
+            selected_index,
+            ..
+        } = &self.current_view
+        else {
+            return false;
+        };
+        if query != &request.query_text {
+            return false;
+        }
+        Self::resolve_file_search_selection_projection(
+            &self.file_search_display_indices,
+            self.cached_file_results.len(),
+            *selected_index,
+        )
+        .and_then(|projection| self.cached_file_results.get(projection.result_index))
+        .is_some_and(|file| {
+            file.path == request.file.path
+                && file.name == request.file.name
+                && file.size == request.file.size
+                && file.modified == request.file.modified
+                && file.file_type == request.file.file_type
+        })
+    }
+
     fn ensure_file_search_preview_thumbnail(
         &mut self,
         selected_file: Option<&file_search::FileResult>,
         cx: &mut Context<Self>,
     ) {
-        let thumbnail_path = selected_file
-            .filter(|file| file_search::is_thumbnail_preview_supported(&file.path))
-            .map(|file| file.path.clone());
-
-        let Some(path) = thumbnail_path else {
+        let selected_file =
+            selected_file.filter(|file| file_search::is_thumbnail_preview_supported(&file.path));
+        let Some(file) = selected_file else {
+            self.set_file_search_preview_request(None);
             if !matches!(
                 self.file_search_preview_thumbnail,
                 FileSearchThumbnailPreviewState::Idle
             ) {
                 tracing::debug!("file_search_thumbnail_preview_state_transition: idle");
                 self.file_search_preview_thumbnail = FileSearchThumbnailPreviewState::Idle;
+                self.mark_main_data_changed();
                 cx.notify();
             }
             return;
         };
 
-        let already_loaded_for_path = match &self.file_search_preview_thumbnail {
-            FileSearchThumbnailPreviewState::Loading { path: current_path }
-            | FileSearchThumbnailPreviewState::Ready {
-                path: current_path, ..
-            }
-            | FileSearchThumbnailPreviewState::Unavailable {
-                path: current_path, ..
-            } => current_path == &path,
-            FileSearchThumbnailPreviewState::Idle => false,
-        };
-
-        if already_loaded_for_path {
+        if self.file_search_preview_request().is_some_and(|request| {
+            self.file_search_preview_request_is_current(request)
+                && !matches!(
+                    self.file_search_preview_thumbnail,
+                    FileSearchThumbnailPreviewState::Idle
+                )
+        }) {
             return;
         }
+        let AppView::FileSearchView { query, .. } = &self.current_view else {
+            return;
+        };
+        let query_text = query.clone();
+        let result = scripts::SearchResult::File(scripts::FileMatch {
+            file: file.clone(),
+            score: 0,
+        });
+        let Some(stable_key) = result.stable_selection_key() else {
+            return;
+        };
+        let binding = MainMenuPreviewBinding {
+            query: self.root_search.query_stamp(),
+            stable_key,
+            content_fingerprint: result.main_menu_content_fingerprint(),
+        };
+        let sequence = self.begin_main_menu_preview_work(binding.clone());
+        let request = FileSearchPreviewRequest {
+            binding,
+            query_text,
+            file: file.clone(),
+            sequence,
+            content_hash: None,
+        };
+        let path = file.path.clone();
+        self.set_file_search_preview_request(Some(request.clone()));
+        let file_search_generation = self.file_search_gen;
+        let preview_gate = self
+            .main_services
+            .owned_sources()
+            .and_then(|sources| sources.search_gate.clone());
 
         tracing::debug!(
             path = %path,
@@ -475,6 +548,7 @@ impl ScriptListApp {
         );
         self.file_search_preview_thumbnail =
             FileSearchThumbnailPreviewState::Loading { path: path.clone() };
+        self.mark_main_data_changed();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -503,16 +577,50 @@ impl ScriptListApp {
                     }
                 }
             };
+            // Delay only completion delivery in the compiled owned scenario. The
+            // real metadata/read/decode work above always runs before this gate.
+            let completion_released = match preview_gate {
+                Some(gate) => {
+                    let decoded = decode_result
+                        .as_ref()
+                        .map(|loaded| {
+                            #[cfg(feature = "owned-ui-evaluation")]
+                            {
+                                Some(loaded.content_hash.as_str())
+                            }
+                            #[cfg(not(feature = "owned-ui-evaluation"))]
+                            {
+                                let _ = loaded;
+                                None
+                            }
+                        })
+                        .map_err(|_| ());
+                    gate.wait_for_preview_completion(file_search_generation, &request, decoded)
+                        .await
+                        .is_ok()
+                }
+                None => true,
+            };
 
             let _ = cx.update(|cx| {
                 this.update(cx, |app, cx| {
-                    let is_still_current_request = matches!(
-                        &app.file_search_preview_thumbnail,
-                        FileSearchThumbnailPreviewState::Loading { path: current_path }
-                            if current_path == &path
-                    );
+                    let is_still_current_request = completion_released
+                        && app
+                            .file_search_preview_request()
+                            .is_some_and(|current| current.sequence == request.sequence)
+                        && app.file_search_preview_request_is_current(&request)
+                        && matches!(
+                            &app.file_search_preview_thumbnail,
+                            FileSearchThumbnailPreviewState::Loading { path: current_path }
+                                if current_path == &path
+                        );
 
                     if !is_still_current_request {
+                        app.record_main_menu_preview_work_completion(
+                            request.sequence,
+                            request.binding.clone(),
+                            "discarded",
+                        );
                         tracing::debug!(
                             path = %path,
                             "file_search_thumbnail_preview_stale_result_ignored"
@@ -522,6 +630,17 @@ impl ScriptListApp {
 
                     match decode_result {
                         Ok(loaded) => {
+                            #[cfg(feature = "owned-ui-evaluation")]
+                            {
+                                let mut installed_request = request.clone();
+                                installed_request.content_hash = Some(loaded.content_hash);
+                                app.set_file_search_preview_request(Some(installed_request));
+                            }
+                            app.record_main_menu_preview_work_completion(
+                                request.sequence,
+                                request.binding.clone(),
+                                "installed",
+                            );
                             tracing::debug!(
                                 path = %path,
                                 width = loaded.width,
@@ -537,6 +656,11 @@ impl ScriptListApp {
                                 };
                         }
                         Err(error) => {
+                            app.record_main_menu_preview_work_completion(
+                                request.sequence,
+                                request.binding.clone(),
+                                "failed",
+                            );
                             let message = error.preview_message();
                             tracing::warn!(
                                 path = %path,
@@ -550,6 +674,7 @@ impl ScriptListApp {
                                 };
                         }
                     }
+                    app.mark_main_data_changed();
 
                     cx.notify();
                 })
@@ -821,8 +946,7 @@ impl ScriptListApp {
                                             label = %label,
                                             "Enter in cwd-pick FileSearchView set spine_cwd"
                                         );
-                                        this.spine_cwd =
-                                            Some(std::path::PathBuf::from(&file.path));
+                                        this.spine_cwd = Some(std::path::PathBuf::from(&file.path));
                                         this.spine_cwd_label = Some(label);
                                         this.spine_cwd_revision =
                                             this.spine_cwd_revision.wrapping_add(1);
@@ -860,9 +984,9 @@ impl ScriptListApp {
                                                 .trim_end_matches('/')
                                         );
                                         let next_presentation = match &this.current_view {
-                                            AppView::FileSearchView {
-                                                presentation, ..
-                                            } => *presentation,
+                                            AppView::FileSearchView { presentation, .. } => {
+                                                *presentation
+                                            }
                                             _ => FileSearchPresentation::Full,
                                         };
                                         this.open_file_search_view_preserving_current_results(
@@ -874,14 +998,13 @@ impl ScriptListApp {
                                         return;
                                     }
 
-                                    let part =
-                                        crate::ai::message_parts::AiContextPart::FilePath {
-                                            path: file.path.clone(),
-                                            label: std::path::Path::new(&file.path)
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().to_string())
-                                                .unwrap_or_else(|| file.path.clone()),
-                                        };
+                                    let part = crate::ai::message_parts::AiContextPart::FilePath {
+                                        path: file.path.clone(),
+                                        label: std::path::Path::new(&file.path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| file.path.clone()),
+                                    };
                                     this.close_attachment_portal_with_part(part, cx);
                                     cx.stop_propagation();
                                     return;
@@ -1099,13 +1222,15 @@ impl ScriptListApp {
                                         &list_colors,
                                         is_selected,
                                     ));
+                                #[cfg(all(feature = "owned-ui-evaluation", target_os = "macos"))]
+                                let item = if crate::runtime_policy::is_owned_evaluation() { item.semantic_id(format!("file-search-row:{ix}")) } else { item };
 
-                                div()
+                                let row = div()
                                     .id(ix)
                                     .cursor_pointer()
                                     .on_click(click_handler)
                                     .on_hover(hover_handler)
-                                    .on_drag(
+                                    .when(!crate::runtime_policy::is_owned_evaluation(), |row| row.on_drag(
                                         drag_payload,
                                         move |_payload, _position, window, cx| {
                                             begin_file_search_native_drag(
@@ -1114,8 +1239,18 @@ impl ScriptListApp {
                                                 cx,
                                             )
                                         },
-                                    )
-                                    .child(item)
+                                    ))
+                                    .child(item);
+                                #[cfg(all(feature = "owned-ui-evaluation", target_os = "macos"))]
+                                let row = row.when(crate::runtime_policy::is_owned_evaluation(), |row| {
+                                    let id = format!("file-search-row:{ix}");
+                                    let metadata = std::rc::Rc::new(serde_json::json!({"displayIndex":ix,"resultIndex":_result_idx,
+                                        "path":file.path,"name":file.name,"selected":is_selected}));
+                                    row.child(gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                                        window.record_owned_paint_binding("fileSearchRow",id.clone(),bounds,metadata.clone());
+                                    }).absolute().top_0().left_0().size_full())
+                                });
+                                row
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))
                             }
@@ -1158,6 +1293,50 @@ impl ScriptListApp {
                             FILE_SEARCH_PREVIEW_THUMBNAIL_MAX_SIDE_PX,
                         );
                         let image_for_render = image.clone();
+                        let image_surface =
+                            gpui::img(move |_window: &mut Window, _cx: &mut App| {
+                                Some(Ok(image_for_render.clone()))
+                            })
+                            .w(px(display_width))
+                            .h(px(display_height))
+                            .object_fit(gpui::ObjectFit::Contain)
+                            .rounded(px(design_visual.radius_sm))
+                            .into_any_element();
+                        #[cfg(feature = "owned-ui-evaluation")]
+                        let image_surface = if crate::runtime_policy::is_owned_evaluation() {
+                            if let Some(metadata) = self.owned_file_search_preview_evidence() {
+                                let metadata = std::rc::Rc::new(metadata);
+                                div()
+                                    .relative()
+                                    .w(px(display_width))
+                                    .h(px(display_height))
+                                    .child(image_surface)
+                                    .child(
+                                        gpui::canvas(
+                                            |_, _, _| (),
+                                            move |bounds, _, window, _| {
+                                                if window.owned_frame_observation_active() {
+                                                    window.record_owned_paint_binding(
+                                                        "fileSearchPreviewImage",
+                                                        "file-search-preview-image".to_string(),
+                                                        bounds,
+                                                        metadata.clone(),
+                                                    );
+                                                }
+                                            },
+                                        )
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size_full(),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                image_surface
+                            }
+                        } else {
+                            image_surface
+                        };
                         div()
                             .w_full()
                             .flex()
@@ -1165,15 +1344,7 @@ impl ScriptListApp {
                             .items_center()
                             .justify_center()
                             .gap(px(design_spacing.gap_sm))
-                            .child(
-                                gpui::img(move |_window: &mut Window, _cx: &mut App| {
-                                    Some(Ok(image_for_render.clone()))
-                                })
-                                .w(px(display_width))
-                                .h(px(display_height))
-                                .object_fit(gpui::ObjectFit::Contain)
-                                .rounded(px(design_visual.radius_sm)),
-                            )
+                            .child(image_surface)
                             .child(
                                 div()
                                     .text_xs()
@@ -1206,6 +1377,40 @@ impl ScriptListApp {
                         .text_color(rgb(text_dimmed))
                         .child("Loading thumbnail...")
                         .into_any_element(),
+                };
+                #[cfg(feature = "owned-ui-evaluation")]
+                let preview_body = if crate::runtime_policy::is_owned_evaluation() {
+                    if let Some(metadata) = self.owned_file_search_preview_evidence() {
+                        let metadata = std::rc::Rc::new(metadata);
+                        div()
+                            .relative()
+                            .w_full()
+                            .child(preview_body)
+                            .child(
+                                gpui::canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, window, _| {
+                                        if window.owned_frame_observation_active() {
+                                            window.record_owned_paint_binding(
+                                                "fileSearchPreview",
+                                                "file-search-preview".to_string(),
+                                                bounds,
+                                                metadata.clone(),
+                                            );
+                                        }
+                                    },
+                                )
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full(),
+                            )
+                            .into_any_element()
+                    } else {
+                        preview_body
+                    }
+                } else {
+                    preview_body
                 };
 
                 Some(
@@ -1432,6 +1637,12 @@ impl ScriptListApp {
             .occlude()
             .capture_any_mouse_down(cx.listener(|this, _event, window, cx| {
                 if matches!(this.current_view, AppView::FileSearchView { .. }) {
+                    if this.main_services.host_policy().is_hidden() {
+                        cx.stop_active_drag(window);
+                        this.gpui_input_state.update(cx, |input, cx| input.focus(window, cx));
+                        this.focused_input = FocusedInput::MainFilter;
+                        return;
+                    }
                     let needs_app_reactivate =
                         take_file_search_native_drag_awaiting_app_reactivate();
                     let stopped_drag = cx.stop_active_drag(window);
@@ -1574,11 +1785,10 @@ impl ScriptListApp {
 
         // Glass fallback uses the same rail geometry, button frames, and
         // optically nudged keycaps as the native footer.
-        let gpui_footer =
-            crate::components::footer_chrome::render_static_footer_hint_action_rail(
-                "file-search-footer-action-rail",
-                file_search_hints,
-            );
+        let gpui_footer = crate::components::footer_chrome::render_static_footer_hint_action_rail(
+            "file-search-footer-action-rail",
+            file_search_hints,
+        );
         let footer = self.main_window_footer_slot(gpui_footer);
 
         let root = crate::components::main_view_chrome::render_main_view_shell()
@@ -1586,6 +1796,30 @@ impl ScriptListApp {
             .key_context("FileSearchView")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key);
+        #[cfg(all(feature = "owned-ui-evaluation", target_os = "macos"))]
+        let root = root.when(crate::runtime_policy::is_owned_evaluation(), |root| {
+            let metadata = std::rc::Rc::new(
+                self.owned_file_search_frame_evidence()
+                    .expect("FileSearch renderer has FileSearch owner"),
+            );
+            root.child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.record_owned_paint_binding(
+                            "fileSearch",
+                            "file-search".into(),
+                            bounds,
+                            metadata.clone(),
+                        );
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+        });
 
         let main = if is_mini {
             div()

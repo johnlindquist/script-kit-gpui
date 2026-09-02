@@ -441,6 +441,9 @@ impl ScriptListApp {
                 *active_field = (active + 1) % 3;
                 cx.notify();
             } else if crate::ui_foundation::is_key_enter(key) {
+                if self.prompt_completion.as_ref().is_some_and(|binding| binding.observation().completed) {
+                    return;
+                }
                 let form_action = CreateAiPresetFormAction::Submit;
                 let name_val = name.clone();
                 let prompt_val = system_prompt.clone();
@@ -454,12 +457,28 @@ impl ScriptListApp {
                             action = "create_preset_success",
                             "AI preset created"
                         );
-                        self.show_hud(
-                            form_action.success_hud(&preset.name),
-                            Some(HUD_SHORT_MS),
-                            cx,
-                        );
-                        self.go_back_or_close(window, cx);
+                        if let Some(binding) = &self.prompt_completion {
+                            let outcome = serde_json::to_value(&preset).map(crate::protocol::SubmitValue::Json)
+                                .map(crate::prompt_completion::PromptOutcome::Submitted);
+                            match outcome {
+                                Ok(outcome) => {
+                                    if let Err(error) = binding.try_complete(outcome) {
+                                        self.show_error_toast(form_action.failure_message(error), cx);
+                                        return;
+                                    }
+                                }
+                                Err(error) => {
+                                    self.show_error_toast(form_action.failure_message(error), cx);
+                                    return;
+                                }
+                            }
+                        }
+                        if crate::runtime_policy::is_owned_evaluation() {
+                            cx.notify();
+                        } else {
+                            self.show_hud(form_action.success_hud(&preset.name), Some(HUD_SHORT_MS), cx);
+                            self.go_back_or_close(window, cx);
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -473,6 +492,12 @@ impl ScriptListApp {
                     }
                 }
             } else if crate::ui_foundation::is_key_escape(key) {
+                if let Some(binding) = &self.prompt_completion {
+                    if let Err(error) = binding.try_complete(crate::prompt_completion::PromptOutcome::Cancelled) {
+                        self.show_error_toast(format!("Preset cancellation failed: {error}"), cx);
+                        return;
+                    }
+                }
                 self.go_back_or_close(window, cx);
             } else if crate::ui_foundation::is_key_backspace(key) {
                 match active {
@@ -487,7 +512,7 @@ impl ScriptListApp {
                     }
                 }
                 cx.notify();
-            } else if key.len() == 1 {
+            } else if key.chars().count() == 1 {
                 match active {
                     0 => name.push_str(key),
                     1 => system_prompt.push_str(key),

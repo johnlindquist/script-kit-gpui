@@ -116,6 +116,20 @@ export function classifyReceiptEvidence(receipt: ReceiptObject): EvidenceObserva
     );
   }
 
+  const levels = Array.isArray(receipt.proofLevels) ? receipt.proofLevels : [receipt.proofLevel];
+  if ((evidenceClass === "UNIT_BEHAVIOR" || evidenceClass === "STATIC_INVENTORY") && receipt.provesRuntimeBehavior === true)
+    errors.push("library or catalogue evidence cannot establish production runtime behavior");
+  if (levels.includes("native-AppKit") && receipt.ownedEvaluation === true)
+    errors.push("owned evaluator explicitly excludes native AppKit/system proof");
+  if (levels.includes("hidden-native-framebuffer")) {
+    const observations = Array.isArray(receipt.framebufferObservations) ? receipt.framebufferObservations : [];
+    if (!observations.length || observations.some(value => {
+      const capture = object(value); const frame = object(capture.frameIdentity); const target = object(frame.target);
+      return capture.source !== "gpuiRenderReadback" || capture.scope !== "liveAutomationWindowRenderReadback" ||
+        capture.status !== "captured" || !Number.isSafeInteger(target.frameGeneration) || Number(target.frameGeneration) <= 0;
+    })) errors.push("framebuffer proof requires actual qualified completed-scene observations");
+  }
+
   return {
     evidenceClass,
     observedWindowVisible,

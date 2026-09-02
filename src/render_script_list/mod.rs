@@ -4,124 +4,11 @@ use crate::ui_foundation::{
     is_key_down as sk_is_key_down, is_key_enter as sk_is_key_enter,
     is_key_escape as sk_is_key_escape, is_key_tab as sk_is_key_tab, is_key_up as sk_is_key_up,
 };
+#[cfg(test)]
+use crate::ui_window::{app_shell_footer_colors, script_list_footer_info_label};
 use gpui_component::scroll::Scrollbar as GpuiScrollbar;
 
-// --- merged from part_000.rs ---
-fn app_shell_footer_colors(theme: &crate::theme::Theme) -> PromptFooterColors {
-    PromptFooterColors::from_theme(theme)
-}
-
-fn script_list_footer_info_label(
-    window_tweaker_enabled: bool,
-    is_dark_mode: bool,
-    opacity_percent: i32,
-    material: &str,
-    appearance: &str,
-) -> Option<String> {
-    if window_tweaker_enabled && !is_dark_mode {
-        Some(format!(
-            "{}% | {} | {} | ⌘-/+ ⌘M ⌘⇧A",
-            opacity_percent, material, appearance
-        ))
-    } else {
-        None
-    }
-}
-
-fn inline_calc_list_item_title(formatted_result: &str) -> String {
-    format!("= {}", formatted_result)
-}
-
-fn inline_calc_list_copy_hint() -> &'static str {
-    "↵ Copy"
-}
-
-fn inline_calc_list_item_result_text_color(
-    is_selected: bool,
-    design_variant: DesignVariant,
-    theme: &crate::theme::Theme,
-    color_resolver: crate::theme::ColorResolver,
-) -> u32 {
-    if is_selected && design_variant != DesignVariant::Default {
-        color_resolver.primary_accent()
-    } else if is_selected {
-        theme.colors.accent.selected
-    } else {
-        color_resolver.primary_text_color()
-    }
-}
-
-fn inline_calc_list_item_hint_text_color(color_resolver: crate::theme::ColorResolver) -> u32 {
-    color_resolver.empty_text_color()
-}
-
-fn inline_calc_list_item_selected_overlay_rgba(
-    theme: &crate::theme::Theme,
-    list_tokens: crate::designs::MainMenuListTokens,
-    color_resolver: crate::theme::ColorResolver,
-) -> u32 {
-    let selected_overlay_alpha = ((theme.get_opacity().selected.clamp(0.0, 1.0) * 255.0).round()
-        as u32)
-        .max(list_tokens.inline_calc_selected_overlay_min_alpha);
-    (color_resolver.primary_accent() << 8) | selected_overlay_alpha
-}
-
-fn render_inline_calc_list_item(
-    calculator: &crate::calculator::CalculatorInlineResult,
-    is_selected: bool,
-    theme: &crate::theme::Theme,
-    list_tokens: crate::designs::MainMenuListTokens,
-    design_variant: DesignVariant,
-    color_resolver: crate::theme::ColorResolver,
-) -> AnyElement {
-    let tokens = get_tokens(design_variant);
-    let spacing = tokens.spacing();
-    let typography = tokens.typography();
-
-    let result_title = inline_calc_list_item_title(&calculator.formatted);
-    let result_text_color =
-        inline_calc_list_item_result_text_color(is_selected, design_variant, theme, color_resolver);
-    let hint_text_color = inline_calc_list_item_hint_text_color(color_resolver);
-    let hint_alpha = if is_selected {
-        list_tokens.inline_calc_selected_hint_alpha
-    } else {
-        list_tokens.inline_calc_hint_alpha
-    };
-
-    div()
-        .w_full()
-        .h_full()
-        .px(px(spacing.item_padding_x))
-        .py(px(spacing.padding_xs))
-        .when(is_selected, |div| {
-            div.bg(rgba(inline_calc_list_item_selected_overlay_rgba(
-                theme,
-                list_tokens,
-                color_resolver,
-            )))
-        })
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(spacing.gap_md))
-        .child(
-            div()
-                .flex_1()
-                .overflow_x_hidden()
-                .text_size(px(list_tokens.inline_calc_result_font_size))
-                .font_weight(typography.font_weight_semibold)
-                .text_color(rgb(result_text_color))
-                .child(result_title),
-        )
-        .child(
-            div()
-                .text_size(px(list_tokens.inline_calc_hint_font_size))
-                .text_color(rgba((hint_text_color << 8) | hint_alpha))
-                .child(inline_calc_list_copy_hint()),
-        )
-        .into_any_element()
-}
+include!("inline_calculator.rs");
 
 fn menu_syntax_hint_tone_color(
     theme: &crate::theme::Theme,
@@ -669,6 +556,7 @@ fn spine_projection_icon_kind(
 
 fn render_spine_projection_row(
     row: &crate::spine::SpineListRow,
+    semantic_id: Option<String>,
     ix: usize,
     is_selected: bool,
     is_hovered: bool,
@@ -682,7 +570,7 @@ fn render_spine_projection_row(
         .selected(is_selected)
         .hovered(is_hovered)
         .main_menu_theme(main_menu_theme)
-        .semantic_id(row.id.to_string())
+        .semantic_id_opt(semantic_id)
         .description_opt(
             row.subtitle
                 .as_ref()
@@ -699,18 +587,6 @@ fn render_spine_projection_row(
                 .map(|meta: &gpui::SharedString| meta.to_string()),
         )
         .into_any_element()
-}
-
-fn selected_index_for_script_list_render(
-    grouped_items: &[GroupedListItem],
-    selected_index: usize,
-    selection_suppressed: bool,
-) -> usize {
-    if selection_suppressed {
-        usize::MAX
-    } else {
-        crate::list_item::coerce_selection(grouped_items, selected_index).unwrap_or(0)
-    }
 }
 
 impl ScriptListApp {
@@ -731,6 +607,7 @@ impl ScriptListApp {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.flush_pending_main_menu_query(cx);
         // Key-repeat coalescing: a recalled filter that has not rendered yet
         // means further history steps must wait (same guard as the real-key
         // path).
@@ -745,10 +622,11 @@ impl ScriptListApp {
 
         let source_filter_mode = self.source_filter_mode_blocks_input_history_recall();
         let filter_has_text = !self.filter_text.is_empty() || !self.computed_filter_text.is_empty();
-        let (grouped_items, _) = self.get_grouped_results_cached();
-        let first_item_position = grouped_items
+        let first_item_position = self
+            .main_menu_committed_rows()
             .iter()
-            .position(|item| matches!(item, crate::list_item::GroupedListItem::Item(_)));
+            .find(|row| row.eligibility.selectable)
+            .map(|row| row.grouped_index);
         let at_top_of_list = first_item_position
             .map(|position| self.selected_index <= position)
             .unwrap_or(true);
@@ -972,14 +850,13 @@ impl ScriptListApp {
         let grouped_items = grouped_items.clone();
         let flat_results = flat_results.clone();
 
-        // Render with a pure, valid selectable snapshot so a newly replaced
-        // list cannot paint its first visible item as unfocused for one frame
-        // before event-side selection validation catches up.
-        let spine_selection_render_index = selected_index_for_script_list_render(
-            &grouped_items,
-            self.selected_index,
-            self.spine_empty_subsearch_selection_suppressed(),
-        );
+        let spine_selection_render_index = self
+            .resolved_main_menu_selected_subject()
+            .map(|subject| match subject {
+                ResolvedMainMenuSelection::SearchResult { row, .. }
+                | ResolvedMainMenuSelection::Calculator { row, .. } => row.grouped_index,
+            })
+            .unwrap_or(usize::MAX);
 
         // --- Storybook live-spec override (read-only, no state mutation) ---
         // grouped_items / flat_results are Arc<[T]> from cache; when the storybook
@@ -1195,6 +1072,9 @@ impl ScriptListApp {
             // Clone grouped_items and flat_results for the closure
             let grouped_items_clone = grouped_items.clone();
             let flat_results_clone = flat_results.clone();
+            let projected_rows = self.main_menu_committed_rows_snapshot();
+            let committed_calculator = self.main_menu_committed_calculator().cloned();
+            let painted_query = self.main_menu_committed_query_stamp();
 
             let current_main_menu_theme = self.current_main_menu_theme;
             let hide_initial_section_header = current_main_menu_theme
@@ -1264,17 +1144,31 @@ impl ScriptListApp {
                                         })
                                         .into_any_element()
                                 }
-                                GroupedListItem::ReservedSectionSlot => div()
-                                    .id(ElementId::NamedInteger(
-                                        format!("section-slot-reserved-gen-{row_generation}").into(),
-                                        ix as u64,
-                                    ))
-                                    .h(px(
-                                        crate::list_item::effective_first_section_header_height_for_theme(
-                                            current_main_menu_theme,
-                                        ),
-                                    ))
-                                    .into_any_element(),
+                                GroupedListItem::ReservedSectionSlot => {
+                                    let slot = div()
+                                        .id(ElementId::NamedInteger(
+                                            format!("section-slot-reserved-gen-{row_generation}").into(),
+                                            ix as u64,
+                                        ))
+                                        .h(px(
+                                            crate::list_item::effective_first_section_header_height_for_theme(
+                                                current_main_menu_theme,
+                                            ),
+                                        ));
+                                    #[cfg(feature = "owned-ui-evaluation")]
+                                    let slot = slot.when(crate::runtime_policy::is_owned_evaluation(), |slot| {
+                                        let metadata = std::rc::Rc::new(serde_json::json!({
+                                            "groupedIndex":ix,"selectableOrdinal":null,"selectable":false,"activatable":false,"selected":false,
+                                        }));
+                                        slot.debug_selector(|| "main-list-reserved-slot".to_string())
+                                            .child(gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                                                if window.owned_frame_observation_active() {
+                                                    window.record_owned_paint_binding("mainSearchReservedSlot", "main-list-reserved-slot".into(), bounds, metadata.clone());
+                                                }
+                                            }).absolute().top_0().left_0().size_full())
+                                    });
+                                    slot.into_any_element()
+                                }
                                 GroupedListItem::Status(status) => {
                                     div()
                                         .id(ElementId::NamedInteger(
@@ -1293,8 +1187,10 @@ impl ScriptListApp {
                                         .into_any_element()
                                 }
                                 GroupedListItem::Item(result_idx) => {
-                                    // Regular item at 40px height (LIST_ITEM_HEIGHT)
-                                    let is_selected = ix == current_selected;
+                                    let row = projected_rows.iter().find(|row| row.grouped_index == ix);
+                                    let is_selected = row.is_some_and(|row| row.eligibility.selectable) && ix == current_selected;
+                                    let pointer_row = row.cloned();
+                                    let click_row = row.cloned();
                                     // Hover gating is now handled by ListItem via GPUI input modality
                                     let is_hovered = current_hovered == Some(ix);
 
@@ -1317,157 +1213,48 @@ impl ScriptListApp {
                                         },
                                     );
                                     let mouse_down_handler = cx.listener(
-                                        move |this: &mut ScriptListApp,
-                                              event: &gpui::MouseDownEvent,
-                                              window,
-                                              cx| {
-                                            let trigger_owns = this
-                                                .menu_syntax_trigger_picker_owns_main_keyboard();
-                                            let row_id = this
-                                                .menu_syntax_trigger_row_id_from_main_list_index(ix);
-                                            logging::log(
-                                                "UI",
-                                                &format!(
-                                                    "main_list_row_mouse_down_seen ix={} x={:.1} y={:.1} trigger_owns={} row_id={:?} filter='{}' computed='{}' selected_index={}",
-                                                    ix,
-                                                    event.position.x.as_f32(),
-                                                    event.position.y.as_f32(),
-                                                    trigger_owns,
-                                                    row_id,
-                                                    this.filter_text,
-                                                    this.computed_filter_text,
-                                                    this.selected_index
-                                                ),
-                                            );
-                                            if this.menu_syntax_trigger_picker_owns_main_keyboard()
-                                            {
-                                                if let Some(row_id) = row_id {
-                                                    logging::log(
-                                                        "UI",
-                                                        &format!(
-                                                            "Menu-syntax trigger picker row mouse-down accepting row_id={} item={}",
-                                                            row_id, ix
-                                                        ),
-                                                    );
-                                                    this.accept_menu_syntax_trigger_picker_row(
-                                                        &row_id,
-                                                        Some(window),
-                                                        cx,
-                                                    );
-                                                    this.menu_syntax_trigger_picker_suppress_next_launcher_click = true;
-                                                    cx.stop_propagation();
-                                                }
-                                            }
+                                        move |this: &mut ScriptListApp, _event: &gpui::MouseDownEvent, _window, _cx| {
+                                            this.main_menu_pointer_press = None;
+                                            let Some(row) = pointer_row.as_ref() else { return; };
+                                            let Some(query) = painted_query else { return; };
+                                            let Some(current) = this.resolve_main_menu_semantic_row(&row.semantic_id) else { return; };
+                                            if query != this.root_search.query_stamp() || current.content_fingerprint != row.content_fingerprint { return; }
+                                            this.main_menu_pointer_press = Some(MainMenuPointerPress {
+                                                query, stable_key: row.stable_key.clone(), content_fingerprint: row.content_fingerprint.clone(),
+                                            });
                                         },
                                     );
 
-                                    // Create click handler matching launcher click semantics
                                     let click_handler = cx.listener(
-                                        move |this: &mut ScriptListApp,
-                                              event: &gpui::ClickEvent,
-                                              window,
-                                              cx| {
-                                            let click_count = event.click_count();
-                                            this.note_list_pointer_click(ix, cx);
-                                            if this.menu_syntax_trigger_picker_suppress_next_launcher_click {
-                                                logging::log(
-                                                    "UI",
-                                                    &format!(
-                                                        "main_list_row_click_seen ix={} click_count={} suppress_next=true was_selected=false trigger_owns={} filter='{}' computed='{}' selected_index={}",
-                                                        ix,
-                                                        click_count,
-                                                        this.menu_syntax_trigger_picker_owns_main_keyboard(),
-                                                        this.filter_text,
-                                                        this.computed_filter_text,
-                                                        this.selected_index
-                                                    ),
-                                                );
-                                                logging::log(
-                                                    "UI",
-                                                    &format!(
-                                                        "Menu-syntax trigger picker consumed trailing launcher click item={}",
-                                                        ix
-                                                    ),
-                                                );
-                                                this.menu_syntax_trigger_picker_suppress_next_launcher_click = false;
-                                                cx.stop_propagation();
-                                                return;
-                                            }
-                                            // While the empty colon mode renders unarmed, no row
-                                            // reads as "already selected", so the first click
-                                            // arms + selects instead of submitting the internal
-                                            // selection the user never saw.
-                                            let was_selected = this.selected_index == ix
-                                                && !this.spine_empty_subsearch_selection_suppressed();
-                                            logging::log(
-                                                "UI",
-                                                &format!(
-                                                    "main_list_row_click_seen ix={} click_count={} suppress_next=false was_selected={} trigger_owns={} filter='{}' computed='{}' selected_index={}",
-                                                    ix,
-                                                    click_count,
-                                                    was_selected,
-                                                    this.menu_syntax_trigger_picker_owns_main_keyboard(),
-                                                    this.filter_text,
-                                                    this.computed_filter_text,
-                                                    this.selected_index
-                                                ),
-                                            );
-                                            this.arm_spine_empty_subsearch_selection();
-                                            this.mark_main_menu_selection_user_moved();
-                                            // Always select the item on any click
-                                            if !was_selected {
-                                                this.clear_menu_syntax_filter_accept_hint();
-                                                this.selected_index = ix;
-                                                cx.notify();
-                                            }
-
-                                            if crate::ui_foundation::should_submit_selected_row_click(
-                                                was_selected,
-                                                click_count,
-                                            ) {
+                                        move |this: &mut ScriptListApp, event: &gpui::ClickEvent, window, cx| {
+                                            let Some(press) = this.main_menu_pointer_press.take() else { return; };
+                                            let Some(painted) = click_row.as_ref() else { return; };
+                                            if press.query != this.root_search.query_stamp() || press.stable_key != painted.stable_key || press.content_fingerprint != painted.content_fingerprint { return; }
+                                            let Some(current) = this.resolve_main_menu_semantic_row(&painted.semantic_id) else { return; };
+                                            if current.content_fingerprint != press.content_fingerprint { return; }
+                                            let grouped_index = current.grouped_index;
+                                            let activatable = current.eligibility.activatable;
+                                            let was_selected = this.resolved_main_menu_selected_subject().is_some_and(|subject| match subject {
+                                                ResolvedMainMenuSelection::SearchResult { row, .. } | ResolvedMainMenuSelection::Calculator { row, .. } => row.stable_key == press.stable_key,
+                                            });
+                                            if !this.select_main_menu_row(grouped_index, MainMenuSelectionOrigin::Pointer, cx) { return; }
+                                            this.note_list_pointer_click(grouped_index, cx);
+                                            this.clear_menu_syntax_filter_accept_hint();
+                                            cx.notify();
+                                            if !activatable { return; }
+                                            if this.menu_syntax_trigger_picker_owns_main_keyboard() {
+                                                if let Some(row_id) = this.selected_menu_syntax_trigger_row_id_from_main_list() {
+                                                    this.accept_menu_syntax_trigger_picker_row(&row_id, Some(window), cx);
+                                                }
+                                            } else if crate::ui_foundation::should_submit_selected_row_click(was_selected, event.click_count()) {
                                                 if this.spine_projection_owns_main_list() {
                                                     this.accept_spine_projection_row(window, cx);
-                                                } else if this
-                                                    .menu_syntax_object_selector_owns_main_keyboard()
-                                                {
-                                                    if let Some(row_id) = this
-                                                        .selected_menu_syntax_object_selector_row_id_from_main_list()
-                                                    {
-                                                        this.accept_menu_syntax_object_selector_row(
-                                                            &row_id,
-                                                            Some(window),
-                                                            cx,
-                                                        );
-                                                    }
-                                                } else if this
-                                                    .menu_syntax_trigger_picker_owns_main_keyboard()
-                                                {
-                                                    if let Some(row_id) = this
-                                                        .selected_menu_syntax_trigger_row_id_from_main_list()
-                                                    {
-                                                        logging::log(
-                                                            "UI",
-                                                            &format!(
-                                                                "Menu-syntax trigger picker row click accepting row_id={} item={} click_count={}",
-                                                                row_id, ix, click_count
-                                                            ),
-                                                        );
-                                                        this.accept_menu_syntax_trigger_picker_row(
-                                                            &row_id,
-                                                            Some(window),
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
+                                                } else if this.menu_syntax_object_selector_owns_main_keyboard() {
+                                                    if let Some(row_id) = this.selected_menu_syntax_object_selector_row_id_from_main_list() {
+                                                        this.accept_menu_syntax_object_selector_row(&row_id, Some(window), cx);
                                                     }
                                                 } else {
-                                                    logging::log(
-                                                        "UI",
-                                                        &format!(
-                                                            "Launcher row click submitting item {} (click_count={})",
-                                                            ix, click_count
-                                                        ),
-                                                    );
-                                                    this.execute_selected(cx);
+                                                    let _dispatch = this.execute_selected(cx);
                                                 }
                                             }
                                         },
@@ -1477,14 +1264,18 @@ impl ScriptListApp {
                                     // Note: Confirmation for dangerous builtins is now handled
                                     // via modal dialog, not inline overlay
                                     let design_render_start = std::time::Instant::now();
-                                    let inline_calculator =
-                                        this.inline_calculator_for_result_index(*result_idx);
+                                    let inline_calculator = row.filter(|row| matches!(row.subject, MainMenuRowSubject::Calculator)).and(committed_calculator.as_ref());
+                                    let row_semantic_id = row.map(|row| row.semantic_id.clone());
+                                    let row_debug_selector = row_semantic_id
+                                        .as_deref()
+                                        .map(|semantic_id| format!("list-row:{semantic_id}"));
                                     let mut item_name = "inline-calculator";
                                     let item_element = if let Some(calculator) = inline_calculator
                                     {
                                         let _legacy_calculator_renderer = render_calculator_item;
                                         render_inline_calc_list_item(
                                             calculator,
+                                            row_semantic_id,
                                             is_selected,
                                             &this.theme,
                                             this.current_main_menu_theme.def().list,
@@ -1499,6 +1290,7 @@ impl ScriptListApp {
                                         {
                                             render_spine_projection_row(
                                                 row,
+                                                row_semantic_id,
                                                 ix,
                                                 is_selected,
                                                 is_hovered,
@@ -1510,6 +1302,7 @@ impl ScriptListApp {
                                                 current_design,
                                                 current_main_menu_theme,
                                                 result,
+                                                row_semantic_id,
                                                 ix,
                                                 is_selected,
                                                 is_hovered,
@@ -1521,15 +1314,6 @@ impl ScriptListApp {
                                         item_name = "<missing-result>";
                                         div().h(px(effective_list_item_height)).into_any_element()
                                     };
-                                    let row_debug_selector = flat_results_clone
-                                        .get(*result_idx)
-                                        .and_then(crate::scripts::SearchResult::stable_selection_key)
-                                        .map(|stable_key| {
-                                            format!(
-                                                "list-row:{}",
-                                                main_list_row_semantic_id(&stable_key)
-                                            )
-                                        });
                                     let design_elapsed = design_render_start.elapsed();
 
                                     // Log slow items (>1ms)
@@ -1545,8 +1329,16 @@ impl ScriptListApp {
                                             ),
                                         );
                                     }
+                                    #[cfg(feature = "owned-ui-evaluation")]
+                                    let paint_binding = crate::runtime_policy::is_owned_evaluation().then(|| row.map(|row| (row.semantic_id.clone(), serde_json::json!({
+                                        "stableKey": row.stable_key, "contentFingerprint": row.content_fingerprint,
+                                        "selected": is_selected, "activatable": row.eligibility.activatable,
+                                        "groupedIndex": row.grouped_index, "selectableOrdinal": row.selectable_ordinal,
+                                        "subjectKind": match row.subject { MainMenuRowSubject::SearchResult { .. } => "searchResult", MainMenuRowSubject::Calculator => "calculator" },
+                                    })))).flatten();
 
-                                    div()
+                                    let row_element = div()
+                                        .relative()
                                         .id(ElementId::NamedInteger(
                                             format!("script-item-gen-{row_generation}").into(),
                                             ix as u64,
@@ -1559,8 +1351,17 @@ impl ScriptListApp {
                                         .when_some(row_debug_selector, |this, selector| {
                                             this.debug_selector(move || selector)
                                         })
-                                        .child(item_element)
-                                        .into_any_element()
+                                        .child(item_element);
+                                    #[cfg(feature = "owned-ui-evaluation")]
+                                    let row_element = row_element.when_some(paint_binding, |element, (id, metadata)| {
+                                        let metadata = std::rc::Rc::new(metadata);
+                                        element.child(gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                                            if window.owned_frame_observation_active() {
+                                                window.record_owned_paint_binding("mainSearchRow", id.clone(), bounds, metadata.clone());
+                                            }
+                                        }).absolute().top_0().left_0().size_full())
+                                    });
+                                    row_element.into_any_element()
                                 }
                             }
                         } else {
@@ -1626,6 +1427,11 @@ impl ScriptListApp {
                     .right_0()
                     .h(safe_viewport_height)
                     .w(px(self.current_main_menu_theme.def().list.scrollbar_width))
+                    // Own pointer hits over the real track without blocking the
+                    // list's native wheel handling or this capture observer.
+                    .when(content_height > safe_viewport_height, |overlay| {
+                        overlay.block_mouse_except_scroll()
+                    })
                     .capture_any_mouse_down(cx.listener(
                         |this, event: &gpui::MouseDownEvent, _window, cx| {
                             if event.button != gpui::MouseButton::Left {
@@ -1687,8 +1493,13 @@ impl ScriptListApp {
 
         // Log panel - uses pre-extracted theme values to avoid borrow conflicts
         let log_panel = if self.show_logs {
-            let logs = logging::get_last_logs(10);
+            let logs = self
+                .main_services
+                .owned_sources()
+                .map(|sources| sources.overlay_logs.clone())
+                .unwrap_or_else(|| logging::get_last_logs(10));
             let mut log_container = div()
+                .debug_selector(|| "main-log-panel".into())
                 .flex()
                 .flex_col()
                 .w_full()
@@ -1947,37 +1758,6 @@ impl ScriptListApp {
 
                 // Actions popup keyboard routing is handled above via route_key_to_actions_dialog
 
-                // LEGACY: Check if we're in fallback mode (no script matches, showing fallback commands)
-                // Note: This is legacy code that handled a separate fallback rendering path.
-                // Now fallbacks flow through GroupedListItem from grouping.rs, so this
-                // branch should rarely (if ever) be triggered. The normal navigation below
-                // handles fallback items in the unified list.
-                if this.main_menu_fallback_state.is_active() {
-                    match key_str {
-                        key if sk_is_key_up(key) => {
-                            if this.main_menu_fallback_state.move_up() {
-                                cx.notify();
-                            }
-                        }
-                        key if sk_is_key_down(key) => {
-                            if this.main_menu_fallback_state.move_down() {
-                                cx.notify();
-                            }
-                        }
-                        key if sk_is_key_enter(key) => {
-                            if !this.gpui_input_focused {
-                                this.execute_selected_fallback(cx);
-                            }
-                        }
-                        key if sk_is_key_escape(key) => {
-                            // Clear filter to exit fallback mode
-                            this.clear_filter(window, cx);
-                        }
-                        _ => {}
-                    }
-                    return;
-                }
-
                 // Run 12 Pass 13 — `ai-proposal-accept-dismiss`. When the
                 // inline AI proposal hint card is up, Tab/Enter accepts and
                 // Esc dismisses BEFORE the legacy navigation/clear handlers
@@ -2042,17 +1822,16 @@ impl ScriptListApp {
                     }
                     key if sk_is_key_enter(key) => {
                         if !this.gpui_input_focused {
-                            this.execute_selected(cx);
+                            let _dispatch = this.execute_selected(cx);
                         }
                     }
-                    key if sk_is_key_escape(key) => {
-                        if this.apply_shared_launcher_escape("physical_bubble", window, cx)
-                            == crate::window_orchestrator::interaction::LauncherEscapeDecision::DismissMain
-                        {
-                            // Preserve the physical route's established
-                            // calibrated close/reset ownership.
-                            this.close_and_reset_window(cx);
-                        }
+                    key if sk_is_key_escape(key)
+                        && this.apply_shared_launcher_escape("physical_bubble", window, cx)
+                            == crate::window_orchestrator::interaction::LauncherEscapeDecision::DismissMain =>
+                    {
+                        // Preserve the physical route's established
+                        // calibrated close/reset ownership.
+                        this.close_and_reset_window(cx);
                     }
                     _ => {}
                 }
@@ -2207,6 +1986,29 @@ impl ScriptListApp {
             ))
             .on_key_down(handle_key)
             .on_key_up(handle_key_up);
+        #[cfg(feature = "owned-ui-evaluation")]
+        let root = root.when(crate::runtime_policy::is_owned_evaluation(), |root| {
+            let metadata = std::rc::Rc::new(self.owned_search_frame_evidence());
+            root.child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if window.owned_frame_observation_active() {
+                            window.record_owned_paint_binding(
+                                "mainSearch",
+                                "main-search".to_string(),
+                                bounds,
+                                metadata.clone(),
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+        });
 
         let input_body = if handler_form_owns_input_for_render
             && menu_syntax_text_contains_line_break(&filter_text_for_render)

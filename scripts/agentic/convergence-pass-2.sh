@@ -11,7 +11,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 OUTPUT_BASE="$REPO_ROOT/.test-output/convergence-pass-2"
-ARTIFACT="$REPO_ROOT/target-agent/artifacts/convergence-pass-2/script-kit-gpui"
+ARTIFACT=""
+ARTIFACT_REFERENCE=""
+BUILD_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+BUILD_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 LEDGER="$REPO_ROOT/.notes/chaos-ledger.md"
 ROW_TIMEOUT_SECONDS="${CONVERGENCE_ROW_TIMEOUT_SECONDS:-300}"
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
@@ -81,13 +84,14 @@ build_and_hash_artifact() {
   mkdir -p "$RUN_ROOT"
   {
     printf 'started_at=%s\n' "$(timestamp)"
-    printf 'command=SCRIPT_KIT_AGENT_TARGET_BUDGET_GB=55 SCRIPT_KIT_AGENT_ARTIFACT_NAME=convergence-pass-2 ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui\n'
+    printf 'command=bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out <run>/artifact.reference.json\n'
   } > "$RUN_ROOT/artifact-build.meta"
 
+  ARTIFACT_REFERENCE="$RUN_ROOT/artifact.reference.json"
   SCRIPT_KIT_AGENT_TARGET_BUDGET_GB=55 \
-    SCRIPT_KIT_AGENT_ARTIFACT_NAME=convergence-pass-2 \
-    ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui \
+    bun scripts/devtools/devtools.ts build-ops act app-build --artifact-out "$ARTIFACT_REFERENCE" \
     > "$RUN_ROOT/artifact-build.log" 2>&1
+  ARTIFACT="$(bun scripts/agentic/build-artifact.ts verify-reference "$REPO_ROOT" "$ARTIFACT_REFERENCE")"
 
   test -x "$ARTIFACT"
   ARTIFACT_SHA256="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
@@ -97,6 +101,9 @@ build_and_hash_artifact() {
 }
 
 verify_frozen_artifact() {
+  local verified
+  verified="$(bun scripts/agentic/build-artifact.ts verify-reference "$REPO_ROOT" "$ARTIFACT_REFERENCE")" || return 1
+  [[ "$verified" == "$ARTIFACT" ]] || return 1
   local current
   current="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
   if [[ "$current" != "$ARTIFACT_SHA256" ]]; then
@@ -184,10 +191,13 @@ run_row() {
 
   set +e
   HOME="$row_dir/home" \
+    CARGO_HOME="$BUILD_CARGO_HOME" \
+    RUSTUP_HOME="$BUILD_RUSTUP_HOME" \
     SK_PATH="$row_dir/home/.scriptkit" \
     TMPDIR="$row_dir/tmp" \
     SCRIPT_KIT_SESSION_DIR="$row_dir/sessions" \
     SCRIPT_KIT_GPUI_BINARY="$ARTIFACT" \
+    SCRIPT_KIT_ARTIFACT_REFERENCE="$ARTIFACT_REFERENCE" \
     PROBE_BINARY="$ARTIFACT" \
     CONVERGENCE_ROW_OUTPUT_DIR="$row_dir" \
     "$TIMEOUT_BIN" --signal=TERM --kill-after=5 "${ROW_TIMEOUT_SECONDS}s" \
@@ -213,6 +223,7 @@ run_row_zero() {
   before="$(loadavg_1m)"
   set +e
   SCRIPT_KIT_GPUI_BINARY="$ARTIFACT" \
+    SCRIPT_KIT_ARTIFACT_REFERENCE="$ARTIFACT_REFERENCE" \
     bun scripts/agentic/root-typing-lag-benchmark.ts \
       --hidden-dry-run --output-dir "$row_dir/probe" \
       > "$row_dir/console.log" 2>&1

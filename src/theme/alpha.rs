@@ -12,25 +12,30 @@
 //! - [`AlphaByte::from_normalized_rounded`] — round-to-nearest
 //!   (`(clamp * 255.0).round() as u8`), for boundaries whose pre-existing
 //!   algorithm rounds. The two algorithms are deliberately NOT unified.
-//! - [`AlphaByte::from_authored_f32`] — transitional bridge for authored byte
-//!   values that are still stored as `f32` in structs whose field-type flip is
-//!   blocked on the design-contract integration owner (see
-//!   `src/components/conversation_style.rs`). It preserves the historical
-//!   `alpha.round() as u32` packer cast exactly and debug-asserts the byte
-//!   range so a normalized opacity cannot silently slip through as ~0 or a
-//!   giant value cannot truncate.
 //!
 //! `AlphaByte` intentionally derives NO serde traits: a serializer must state
 //! its unit explicitly (`{ "value": n, "unit": "alphaByte" }`), so accidental
 //! unitless serialization fails to compile instead of emitting a bare number.
 
 /// An authored, already-quantized alpha channel byte.
+///
+/// Private storage cannot bypass the explicit unit constructors.
+///
+/// ```compile_fail,E0423
+/// let _ = script_kit_gpui::theme::alpha::AlphaByte(50_u8);
+/// ```
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AlphaByte(u8);
 
 impl AlphaByte {
     /// A value authored directly in the byte domain (e.g. `0x32`, `0x7F`).
+    ///
+    /// Normalized floating opacity is not an authored byte.
+    ///
+    /// ```compile_fail,E0308
+    /// let _ = script_kit_gpui::theme::alpha::AlphaByte::authored(0.85_f32);
+    /// ```
     pub const fn authored(value: u8) -> Self {
         Self(value)
     }
@@ -50,18 +55,6 @@ impl AlphaByte {
         Self((clamped * 255.0).round() as u8)
     }
 
-    /// Transitional bridge for authored byte values still typed `f32` at their
-    /// struct field (field flip blocked on the design-contract integration).
-    /// Preserves the historical conversation packer cast (`alpha.round()`)
-    /// exactly; debug-asserts the input is already in the byte domain.
-    pub fn from_authored_f32(value: f32) -> Self {
-        debug_assert!(
-            (0.0..=255.0).contains(&value),
-            "authored alpha byte out of range: {value}"
-        );
-        Self((value.round() as u32).min(255) as u8)
-    }
-
     /// The raw byte.
     pub const fn get(self) -> u8 {
         self.0
@@ -71,6 +64,10 @@ impl AlphaByte {
 /// The ONE typed `0xRRGGBB` + alpha-byte packer: `(rgb << 8) | alpha`.
 /// Accepts only [`AlphaByte`] — an `f32` (normalized or authored) cannot reach
 /// the packed word without naming its quantization first.
+///
+/// ```compile_fail,E0308
+/// let _ = script_kit_gpui::theme::alpha::pack_rgb_alpha(0xEF4444, 0.5_f32);
+/// ```
 #[inline]
 pub const fn pack_rgb_alpha(rgb: u32, alpha: AlphaByte) -> u32 {
     (rgb << 8) | alpha.get() as u32
@@ -126,15 +123,6 @@ mod alpha_byte_tests {
         assert_eq!(AlphaByte::from_normalized_rounded(0.72).get(), 184);
         assert_eq!(AlphaByte::from_normalized_rounded(-1.0).get(), 0);
         assert_eq!(AlphaByte::from_normalized_rounded(2.0).get(), 255);
-    }
-
-    #[test]
-    fn from_authored_f32_preserves_the_historical_round_cast() {
-        // Historical conversation packer: `(rgb << 8) | alpha.round() as u32`.
-        assert_eq!(AlphaByte::from_authored_f32(50.0).get(), 0x32);
-        assert_eq!(AlphaByte::from_authored_f32(0x7f as f32).get(), 0x7F);
-        assert_eq!(AlphaByte::from_authored_f32(0.0).get(), 0);
-        assert_eq!(AlphaByte::from_authored_f32(255.0).get(), 0xFF);
     }
 
     #[test]

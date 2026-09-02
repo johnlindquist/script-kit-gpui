@@ -217,6 +217,35 @@ impl Message {
             | Message::AiSubscribed { request_id, .. }
             | Message::AiUnsubscribe { request_id, .. }
             | Message::SystemFeedbackResult { request_id, .. }
+            | Message::WindowVisibilityAck { request_id, .. }
+            | Message::DisplayList { request_id, .. }
+            | Message::DisplayListResult { request_id, .. }
+            | Message::FrontmostWindow { request_id, .. }
+            | Message::FrontmostWindowResult { request_id, .. }
+            | Message::GetAgentChatState { request_id, .. }
+            | Message::AgentChatStateResult { request_id, .. }
+            | Message::GetAiReliabilityState { request_id, .. }
+            | Message::AiReliabilityStateResult { request_id, .. }
+            | Message::SetAiReliabilityTestFixture { request_id, .. }
+            | Message::AiReliabilityTestFixtureResult { request_id, .. }
+            | Message::InspectContextPreparation { request_id, .. }
+            | Message::ContextPreparationProbeResult { request_id, .. }
+            | Message::ResetAgentChatTestProbe { request_id, .. }
+            | Message::GetAgentChatTestProbe { request_id, .. }
+            | Message::AgentChatTestProbeResult { request_id, .. }
+            | Message::PerformAgentChatSetupAction { request_id, .. }
+            | Message::AgentChatSetupActionResult { request_id, .. }
+            | Message::WaitFor { request_id, .. }
+            | Message::WaitForResult { request_id, .. }
+            | Message::Batch { request_id, .. }
+            | Message::BatchResult { request_id, .. }
+            | Message::ListAutomationWindows { request_id, .. }
+            | Message::AutomationWindowListResult { request_id, .. }
+            | Message::SimulateGpuiEvent { request_id, .. }
+            | Message::CancelGpuiEvent { request_id, .. }
+            | Message::SimulateGpuiEventResult { request_id, .. }
+            | Message::GetLogs { request_id, .. }
+            | Message::LogsResult { request_id, .. }
             | Message::AiUnsubscribed { request_id, .. } => Some(request_id),
             Message::Notify { request_id, .. }
             | Message::Beep { request_id }

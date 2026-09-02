@@ -1,5 +1,6 @@
 use std::{
     any::TypeId,
+    cell::Cell,
     collections::{HashMap, VecDeque},
     rc::Rc,
     time::Duration,
@@ -58,6 +59,15 @@ impl From<(TypeId, ElementId)> for NotificationId {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationLayerSnapshot {
+    pub entity_id: u64,
+    pub closing: bool,
+    pub title: Option<String>,
+    pub message: Option<String>,
+}
+
 /// A notification element.
 pub struct Notification {
     /// The id is used make the notification unique.
@@ -80,7 +90,10 @@ pub struct Notification {
     focus_handle: Option<FocusHandle>,
     previous_focused_handle: Option<WeakFocusHandle>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
-    closing: bool,
+    pub(crate) closing: bool,
+    /// The live list's source epoch; detached replacements no longer advance it.
+    layer_revision: Option<Rc<Cell<u64>>>,
+    layer_lifetime: std::rc::Weak<()>,
 }
 
 impl From<String> for Notification {
@@ -140,6 +153,8 @@ impl Notification {
             dismissible: true,
             focus_handle: None,
             previous_focused_handle: None,
+            layer_revision: None,
+            layer_lifetime: std::rc::Weak::new(),
             on_click: None,
             closing: false,
         }
@@ -261,12 +276,19 @@ impl Notification {
         self
     }
 
+    fn layer_was_detached(&self) -> bool {
+        self.layer_revision.is_some() && self.layer_lifetime.strong_count() == 0
+    }
+
     /// Dismiss the notification.
     pub fn dismiss(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.closing {
+        if self.closing || self.layer_was_detached() {
             return;
         }
         self.closing = true;
+        if let Some(revision) = &self.layer_revision {
+            crate::root::advance_layer_revision(revision);
+        }
         cx.notify();
 
         // Dismiss the notification after 0.15s to show the animation.
@@ -277,7 +299,13 @@ impl Notification {
             cx.update(|cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |view, cx| {
+                        if view.layer_was_detached() {
+                            return;
+                        }
                         view.closing = false;
+                        if let Some(revision) = &view.layer_revision {
+                            crate::root::advance_layer_revision(revision);
+                        }
                         cx.emit(DismissEvent);
                     });
                 }
@@ -308,6 +336,9 @@ impl Notification {
     }
 
     pub fn dismiss_from_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layer_was_detached() {
+            return;
+        }
         if let Some(handle) = self
             .previous_focused_handle
             .as_ref()
@@ -412,6 +443,9 @@ impl Render for Notification {
             })
             .when_some(self.on_click.clone(), |this, on_click| {
                 this.on_click(cx.listener(move |view, event, window, cx| {
+                    if view.layer_was_detached() || view.closing {
+                        return;
+                    }
                     view.dismiss(window, cx);
                     on_click(event, window, cx);
                 }))
@@ -489,12 +523,22 @@ impl Default for NotificationSettings {
     }
 }
 
+/// The existing subscription registration owns the lifetime token. Dropping
+/// it invalidates retained old handlers without borrowing a notification that
+/// may currently be invoking a callback which clears or replaces itself.
+struct NotificationRegistration {
+    entity_id: gpui::EntityId,
+    _subscription: Subscription,
+    _lifetime: Rc<()>,
+}
+
 /// A list of notifications.
 pub struct NotificationList {
     /// Notifications that will be auto hidden.
     pub(crate) notifications: VecDeque<Entity<Notification>>,
-    expanded: bool,
-    _subscriptions: HashMap<NotificationId, Subscription>,
+    pub(crate) expanded: bool,
+    pub(crate) layer_revision: Rc<Cell<u64>>,
+    _subscriptions: HashMap<NotificationId, NotificationRegistration>,
 }
 
 impl NotificationList {
@@ -502,8 +546,24 @@ impl NotificationList {
         Self {
             notifications: VecDeque::new(),
             expanded: false,
+            layer_revision: Rc::new(Cell::new(0)),
             _subscriptions: HashMap::new(),
         }
+    }
+
+    pub(crate) fn layer_snapshot(&self, cx: &App) -> Vec<NotificationLayerSnapshot> {
+        self.notifications
+            .iter()
+            .map(|entity| {
+                let note = entity.read(cx);
+                NotificationLayerSnapshot {
+                    entity_id: entity.entity_id().as_u64(),
+                    closing: note.closing,
+                    title: note.title.as_ref().map(ToString::to_string),
+                    message: note.message.as_ref().map(ToString::to_string),
+                }
+            })
+            .collect()
     }
 
     pub fn push(
@@ -519,29 +579,63 @@ impl NotificationList {
         let autohide_duration = notification.autohide_duration;
 
         // Remove the notification by id, for keep unique.
-        self.notifications.retain(|note| note.read(cx).id != id);
+        if let Some(previous) = self._subscriptions.remove(&id) {
+            self.notifications
+                .retain(|note| note.entity_id() != previous.entity_id);
+        }
+        let lifetime = Rc::new(());
+        notification.layer_lifetime = Rc::downgrade(&lifetime);
+        notification.layer_revision = Some(self.layer_revision.clone());
 
         let notification = cx.new(|_| notification);
 
+        let subscription_id = id.clone();
+        let subscription = cx.subscribe(
+            &notification,
+            move |view, dismissed, _: &DismissEvent, cx| {
+                let before = view.notifications.len();
+                view.notifications.retain(|note| *note != dismissed);
+                if view.notifications.len() != before {
+                    view._subscriptions.remove(&subscription_id);
+                    crate::root::advance_layer_revision(&view.layer_revision);
+                    cx.notify();
+                }
+            },
+        );
         self._subscriptions.insert(
-            id.clone(),
-            cx.subscribe(&notification, move |view, _, _: &DismissEvent, cx| {
-                view.notifications.retain(|note| id != note.read(cx).id);
-                view._subscriptions.remove(&id);
-            }),
+            id,
+            NotificationRegistration {
+                entity_id: notification.entity_id(),
+                _subscription: subscription,
+                _lifetime: lifetime,
+            },
         );
 
         self.notifications.push_back(notification.clone());
+        crate::root::advance_layer_revision(&self.layer_revision);
         if autohide {
+            // A detached timer must not keep its notification alive after the
+            // owning list clears, replaces it, or loses its window.
+            let notification = notification.downgrade();
             // Count only time when no notification control owns focus. This
             // preserves the configured duration while keyboard users read and
             // operate actions; replacing a notification cannot let its old
             // entity timer dismiss the replacement generation.
-            cx.spawn_in(window, async move |_, cx| {
+            cx.spawn_in(window, async move |owner, cx| {
                 const TICK: Duration = Duration::from_millis(25);
                 let mut remaining = autohide_duration;
                 while remaining > Duration::ZERO {
                     cx.background_executor().timer(TICK.min(remaining)).await;
+                    if !owner
+                        .update(cx, |list, _| {
+                            list.notifications
+                                .iter()
+                                .any(|note| note.entity_id() == notification.entity_id())
+                        })
+                        .unwrap_or(false)
+                    {
+                        return;
+                    }
                     let controls_focused = match notification
                         .update_in(cx, |note, window, cx| note.controls_focused(window, cx))
                     {
@@ -578,7 +672,11 @@ impl NotificationList {
     }
 
     pub fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.notifications.is_empty() {
+            crate::root::advance_layer_revision(&self.layer_revision);
+        }
         self.notifications.clear();
+        self._subscriptions.clear();
         cx.notify();
     }
 
@@ -625,7 +723,10 @@ impl Render for NotificationList {
                 this.flex_col_reverse()
             })
             .on_hover(cx.listener(|view, hovered, _, cx| {
-                view.expanded = *hovered;
+                if view.expanded != *hovered {
+                    view.expanded = *hovered;
+                    crate::root::advance_layer_revision(&view.layer_revision);
+                }
                 cx.notify()
             }))
             .children(items)
@@ -777,6 +878,9 @@ mod tests {
                 .autohide(false),
         );
         assert_ne!(old.entity_id(), replacement.entity_id());
+        let replacement_revision = window_handle
+            .read_with(cx, |list, _| list.layer_revision.get())
+            .unwrap();
 
         advance(cx, Duration::from_millis(175));
         assert!(
@@ -786,6 +890,61 @@ mod tests {
                         && list.notifications[0].entity_id() == replacement.entity_id()
                 })
                 .expect("notification test window should remain available")
+        );
+        assert!(!old.read_with(cx, |note, _| note.closing));
+        assert_eq!(
+            replacement_revision,
+            window_handle
+                .read_with(cx, |list, _| list.layer_revision.get())
+                .unwrap()
+        );
+    }
+
+    #[gpui::test]
+    fn closing_window_releases_notification_before_autohide_tick(cx: &mut TestAppContext) {
+        let window_handle = open_notification_list(cx);
+        let notification =
+            push(&window_handle, cx, Notification::error("Completion failed")).downgrade();
+        cx.run_until_parked();
+        assert!(notification.upgrade().is_some());
+
+        window_handle
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("notification test window should close");
+        cx.run_until_parked();
+
+        // Do not advance the clock: window teardown must release the entity
+        // while its detached autohide task is still waiting for its first tick.
+        assert!(notification.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn clearing_from_a_live_notification_callback_invalidates_without_reborrowing_it(
+        cx: &mut TestAppContext,
+    ) {
+        let window_handle = open_notification_list(cx);
+        let notification = push(
+            &window_handle,
+            cx,
+            Notification::success("Clear me").autohide(false),
+        );
+        let list = cx.update(|cx| window_handle.entity(cx).expect("notification list owner"));
+        let any_window: gpui::AnyWindowHandle = window_handle.into();
+        any_window
+            .update(cx, |_, window, cx| {
+                notification.update(cx, |note, cx| {
+                    list.update(cx, |list, cx| list.clear(window, cx));
+                    let after_clear = list.read(cx).layer_revision.get();
+                    note.dismiss_from_control(window, cx);
+                    assert!(!note.closing);
+                    assert_eq!(after_clear, list.read(cx).layer_revision.get());
+                });
+            })
+            .expect("reentrant clear must not borrow the callback's entity again");
+        assert!(
+            window_handle
+                .read_with(cx, |list, _| list.notifications.is_empty())
+                .unwrap()
         );
     }
 

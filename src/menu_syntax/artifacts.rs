@@ -351,6 +351,13 @@ pub fn search_root_todos_in_sk_path(
     }
     let normalized_query = normalize_match_text(query);
     let mut hits = collect_day_page_todo_hits(sk_path, RECENT_DAY_PAGE_SCAN_LIMIT)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                error_bytes = error.to_string().len(),
+                "root_todos_read_failed"
+            );
+            Vec::new()
+        })
         .into_iter()
         .filter(|hit| todo_hit_matches(hit, &normalized_query))
         .take(options.max_results)
@@ -364,6 +371,7 @@ pub fn search_root_todos_in_sk_path(
 /// `todo:` filter. The launcher owns one generation-fenced background scan.
 struct RootTodoSnapshotCache {
     snapshot: Option<RootTodoSnapshot>,
+    refresh_needed: bool,
     refresh_lifecycle: RootOwnedProviderRefreshLifecycle,
 }
 
@@ -374,12 +382,19 @@ struct RootTodoSnapshot {
 
 pub(crate) struct RootTodoRefreshSnapshot {
     owner: RootOwnedProviderRefresh,
-    hits: Vec<RootTodoSearchHit>,
+    hits: anyhow::Result<Vec<RootTodoSearchHit>>,
+}
+
+impl RootTodoRefreshSnapshot {
+    pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
+        self.hits.as_ref().map(Vec::len)
+    }
 }
 
 static ROOT_TODO_SNAPSHOT: std::sync::Mutex<RootTodoSnapshotCache> =
     std::sync::Mutex::new(RootTodoSnapshotCache {
         snapshot: None,
+        refresh_needed: false,
         refresh_lifecycle: RootOwnedProviderRefreshLifecycle {
             next_generation: 0,
             in_flight: None,
@@ -416,16 +431,33 @@ pub fn search_root_todos_cached(
 }
 
 fn root_todos_snapshot_cache_is_fresh(cache: &RootTodoSnapshotCache) -> bool {
-    cache
-        .snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.captured_at.elapsed() <= ROOT_TODO_SNAPSHOT_TTL)
+    !cache.refresh_needed
+        && cache.snapshot.as_ref().is_some_and(|snapshot| {
+            crate::runtime_policy::root_search_now().saturating_duration_since(snapshot.captured_at)
+                <= ROOT_TODO_SNAPSHOT_TTL
+        })
 }
 
 pub(crate) fn root_todos_snapshot_is_fresh() -> bool {
     ROOT_TODO_SNAPSHOT
         .lock()
         .is_ok_and(|cache| root_todos_snapshot_cache_is_fresh(&cache))
+}
+
+fn fresh_root_todos_snapshot_status(cache: &RootTodoSnapshotCache) -> Option<(u64, usize)> {
+    if cache.refresh_lifecycle.in_flight.is_some() || !root_todos_snapshot_cache_is_fresh(cache) {
+        return None;
+    }
+    Some((
+        cache.refresh_lifecycle.next_generation,
+        cache.snapshot.as_ref()?.hits.len(),
+    ))
+}
+
+/// Current snapshot state revision and row count, including accepted empty snapshots.
+pub(crate) fn root_todos_fresh_cache_status() -> Option<(u64, usize)> {
+    let cache = ROOT_TODO_SNAPSHOT.try_lock().ok()?;
+    fresh_root_todos_snapshot_status(&cache)
 }
 
 fn try_begin_root_todos_snapshot_refresh_in_cache(
@@ -453,10 +485,65 @@ pub(crate) fn try_begin_root_todos_snapshot_refresh() -> Option<RootOwnedProvide
 pub(crate) fn read_root_todos_snapshot(
     refresh: RootOwnedProviderRefresh,
 ) -> RootTodoRefreshSnapshot {
+    assert!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     RootTodoRefreshSnapshot {
         owner: refresh,
         hits: collect_day_page_todo_hits(&default_sk_path(), RECENT_DAY_PAGE_SCAN_LIMIT),
     }
+}
+
+pub(crate) fn owned_root_todos_snapshot(
+    refresh: RootOwnedProviderRefresh,
+    result: anyhow::Result<Vec<RootTodoSearchHit>>,
+) -> anyhow::Result<RootTodoRefreshSnapshot> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    Ok(RootTodoRefreshSnapshot {
+        owner: refresh,
+        hits: result,
+    })
+}
+
+pub(crate) fn reset_owned_root_todos() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = ROOT_TODO_SNAPSHOT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("todos_cache_poisoned"))?;
+    cache.refresh_lifecycle.next_generation = cache
+        .refresh_lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("todos_generation_exhausted"))?;
+    cache.refresh_lifecycle.in_flight = None;
+    cache.snapshot = None;
+    cache.refresh_needed = false;
+    Ok(())
+}
+
+pub(crate) fn invalidate_owned_root_todos_freshness() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = ROOT_TODO_SNAPSHOT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("todos_cache_poisoned"))?;
+    cache.refresh_lifecycle.next_generation = cache
+        .refresh_lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("todos_generation_exhausted"))?;
+    cache.refresh_lifecycle.in_flight = None;
+    cache.refresh_needed = true;
+    Ok(())
 }
 
 fn finish_root_todos_snapshot_refresh_in_cache(
@@ -470,10 +557,14 @@ fn finish_root_todos_snapshot_refresh_in_cache(
     {
         return false;
     }
+    let Ok(hits) = snapshot.hits else {
+        return false;
+    };
     cache.snapshot = Some(RootTodoSnapshot {
-        captured_at: std::time::Instant::now(),
-        hits: std::sync::Arc::new(snapshot.hits),
+        captured_at: crate::runtime_policy::root_search_now(),
+        hits: std::sync::Arc::new(hits),
     });
+    cache.refresh_needed = false;
     true
 }
 
@@ -496,7 +587,7 @@ pub(crate) fn discard_root_todos_snapshot_refresh(refresh: RootOwnedProviderRefr
 pub(crate) fn set_root_todo_snapshot_for_tests(hits: Vec<RootTodoSearchHit>) {
     if let Ok(mut cache) = ROOT_TODO_SNAPSHOT.lock() {
         cache.snapshot = Some(RootTodoSnapshot {
-            captured_at: std::time::Instant::now(),
+            captured_at: crate::runtime_policy::root_search_now(),
             hits: std::sync::Arc::new(hits),
         });
         cache.refresh_lifecycle.in_flight = None;
@@ -507,38 +598,50 @@ fn brain_days_dir(sk_path: &Path) -> PathBuf {
     sk_path.join("brain").join("days")
 }
 
-fn recent_day_page_paths(sk_path: &Path, limit: usize) -> Vec<PathBuf> {
+fn recent_day_page_paths(sk_path: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
     let days_dir = brain_days_dir(sk_path);
-    let Ok(entries) = read_dir(&days_dir) else {
-        return Vec::new();
+    let entries = match read_dir(&days_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
     };
-    let mut paths: Vec<(NaiveDate, PathBuf)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if !path.is_file() {
-                return None;
-            }
-            let date = path
-                .file_name()?
-                .to_string_lossy()
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if !path.metadata()?.is_file() {
+            continue;
+        }
+        let Some(date) = path.file_name().and_then(|name| {
+            name.to_str()?
                 .strip_suffix(".md")?
                 .parse::<NaiveDate>()
-                .ok()?;
-            Some((date, path))
-        })
-        .collect();
-    paths.sort_by(|left, right| right.0.cmp(&left.0));
-    paths
+                .ok()
+        }) else {
+            continue;
+        };
+        paths.push((date, path));
+    }
+    paths.sort_by_key(|left| std::cmp::Reverse(left.0));
+    Ok(paths
         .into_iter()
         .take(limit)
         .map(|(_, path)| path)
-        .collect()
+        .collect())
 }
 
 pub fn read_day_page_task_artifacts(sk_path: &Path) -> ReadArtifactReport {
     let mut report = ReadArtifactReport::default();
-    for path in recent_day_page_paths(sk_path, RECENT_DAY_PAGE_SCAN_LIMIT) {
+    let paths = match recent_day_page_paths(sk_path, RECENT_DAY_PAGE_SCAN_LIMIT) {
+        Ok(paths) => paths,
+        Err(error) => {
+            push_warning(
+                &mut report,
+                format!("could not enumerate day pages: {error}"),
+            );
+            return report;
+        }
+    };
+    for path in paths {
         let contents = match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -568,15 +671,16 @@ pub fn read_day_page_task_artifacts(sk_path: &Path) -> ReadArtifactReport {
     report
 }
 
-fn collect_day_page_todo_hits(sk_path: &Path, limit: usize) -> Vec<RootTodoSearchHit> {
+fn collect_day_page_todo_hits(
+    sk_path: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<RootTodoSearchHit>> {
     let mut hits = Vec::new();
-    for path in recent_day_page_paths(sk_path, limit) {
+    for path in recent_day_page_paths(sk_path, limit)? {
         let day_label = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string());
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
+        let contents = std::fs::read_to_string(&path)?;
         let lines: Vec<&str> = contents.lines().collect();
         for (idx, line) in lines.iter().enumerate().rev() {
             let Some(parsed) = parse_unchecked_task_line(line) else {
@@ -611,7 +715,7 @@ fn collect_day_page_todo_hits(sk_path: &Path, limit: usize) -> Vec<RootTodoSearc
             });
         }
     }
-    hits
+    Ok(hits)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -955,6 +1059,17 @@ fn truncate_snippet(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_todo_snapshots_and_resets_require_runtime_authority() {
+        let refresh = RootOwnedProviderRefresh {
+            source: sk_protocol::command_contract::CommandSource::Todo,
+            generation: 1,
+        };
+        assert!(owned_root_todos_snapshot(refresh, Ok(Vec::new())).is_err());
+        assert!(reset_owned_root_todos().is_err());
+        assert!(invalidate_owned_root_todos_freshness().is_err());
+    }
     use std::fs;
     use tempfile::TempDir;
 
@@ -977,6 +1092,7 @@ mod tests {
     fn root_owned_todo_cache() -> RootTodoSnapshotCache {
         RootTodoSnapshotCache {
             snapshot: None,
+            refresh_needed: false,
             refresh_lifecycle: RootOwnedProviderRefreshLifecycle::default(),
         }
     }
@@ -992,7 +1108,7 @@ mod tests {
             refresh,
             RootTodoRefreshSnapshot {
                 owner: refresh,
-                hits: Vec::new(),
+                hits: Ok(Vec::new()),
             },
         ));
         assert!(root_todos_snapshot_cache_is_fresh(&cache));
@@ -1001,6 +1117,36 @@ mod tests {
             .as_ref()
             .is_some_and(|snapshot| snapshot.hits.is_empty()));
         assert!(try_begin_root_todos_snapshot_refresh_in_cache(&mut cache).is_none());
+    }
+
+    #[test]
+    fn fresh_todos_cache_proof_rejects_missing_stale_invalidated_and_in_flight() {
+        let mut cache = root_owned_todo_cache();
+        assert!(fresh_root_todos_snapshot_status(&cache).is_none());
+        let refresh = try_begin_root_todos_snapshot_refresh_in_cache(&mut cache).unwrap();
+        assert!(fresh_root_todos_snapshot_status(&cache).is_none());
+        assert!(finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootTodoRefreshSnapshot {
+                owner: refresh,
+                hits: Ok(Vec::new())
+            },
+        ));
+        assert_eq!(
+            fresh_root_todos_snapshot_status(&cache),
+            Some((refresh.generation, 0))
+        );
+        cache.refresh_lifecycle.in_flight = Some(refresh);
+        assert!(fresh_root_todos_snapshot_status(&cache).is_none());
+        cache.refresh_lifecycle.in_flight = None;
+        cache.refresh_needed = true;
+        assert!(fresh_root_todos_snapshot_status(&cache).is_none());
+        cache.refresh_needed = false;
+        cache.snapshot.as_mut().unwrap().captured_at = crate::runtime_policy::root_search_now()
+            - ROOT_TODO_SNAPSHOT_TTL
+            - std::time::Duration::from_secs(1);
+        assert!(fresh_root_todos_snapshot_status(&cache).is_none());
     }
 
     #[test]
@@ -1018,7 +1164,7 @@ mod tests {
             forged,
             RootTodoRefreshSnapshot {
                 owner: forged,
-                hits: vec![snapshot_hit("foreign private todo")],
+                hits: Ok(vec![snapshot_hit("foreign private todo")]),
             },
         ));
         assert!(!finish_root_todos_snapshot_refresh_in_cache(
@@ -1026,7 +1172,7 @@ mod tests {
             refresh,
             RootTodoRefreshSnapshot {
                 owner: forged,
-                hits: vec![snapshot_hit("wrong private snapshot")],
+                hits: Ok(vec![snapshot_hit("wrong private snapshot")]),
             },
         ));
         assert!(cache.snapshot.is_none());
@@ -1036,7 +1182,7 @@ mod tests {
             refresh,
             RootTodoRefreshSnapshot {
                 owner: refresh,
-                hits: vec![snapshot_hit("the real private todo")],
+                hits: Ok(vec![snapshot_hit("the real private todo")]),
             },
         ));
         assert_eq!(
@@ -1060,7 +1206,7 @@ mod tests {
             stale,
             RootTodoRefreshSnapshot {
                 owner: stale,
-                hits: vec![snapshot_hit("stale private todo")],
+                hits: Ok(vec![snapshot_hit("stale private todo")]),
             },
         ));
         assert!(cache.snapshot.is_none());
@@ -1070,9 +1216,29 @@ mod tests {
             current,
             RootTodoRefreshSnapshot {
                 owner: current,
-                hits: vec![snapshot_hit("fresh private todo")],
+                hits: Ok(vec![snapshot_hit("fresh private todo")]),
             },
         ));
+    }
+
+    #[test]
+    fn root_todos_failed_read_is_not_empty_success_and_preserves_last_good_rows() {
+        let mut cache = root_owned_todo_cache();
+        let refresh = try_begin_root_todos_snapshot_refresh_in_cache(&mut cache).unwrap();
+        cache.snapshot = Some(RootTodoSnapshot {
+            captured_at: crate::runtime_policy::root_search_now(),
+            hits: std::sync::Arc::new(vec![snapshot_hit("last good")]),
+        });
+        let snapshot = RootTodoRefreshSnapshot {
+            owner: refresh,
+            hits: Err(anyhow::anyhow!("read failed")),
+        };
+        assert!(snapshot.read_outcome().is_err());
+        assert!(!finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache, refresh, snapshot
+        ));
+        assert_eq!(cache.snapshot.unwrap().hits[0].body, "last good");
+        assert!(cache.refresh_lifecycle.in_flight.is_none());
     }
 
     #[test]

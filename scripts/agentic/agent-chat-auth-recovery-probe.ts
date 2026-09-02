@@ -99,7 +99,7 @@ try {
 
   const agentState = await driver.request(
     { type: "getAgentChatState", target: { type: "id", id: "main" } },
-    { expect: "agentChatStateResult", timeoutMs: 15_000 },
+    { expect: "agent_chatStateResult", timeoutMs: 15_000 },
   );
   receipt.agentState = agentState;
 

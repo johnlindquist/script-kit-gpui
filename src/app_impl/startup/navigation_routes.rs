@@ -22,7 +22,55 @@ fn is_secondary_surface_window(window: &Window) -> bool {
     SecondarySurfaceWindowState::inspect(window).is_secondary()
 }
 
+#[inline]
+fn is_plain_platform_cmd_w(event: &gpui::KeystrokeEvent) -> bool {
+    let key = event.keystroke.key.as_str();
+    let modifiers = &event.keystroke.modifiers;
+    modifiers.platform
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.control
+        && key.eq_ignore_ascii_case("w")
+}
+
+
 impl ScriptListApp {
+    fn install_main_window_close_interceptor(&mut self, cx: &mut Context<Self>) {
+        let app_entity_for_cmd_w = cx.entity().downgrade();
+        let cmd_w_interceptor = cx.intercept_keystrokes({
+            let app_entity = app_entity_for_cmd_w;
+            move |event, window, cx| {
+                if !is_plain_platform_cmd_w(event) {
+                    return;
+                }
+
+                let is_actions = crate::actions::is_actions_window(window);
+                if is_secondary_surface_window(window) {
+                    return;
+                }
+
+                // Actions popups hosted by secondary windows are not the main
+                // launcher's to close.
+                if is_actions && !crate::actions::is_actions_window_open_for_main() {
+                    return;
+                }
+
+                if !crate::windows::accepts_main_window_input(window) && !is_actions {
+                    return;
+                }
+
+                if let Some(app) = app_entity.upgrade() {
+                    app.update(cx, |this, cx| {
+                        this.close_main_window_from_top_level_cmd_w(window, cx);
+                        cx.stop_propagation();
+                    });
+                }
+            }
+        });
+        self.gpui_input_subscriptions.push(cmd_w_interceptor);
+
+    }
+
     fn route_day_page_note_switcher_key(
         &mut self,
         key: &str,
@@ -176,11 +224,13 @@ impl ScriptListApp {
                 // Memory-only restore: a cancelled Theme Designer session never
                 // writes theme.json (nothing was persisted while previewing).
                 if let Some(original) = self.theme_before_chooser.take() {
-                    self.restore_theme_chooser_theme(
+                    if !self.restore_theme_chooser_theme(
                         original,
                         "theme_chooser_top_level_cmd_w_undo",
                         cx,
-                    );
+                    ) {
+                        return;
+                    }
                 }
                 self.clear_theme_chooser_controls();
                 self.close_and_reset_window(cx);

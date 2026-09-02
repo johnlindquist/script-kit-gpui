@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   currentIdentity,
   DEFAULT_CONSISTENCY_CATALOG_PATH,
@@ -24,6 +24,7 @@ import {
   targetIdentity,
   type ProofTransactionIdentity,
 } from "./target-identity.ts";
+import { verifyImmutableArtifact, ArtifactVerificationError, type ArtifactReference, type VerifiedArtifact } from "../../agentic/build-artifact.ts";
 
 type Obj = Record<string, unknown>;
 
@@ -53,200 +54,30 @@ function currentGitHead(): string {
 }
 
 const COMPILER_INPUT_PATH_OWNER = "scripts/agentic/compiler-input-paths.txt";
-const compilerTreeCache = new Map<string, string>();
 
-function reviewedCompilerInputPaths(): string[] {
-  const paths = readFileSync(COMPILER_INPUT_PATH_OWNER, "utf8")
-    .split(/\r?\n/)
-    .filter(Boolean);
-  if (
-    paths.length === 0 ||
-    new Set(paths).size !== paths.length ||
-    paths.some((path) => path.startsWith("/") || path.split("/").includes(".."))
-  ) {
-    throw new Error("verified build provenance requires one valid reviewed compiler-input owner");
+
+/** Explicit references are the only artifact authority; never infer adjacent manifests. */
+export function verifyRuntimeBinaryProvenance(reference: ArtifactReference, expected: Obj = {}): Obj {
+  const artifact = verifyImmutableArtifact(process.cwd(), reference, {
+    kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content",
+  });
+  const binary: Obj = { ...artifact.binary, artifactReference: artifact.reference };
+  for (const key of Object.keys(artifact.binary)) {
+    if (expected[key] !== undefined && expected[key] !== binary[key])
+      throw new ArtifactVerificationError("manifest_invalid", "INVALID_BINARY", `observed_${key}_mismatch`);
   }
-  return paths;
+  return binary;
 }
 
-/** Git tree objects are immutable; identical reviewed trees safely survive docs-only commits. */
-export function reviewedCompilerInputFingerprint(commit = currentGitHead()): string {
-  if (!/^[a-f0-9]{40}$/.test(commit)) {
-    throw new Error("reviewed compiler-input tree requires one exact Git commit");
-  }
-  const ownerHash = sha256File(COMPILER_INPUT_PATH_OWNER);
-  const key = `${commit}:${ownerHash}`;
-  const cached = compilerTreeCache.get(key);
-  if (cached) return cached;
-  const result = Bun.spawnSync([
-    "git",
-    "-C",
-    process.cwd(),
-    "ls-tree",
-    "-r",
-    commit,
-    "--",
-    ...reviewedCompilerInputPaths(),
-  ], { stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0 || result.stdout.byteLength === 0) {
-    throw new Error("verified build provenance cannot independently resolve its reviewed compiler-input tree");
-  }
-  const fingerprint = createHash("sha256").update(result.stdout).digest("hex");
-  compilerTreeCache.set(key, fingerprint);
-  return fingerprint;
-}
-
-function requireCleanCompilerInputs() {
-  const result = Bun.spawnSync([
-    "git",
-    "-C",
-    process.cwd(),
-    "status",
-    "--porcelain",
-    "--untracked-files=all",
-    "--",
-    ...reviewedCompilerInputPaths(),
-  ], { stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0 || result.stdout.byteLength !== 0) {
-    throw new Error("verified build provenance rejects uncommitted current compiler-input sources");
-  }
-}
-
-/** Bind one actual executable to the manifest written by its owned build/export. */
-export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj = {}): Obj {
-  const repositoryRoot = realpathSync(process.cwd());
-  const resolvedBinary = resolve(repositoryRoot, binaryPath);
-  const repositoryRelative = relative(repositoryRoot, resolvedBinary);
-  if (
-    repositoryRelative.startsWith("../") || repositoryRelative.startsWith("/") ||
-    !(repositoryRelative.startsWith("target-agent/artifacts/") ||
-      repositoryRelative.startsWith("target-agent/runtime/"))
-  ) {
-    throw new Error("verified build provenance requires one owned exported or staged runtime binary");
-  }
-  let canonicalBinary: string;
-  try {
-    canonicalBinary = realpathSync(resolvedBinary);
-  } catch {
-    throw new Error("verified build provenance cannot independently observe its runtime binary");
-  }
-  if (canonicalBinary !== resolvedBinary || lstatSync(resolvedBinary).isSymbolicLink()) {
-    throw new Error("verified build provenance cannot follow a binary symlink");
-  }
-
-  const candidates = [
-    `${resolvedBinary}.provenance.json`,
-    join(dirname(resolvedBinary), "manifest.json"),
-  ].filter((candidate) => existsSync(candidate));
-  if (candidates.length !== 1) {
-    throw new Error("verified build provenance requires exactly one independently observed artifact manifest");
-  }
-  const manifestPath = candidates[0]!;
-  if (lstatSync(manifestPath).isSymbolicLink() || realpathSync(manifestPath) !== manifestPath) {
-    throw new Error("verified build provenance cannot follow an artifact manifest symlink");
-  }
-  const manifestBytes = readFileSync(manifestPath);
-  let manifest: Obj;
-  try {
-    manifest = asObject(JSON.parse(manifestBytes.toString("utf8")));
-  } catch {
-    throw new Error("verified build provenance manifest is not valid JSON");
-  }
-  const binaryStat = statSync(resolvedBinary);
-  const binaryHash = sha256File(resolvedBinary);
-  if (
-    manifest.schemaVersion !== 2 ||
-    manifest.binaryPath !== repositoryRelative ||
-    manifest.binarySha256 !== binaryHash ||
-    manifest.sizeBytes !== binaryStat.size ||
-    typeof manifest.compilerInputSha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(manifest.compilerInputSha256) ||
-    typeof manifest.profile !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.profile) ||
-    typeof manifest.requiresExactGitHead !== "boolean" ||
-    manifest.profile === "release" && manifest.requiresExactGitHead !== true ||
-    typeof manifest.pool !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.pool) ||
-    typeof manifest.source !== "string" ||
-    !(manifest.source.startsWith("target-agent/pools/") ||
-      manifest.source.startsWith("target-agent/agents/")) ||
-    manifest.source.split("/").includes("..") ||
-    typeof manifest.builtAt !== "string" || Number.isNaN(Date.parse(manifest.builtAt))
-  ) {
-    throw new Error("verified build provenance manifest does not match its exact owned executable bytes");
-  }
-  if (manifest.rustDirty !== false) {
-    throw new Error("verified build provenance rejects uncommitted compiler-input sources");
-  }
-  const head = currentGitHead();
-  if (manifest.compilerInputSha256 !== reviewedCompilerInputFingerprint(head)) {
-    throw new Error("verified build provenance executable was not built from the current reviewed compiler-input tree");
-  }
-  requireCleanCompilerInputs();
-  if (manifest.gitHead !== head) {
-    if (manifest.requiresExactGitHead === true) {
-      throw new Error("release, CI, and explicit Git tracking require the exact build commit");
-    }
-    if (typeof manifest.gitHead !== "string" || !/^[a-f0-9]{40}$/.test(manifest.gitHead)) {
-      throw new Error("verified build provenance executable was not built from a valid source commit");
-    }
-    const ancestor = Bun.spawnSync([
-      "git",
-      "-C",
-      process.cwd(),
-      "merge-base",
-      "--is-ancestor",
-      manifest.gitHead,
-      head,
-    ], { stdout: "pipe", stderr: "pipe" });
-    if (
-      ancestor.exitCode !== 0 ||
-      reviewedCompilerInputFingerprint(manifest.gitHead) !== manifest.compilerInputSha256
-    ) {
-      throw new Error("verified build provenance executable was not built from an equivalent current source commit");
-    }
-  }
-
-  const manifestRelative = relative(repositoryRoot, manifestPath);
-  const manifestHash = createHash("sha256").update(manifestBytes).digest("hex");
-  if (
-    (expected.path !== undefined && expected.path !== repositoryRelative) ||
-    (expected.sha256 !== undefined && expected.sha256 !== binaryHash) ||
-    (expected.sourceCommit !== undefined && expected.sourceCommit !== head)
-  ) {
-    throw new Error("verified build provenance identity does not match the observed executable");
-  }
-  if (Object.keys(expected).length > 0) {
-    const declaredManifest = asObject(expected.provenance);
-    if (
-      declaredManifest.path !== manifestRelative ||
-      declaredManifest.sha256 !== manifestHash ||
-      declaredManifest.builtGitHead !== manifest.gitHead ||
-      declaredManifest.compilerInputSha256 !== manifest.compilerInputSha256 ||
-      declaredManifest.profile !== manifest.profile ||
-      declaredManifest.requiresExactGitHead !== manifest.requiresExactGitHead
-    ) {
-      throw new Error("verified build provenance manifest identity does not match its observed receipt");
-    }
-  }
-
-  return {
-    path: repositoryRelative,
-    sha256: binaryHash,
-    sizeBytes: binaryStat.size,
-    modifiedAt: new Date(binaryStat.mtimeMs).toISOString(),
-    sourceCommit: head,
-    pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY),
-    provenance: {
-      path: manifestRelative,
-      sha256: manifestHash,
-      schemaVersion: manifest.schemaVersion,
-      pool: manifest.pool,
-      builtGitHead: manifest.gitHead,
-      compilerInputSha256: manifest.compilerInputSha256,
-      profile: manifest.profile,
-      requiresExactGitHead: manifest.requiresExactGitHead,
-      rustDirty: false,
-    },
-  };
+export function runtimeArtifactFromEnvironment(): VerifiedArtifact {
+  const path = process.env.SCRIPT_KIT_ARTIFACT_REFERENCE;
+  if (!path) throw new ArtifactVerificationError("manifest_invalid", "INVALID_BINARY", "SCRIPT_KIT_ARTIFACT_REFERENCE must name an explicit reference JSON");
+  let reference: ArtifactReference;
+  try { reference = JSON.parse(readFileSync(path, "utf8")); }
+  catch { throw new ArtifactVerificationError("manifest_invalid", "INVALID_BINARY", "invalid artifact reference JSON"); }
+  return verifyImmutableArtifact(process.cwd(), reference, {
+    kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content",
+  });
 }
 
 function canonicalTaskBinding(taskId: RuntimeTaskProofId) {
@@ -400,7 +231,9 @@ export async function observeRuntimeTaskTarget(
   binaryPath: string,
   selector: Json = { type: "main" },
 ): Promise<RuntimeTargetObservation> {
-  const verifiedBinary = verifyRuntimeBinaryProvenance(binaryPath);
+  if (!driver.verifiedArtifact || driver.verifiedArtifact.executablePath !== resolve(binaryPath))
+    throw new ArtifactVerificationError("manifest_invalid", "INVALID_BINARY", "explicit_driver_artifact_reference_required");
+  const verifiedBinary: Obj = { ...driver.verifiedArtifact.binary, artifactReference: driver.verifiedArtifact.reference };
   const windows = asObject(await driver.listAutomationWindows({ timeoutMs: 5_000 }));
   const inspection = asObject(await driver.request({
     type: "inspectAutomationWindow",
@@ -490,7 +323,7 @@ export function prepareRuntimeTaskProof(
   if (
     typeof binary.path !== "string" || binary.path.length === 0 ||
     typeof binary.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(binary.sha256) ||
-    binary.sourceCommit !== head || transaction.binarySha256 !== binary.sha256
+    typeof binary.sourceCommit !== "string" || transaction.binarySha256 !== binary.sha256
   ) {
     throw new Error(`${taskId} requires one current-source binary and matching proof transaction`);
   }
@@ -503,11 +336,7 @@ export function prepareRuntimeTaskProof(
   if (currentBinarySha !== binary.sha256) {
     throw new Error(`${taskId} runtime binary bytes do not match their observed fingerprint`);
   }
-  try {
-    verifyRuntimeBinaryProvenance(binary.path as string, binary);
-  } catch (error) {
-    throw new Error(`${taskId} requires verified build provenance: ${String(error)}`);
-  }
+  const verifiedBinary = verifyRuntimeBinaryProvenance(binary.artifactReference as ArtifactReference, binary);
 
   const catalogBinding = canonicalTaskBinding(taskId);
   const existingBinding = asObject(candidate.catalogBinding);
@@ -527,6 +356,7 @@ export function prepareRuntimeTaskProof(
   const producerIdentity = producerIdentityForTool(definition.tool);
   const prepared = prepareValidatedReceipt(spec.primitiveId, {
     ...candidate,
+    binary: verifiedBinary,
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     primitiveId: spec.primitiveId,
     taskId,

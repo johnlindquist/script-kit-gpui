@@ -454,7 +454,7 @@ async function runTestFile(testPath: string): Promise<TestFileResult> {
       } else if (crashReason) {
         status = 'crash';
         error = crashReason;
-      } else if (event.status === 'pass') {
+      } else if (event.status === 'pass' && exitCode === 0 && event.error == null) {
         status = 'pass';
       } else if (event.status === 'skip') {
         status = 'skip';
@@ -498,8 +498,8 @@ async function runTestFile(testPath: string): Promise<TestFileResult> {
       status = 'crash';
       error = crashReason;
     } else if (exitCode === 0) {
-      status = 'pass';
-      error = 'No JSONL output but exit code 0';
+      status = 'fail';
+      error = 'No executable test result was emitted';
     } else {
       status = 'fail';
       error = `No test results parsed. Exit code: ${exitCode}`;
@@ -610,7 +610,7 @@ async function main() {
   let exitCode = 0;
   if (totalCrashed > 0) exitCode = 4;
   else if (totalTimeout > 0) exitCode = 3;
-  else if (totalFailed > 0) exitCode = 1;
+  else if (totalFailed > 0 || totalPassed === 0) exitCode = 1;
 
   const summary: HarnessSummary = {
     files: results,

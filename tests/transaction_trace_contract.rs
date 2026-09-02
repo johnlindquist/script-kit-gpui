@@ -552,3 +552,62 @@ fn batch_select_by_semantic_id_not_found() {
         "error should mention the missing semantic ID"
     );
 }
+
+#[test]
+fn batch_wait_uses_remaining_deadline_not_its_own_long_poll_interval() {
+    let mut provider = FakeProvider::default();
+    let options = script_kit_gpui::protocol::BatchOptions {
+        stop_on_error: true,
+        rollback_on_error: false,
+        timeout: 10,
+    };
+    let result = execute_batch(
+        &mut provider,
+        "bounded-batch-wait".into(),
+        &[
+            BatchCommand::WaitFor {
+                condition: WaitCondition::Named(WaitNamedCondition::WindowVisible),
+                timeout: Some(10_000),
+                poll_interval: Some(500),
+            },
+            BatchCommand::SetInput {
+                text: "must not execute".into(),
+            },
+        ],
+        Some(&options),
+        TransactionTraceMode::Off,
+    )
+    .unwrap();
+    assert!(!result.success);
+    assert_eq!(result.failed_at, Some(0));
+    assert_eq!(result.results.len(), 1);
+    assert!(
+        result.total_elapsed < 400,
+        "one poll must not escape the batch deadline"
+    );
+    assert_eq!(provider.snapshot.input_value, None);
+}
+
+#[test]
+fn invalid_batch_budget_and_rollback_refuse_before_any_provider_mutation() {
+    let mut provider = FakeProvider::default();
+    let commands = [BatchCommand::SetInput {
+        text: "must not execute".into(),
+    }];
+    for (timeout, rollback_on_error) in [(0, false), (5_000, true)] {
+        let options = script_kit_gpui::protocol::BatchOptions {
+            stop_on_error: true,
+            rollback_on_error,
+            timeout,
+        };
+        assert!(execute_batch(
+            &mut provider,
+            format!("invalid-budget-{timeout}"),
+            &commands,
+            Some(&options),
+            TransactionTraceMode::Off
+        )
+        .is_err());
+        assert_eq!(provider.snapshot.input_value, None);
+    }
+}

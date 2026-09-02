@@ -20,6 +20,28 @@ fn config_ts_path() -> PathBuf {
     crate::setup::config_ts_path()
 }
 
+fn require_config_storage_path(path: &Path) -> anyhow::Result<()> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(path)?;
+    }
+    Ok(())
+}
+
+/// Owned configuration uses the same config.ts and AST owner, without executing it.
+fn load_static_config(path: &Path) -> anyhow::Result<Config> {
+    require_config_storage_path(path)?;
+    if !crate::atomic_file::inspect_private_file(path)? {
+        return Ok(Config::default());
+    }
+    anyhow::ensure!(
+        fs::metadata(path)?.len() <= 1_048_576,
+        "owned_config_too_large"
+    );
+    let source = crate::atomic_file::read_private_file(path)?;
+    let value = super::editor::parse_static_config(&source).map_err(anyhow::Error::msg)?;
+    serde_json::from_value(value).context("invalid static config.ts values")
+}
+
 // ---------------------------------------------------------------------------
 // Config cache — skip Bun on warm launches when config.ts hasn't changed
 // ---------------------------------------------------------------------------
@@ -126,6 +148,7 @@ pub struct ConfigFingerprintReceipt {
 /// invocation will re-read the file" without touching the loader.
 pub fn current_config_fingerprint_receipt() -> Option<ConfigFingerprintReceipt> {
     let path = config_ts_path();
+    require_config_storage_path(&path).ok()?;
     let fingerprint = fingerprint_config_file(&path)?;
     Some(ConfigFingerprintReceipt {
         path: path.to_string_lossy().into_owned(),
@@ -563,6 +586,10 @@ fn overlay_legacy_preferences_if_missing(
 
 fn maybe_load_legacy_user_preferences(correlation_id: &str) -> Option<ScriptKitUserPreferences> {
     let settings_path = settings_json_path();
+    if let Err(error) = require_config_storage_path(&settings_path) {
+        warn!(%error, "Legacy preferences read refused");
+        return None;
+    }
     if !settings_path.exists() {
         return None;
     }
@@ -595,6 +622,10 @@ pub fn load_user_preferences() -> ScriptKitUserPreferences {
 
 fn cleanup_legacy_settings_file_if_safe(correlation_id: &str) {
     let path = settings_json_path();
+    if let Err(error) = require_config_storage_path(&path) {
+        warn!(%error, "Legacy preferences cleanup refused");
+        return;
+    }
     if !path.exists() {
         return;
     }
@@ -669,18 +700,48 @@ fn write_preference_group<T: Serialize + PartialEq>(
         )
     };
 
-    super::editor::write_config_safely(config_path, &property, None)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if crate::runtime_policy::is_owned_evaluation() {
+        require_config_storage_path(config_path)?;
+        let source = if crate::atomic_file::inspect_private_file(config_path)? {
+            crate::atomic_file::read_private_file(config_path)?
+        } else {
+            String::new()
+        };
+        let prepared = super::editor::prepare_config_property(&source, &property)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        // Persist only bytes the same owner can read without executing TypeScript.
+        super::editor::parse_static_config(&prepared).map_err(anyhow::Error::msg)?;
+        crate::atomic_file::write_private_atomic(config_path, prepared.as_bytes())?;
+        crate::runtime_policy::record_completed_fixture_effect();
+    } else {
+        super::editor::write_config_safely(config_path, &property, None)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
     Ok(())
+}
+
+/// Serialize config.ts preference mutations with journaled theme publication.
+pub(crate) fn with_user_preference_write_lock<T>(
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _write_guard = CONFIG_PREFERENCE_WRITE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("config preference write lock poisoned"))?;
+    operation()
 }
 
 /// Persist runtime preference groups back into `config.ts`.
 pub fn save_user_preferences(prefs: &ScriptKitUserPreferences) -> anyhow::Result<()> {
-    let _write_guard = CONFIG_PREFERENCE_WRITE_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("config preference write lock poisoned"))?;
+    with_user_preference_write_lock(|| save_user_preferences_locked(prefs))
+}
+
+fn save_user_preferences_locked(prefs: &ScriptKitUserPreferences) -> anyhow::Result<()> {
     let config_path = config_ts_path();
-    let current = load_config();
+    let current = if crate::runtime_policy::is_owned_evaluation() {
+        load_static_config(&config_path)?
+    } else {
+        load_config()
+    };
 
     write_preference_group(
         &config_path,
@@ -740,6 +801,15 @@ pub fn save_user_preferences(prefs: &ScriptKitUserPreferences) -> anyhow::Result
 #[instrument(name = "load_config")]
 pub fn load_config() -> Config {
     let config_path = config_ts_path();
+    if crate::runtime_policy::is_owned_evaluation() {
+        return match load_static_config(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(%error, "Owned static config load failed; using explicit defaults");
+                Config::default()
+            }
+        };
+    }
 
     // Fingerprint the source file for cache lookup and later cache write.
     let fingerprint = fingerprint_config_file(&config_path);
@@ -926,8 +996,8 @@ pub fn load_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bun_extract_command, load_user_preferences, parse_config_json,
-        parse_user_preferences_json, save_user_preferences,
+        build_bun_extract_command, load_static_config, load_user_preferences, parse_config_json,
+        parse_user_preferences_json, preferences_from_config, save_user_preferences,
     };
     use crate::config::{AgentChatBackend, HotkeyConfig};
     use std::fs;
@@ -1366,5 +1436,38 @@ mod tests {
             args[1].contains(r#"/tmp/config-with-'quote'.js"#),
             "script should contain the JSON-escaped module path"
         );
+    }
+
+    #[test]
+    fn static_config_reads_same_preference_ast_and_undefined_reset() {
+        let directory = tempfile::tempdir().expect("owned test directory");
+        let path = directory.path().join("config.ts");
+        let source = "export default { theme: { presetId: 'fixture-dark' } } satisfies Config;";
+        crate::atomic_file::write_private_atomic(&path, source.as_bytes()).expect("seed config.ts");
+        let config = load_static_config(&path).expect("load without evaluating TypeScript");
+        assert_eq!(
+            serde_json::to_value(preferences_from_config(&config)).unwrap()["theme"]["presetId"],
+            "fixture-dark"
+        );
+        let reset = super::super::editor::prepare_config_property(
+            source,
+            &super::super::editor::ConfigProperty::new("theme", "undefined"),
+        )
+        .expect("prepare canonical reset");
+        crate::atomic_file::write_private_atomic(&path, reset.as_bytes())
+            .expect("persist canonical reset");
+        assert!(load_static_config(&path)
+            .expect("read reset")
+            .theme
+            .is_none());
+    }
+
+    #[test]
+    fn static_config_rejects_executable_source_before_loading_values() {
+        let directory = tempfile::tempdir().expect("owned test directory");
+        let path = directory.path().join("config.ts");
+        crate::atomic_file::write_private_atomic(&path,
+            b"export default { theme: (() => { throw new Error('must not execute'); })() } satisfies Config;").unwrap();
+        assert!(load_static_config(&path).is_err());
     }
 }

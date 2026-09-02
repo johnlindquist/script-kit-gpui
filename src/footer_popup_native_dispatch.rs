@@ -1,83 +1,18 @@
-#[cfg(target_os = "macos")]
-fn send_footer_action_to_channel_v2(action: FooterAction, window_kind: FooterWindowKind) {
-    let action_name = footer_action_key(action);
-    tracing::info!(
-        target: "script_kit::footer_popup",
-        event = "native_footer_action_enqueued",
-        action = action_name,
-        ?window_kind,
-        "Enqueued native footer action"
-    );
-    let (tx, _) = match window_kind {
-        FooterWindowKind::Dictation => dictation_footer_action_channel(),
-        FooterWindowKind::AgentChat => agent_chat_footer_action_channel(),
-        FooterWindowKind::Main => footer_action_channel(),
-    };
-    if let Err(error) = tx.try_send(action) {
-        tracing::warn!(
-            target: "script_kit::footer_popup",
-            event = "native_footer_action_enqueue_failed",
-            action = action_name,
-            %error,
-            "Failed to enqueue footer action"
-        );
-    }
-}
-
-fn send_footer_action_to_channel(action: FooterAction, dictation_footer: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        let window_kind = if dictation_footer {
-            FooterWindowKind::Dictation
-        } else {
-            FooterWindowKind::Main
-        };
-        send_footer_action_to_channel_v2(action, window_kind);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let (tx, _) = if dictation_footer {
-            dictation_footer_action_channel()
-        } else {
-            footer_action_channel()
-        };
-        if let Err(error) = tx.try_send(action) {
-            tracing::warn!(
-                target: "script_kit::footer_popup",
-                event = "native_footer_action_enqueue_failed",
-                action = footer_action_key(action),
-                %error,
-                "Failed to enqueue footer action"
-            );
-        }
-    }
-}
 
 #[cfg(target_os = "macos")]
-unsafe fn footer_sender_window_title(sender: id) -> Option<String> {
-    use objc::{msg_send, sel, sel_impl};
-    use std::ffi::CStr;
-
-    if sender == nil {
-        return None;
+unsafe fn bind_native_footer_buttons(view: id, token: u64) {
+    if view == nil { return; }
+    let is_button: cocoa::base::BOOL = msg_send![view, isKindOfClass: footer_button_class()];
+    if is_button == YES {
+        if let Some(button) = view.as_mut() { button.set_ivar::<u64>("_footerBindingToken", token); }
     }
-
-    let ns_window: id = msg_send![sender, window];
-    if ns_window == nil {
-        return None;
+    let children: id = msg_send![view, subviews];
+    if children == nil { return; }
+    let count: usize = msg_send![children, count];
+    for index in 0..count {
+        let child: id = msg_send![children, objectAtIndex: index];
+        bind_native_footer_buttons(child, token);
     }
-
-    let title: id = msg_send![ns_window, title];
-    if title == nil {
-        return None;
-    }
-
-    let utf8: *const std::os::raw::c_char = msg_send![title, UTF8String];
-    if utf8.is_null() {
-        return None;
-    }
-
-    Some(CStr::from_ptr(utf8).to_string_lossy().into_owned())
 }
 
 fn footer_action_key(action: FooterAction) -> &'static str {

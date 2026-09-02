@@ -307,8 +307,17 @@ impl ScriptListApp {
             }
             "run_script" => {
                 tracing::info!(category = "UI", "run script action");
-                self.execute_selected(cx);
-                DispatchOutcome::success()
+                match self.execute_selected(cx) {
+                    Ok(crate::MainMenuDispatchResult::Dispatched) => {
+                        DispatchOutcome::success().with_detail("launcher_dispatch_requested")
+                    }
+                    Ok(crate::MainMenuDispatchResult::PendingConfirmation) => {
+                        DispatchOutcome::not_handled().with_detail("confirmation_pending")
+                    }
+                    Err(error) => {
+                        DispatchOutcome::error("main_menu_dispatch_refused", error.to_string())
+                    }
+                }
             }
             "toggle_info" => {
                 tracing::info!(
@@ -602,10 +611,9 @@ impl ScriptListApp {
                     builtin_id,
                     &self.config.get_builtins(),
                 ) {
-                    Some(entry) => {
-                        self.execute_builtin(&entry, cx);
-                        DispatchOutcome::success()
-                    }
+                    Some(entry) => self.execute_builtin(&entry, cx).unwrap_or_else(|| {
+                        DispatchOutcome::not_handled().with_detail("confirmation_pending")
+                    }),
                     None => DispatchOutcome::not_handled(),
                 }
             }
@@ -737,18 +745,17 @@ impl ScriptListApp {
                 // Get the frecency path from the focused script info
                 if let Some(script_info) = self.get_focused_script_info() {
                     if let Some(ref frecency_path) = script_info.frecency_path {
-                        // Remove the frecency entry for this item
-                        if self.frecency_store.remove(frecency_path).is_some() {
-                            // Save the updated frecency store
-                            if let Err(e) = self.frecency_store.save() {
-                                tracing::error!(
-                                    error = %e,
-                                    "failed to save frecency after reset"
-                                );
+                        let mut removed = false;
+                        self.commit_main_menu_results_refresh("reset-ranking", None, cx, |app, _cx| {
+                            removed = app.frecency_store.remove(frecency_path).is_some();
+                            if removed {
+                                if let Err(e) = app.frecency_store.save() {
+                                    tracing::error!(error = %e, "failed to save frecency after reset");
+                                }
                             }
-                            // Invalidate the grouped cache AND refresh scripts to rebuild the list
-                            self.invalidate_grouped_cache();
-                            self.refresh_scripts(cx);
+                            removed
+                        });
+                        if removed {
                             tracing::info!(category = "UI", name = %script_info.name, "reset ranking");
                             self.show_hud(
                                 ranking_action.reset_hud(&script_info.name),

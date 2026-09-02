@@ -736,18 +736,25 @@ impl ScriptListApp {
         );
 
         // Open the actions window — centered like the mini main menu
-        let parent_automation_id = crate::windows::focused_automation_window_id();
+        let host_policy = if window.is_owned_hidden() {
+            crate::runtime_policy::WindowHostPolicy::OwnedHidden
+        } else {
+            crate::runtime_policy::WindowHostPolicy::Interactive
+        };
         let actions_window_feedback = BuiltInActionsWindowFeedback::FileSearch;
         cx.spawn(async move |_this, cx| {
             cx.update(|cx| {
                 match open_actions_window(
                     cx,
-                    parent_window_handle,
-                    main_bounds,
-                    display_id,
+                    crate::actions::ActionsWindowPlacement {
+                        parent_window_handle,
+                        main_bounds,
+                        display_id,
+                    },
                     dialog,
                     crate::actions::WindowPosition::TopCenter,
-                    parent_automation_id.as_deref(),
+                    None,
+                    host_policy,
                 ) {
                     Ok(_handle) => {
                         logging::log("ACTIONS", actions_window_feedback.opened_log());
@@ -887,18 +894,25 @@ impl ScriptListApp {
             );
 
             // Open the actions window
-            let parent_automation_id = crate::windows::focused_automation_window_id();
+            let host_policy = if window.is_owned_hidden() {
+                crate::runtime_policy::WindowHostPolicy::OwnedHidden
+            } else {
+                crate::runtime_policy::WindowHostPolicy::Interactive
+            };
             let actions_window_feedback = BuiltInActionsWindowFeedback::ClipboardHistory;
             cx.spawn(async move |_this, cx| {
                 cx.update(|cx| {
                     match open_actions_window(
                         cx,
-                        parent_window_handle,
-                        main_bounds,
-                        display_id,
+                        crate::actions::ActionsWindowPlacement {
+                            parent_window_handle,
+                            main_bounds,
+                            display_id,
+                        },
                         dialog,
                         crate::actions::WindowPosition::TopCenter,
-                        parent_automation_id.as_deref(),
+                        None,
+                        host_policy,
                     ) {
                         Ok(_handle) => {
                             logging::log("ACTIONS", actions_window_feedback.opened_log());

@@ -4,9 +4,9 @@ use std::{
 };
 
 use gpui::{
-    div, list, point, prelude::*, px, size, uniform_list, AppContext as _, Context, Entity,
-    InteractiveElement, IntoElement, ListAlignment, ListOffset, ListSizingBehavior, ListState,
-    Render, ScrollDelta, ScrollPhase, ScrollStrategy, ScrollWheelEvent, TestAppContext, TouchPhase,
+    div, list, point, prelude::*, px, size, uniform_list, Context, Entity, InteractiveElement,
+    IntoElement, ListAlignment, ListOffset, ListSizingBehavior, ListState, Render, ScrollDelta,
+    ScrollPhase, ScrollStrategy, ScrollWheelEvent, TestAppContext, TouchPhase,
     UniformListScrollHandle, VisualTestContext, Window,
 };
 

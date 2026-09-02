@@ -181,9 +181,14 @@ impl EntityMap {
         self.accessed_entities.get_mut().clear();
     }
 
-    pub fn take_dropped(&mut self) -> Vec<(EntityId, Box<dyn Any>)> {
+    pub fn pending_dropped_count(&self) -> usize {
+        self.ref_counts.read().dropped_entity_ids.len()
+    }
+
+    pub fn take_dropped(&mut self, limit: usize) -> Vec<(EntityId, Box<dyn Any>)> {
         let mut ref_counts = &mut *self.ref_counts.write();
-        let dropped_entity_ids = ref_counts.dropped_entity_ids.drain(..);
+        let start = ref_counts.dropped_entity_ids.len().saturating_sub(limit);
+        let dropped_entity_ids = ref_counts.dropped_entity_ids.drain(start..);
         let mut accessed_entities = self.accessed_entities.get_mut();
 
         dropped_entity_ids
@@ -1210,7 +1215,7 @@ mod test {
         let slot = entity_map.reserve::<TestEntity>();
         entity_map.insert(slot, TestEntity { i: 2 });
 
-        let dropped = entity_map.take_dropped();
+        let dropped = entity_map.take_dropped(usize::MAX);
         assert_eq!(dropped.len(), 2);
 
         assert_eq!(
@@ -1235,7 +1240,7 @@ mod test {
         let strong = weak.upgrade();
         assert_eq!(strong, None);
 
-        let dropped = entity_map.take_dropped();
+        let dropped = entity_map.take_dropped(usize::MAX);
         assert_eq!(dropped.len(), 1);
 
         assert_eq!(

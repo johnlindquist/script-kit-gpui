@@ -6,7 +6,7 @@
  * generated per-test in unique temp directories so the shared file-hash
  * cache never sees two states of one path.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   RECEIPT_REGISTRY_VERSION,
   prepareValidatedReceipt,
@@ -70,58 +70,30 @@ import {
   REQUIRED_POPUP_CONSUMERS,
   SHARED_COMPONENTS_MODULE,
 } from "./facade-migrations.ts";
+import { createArtifactFixture, type ArtifactFixture } from "../agentic/build-artifact-fixture.ts";
+import { verifyImmutableArtifact } from "../agentic/build-artifact.ts";
 
-const HEAD = "f".repeat(40);
+const HEAD = currentIdentity().headCommit!;
 const WRONG_SHA = "0".repeat(64);
 let ownedSyntheticBinary: Record<string, unknown> | undefined;
-let ownedSyntheticBinaryDirectory: string | undefined;
+let ownedSyntheticArtifact: ArtifactFixture | undefined;
 
 afterAll(() => {
-  if (ownedSyntheticBinaryDirectory) {
-    rmSync(ownedSyntheticBinaryDirectory, { recursive: true, force: true });
-  }
+  ownedSyntheticArtifact?.dispose();
 });
 
-function signedSyntheticBinary(): Record<string, unknown> {
-  if (ownedSyntheticBinary) return { ...ownedSyntheticBinary };
-  const artifactRoot = join(process.cwd(), "target-agent", "artifacts");
-  mkdirSync(artifactRoot, { recursive: true });
-  ownedSyntheticBinaryDirectory = mkdtempSync(join(artifactRoot, ".consistency-proof-"));
-  const binaryPath = join(ownedSyntheticBinaryDirectory, "script-kit-gpui");
-  const binaryBytes = readFileSync("scripts/devtools/lib/runtime-task-proof.ts");
-  const binarySha = createHash("sha256").update(binaryBytes).digest("hex");
-  writeFileSync(binaryPath, binaryBytes);
-  const relativeBinary = relative(process.cwd(), binaryPath);
-  const manifestPath = `${binaryPath}.provenance.json`;
-  const manifestBytes = JSON.stringify({
-    schemaVersion: 2,
-    pool: "agent-debug",
-    source: "target-agent/pools/agent-debug/debug/script-kit-gpui",
-    binaryPath: relativeBinary,
-    binarySha256: binarySha,
-    sizeBytes: binaryBytes.byteLength,
-    gitHead: HEAD,
-    compilerInputSha256: "f".repeat(64),
-    profile: "debug",
-    requiresExactGitHead: false,
-    rustDirty: false,
-    builtAt: new Date().toISOString(),
-  });
-  writeFileSync(manifestPath, manifestBytes);
-  ownedSyntheticBinary = {
-    path: relativeBinary,
-    sha256: binarySha,
-    sourceCommit: HEAD,
-    provenance: {
-      path: relative(process.cwd(), manifestPath),
-      sha256: createHash("sha256").update(manifestBytes).digest("hex"),
-      builtGitHead: HEAD,
-      compilerInputSha256: "f".repeat(64),
-      profile: "debug",
-      requiresExactGitHead: false,
-    },
-  };
-  return { ...ownedSyntheticBinary };
+function syntheticArtifactBinary(): Record<string, unknown> {
+  if (!ownedSyntheticBinary) {
+    ownedSyntheticArtifact = createArtifactFixture(process.cwd(), {
+      existingRepository: true,
+      executable: readFileSync("scripts/devtools/lib/runtime-task-proof.ts", "utf8"),
+    });
+    const artifact = verifyImmutableArtifact(process.cwd(), ownedSyntheticArtifact.reference, {
+      kind: "application", packageName: "script-kit-gpui", targetName: "script-kit-gpui", sourcePolicy: "current-content",
+    });
+    ownedSyntheticBinary = { ...artifact.binary, artifactReference: artifact.reference };
+  }
+  return structuredClone(ownedSyntheticBinary);
 }
 
 function catalogMarkdown(ids: Iterable<string> = PROGRAM_IDS, extraLines: string[] = []): string {
@@ -403,7 +375,7 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
     return { ...common, ...overrides };
   }
 
-  const signedBinary = signedSyntheticBinary();
+  const signedBinary = syntheticArtifactBinary();
   const bounds = { x: 0, y: 0, width: 800, height: 600 };
   const candidate = {
     ...common,
@@ -821,9 +793,10 @@ describe("verify-task mutations", () => {
     expect(exitCode).toBe(0);
   });
 
-  test("a registered layout inspection cannot discharge any safety or workflow journey", () => {
-    for (const taskId of CONS_FLOW_UX_IDS) {
-      const tree = setup({ receiptTaskIds: [taskId] });
+  test.each([...CONS_FLOW_UX_IDS])(
+    "a registered layout inspection cannot discharge the %s safety or workflow journey",
+    (taskId) => {
+      const tree = setup({ receiptTaskIds: [] });
       const binding = syntheticCatalogBindings.get(taskId)!;
       tree.writeReceipt(taskId, "proof.json", passingReceipt("UX-001", {
         taskId,
@@ -837,8 +810,8 @@ describe("verify-task mutations", () => {
       expect(exitCode).toBe(4);
       expect(receipt.errors.map((error: { code: string }) => error.code))
         .toContain("task-workflow-proof-contract-missing");
-    }
-  });
+    },
+  );
 
   test("a registered layout inspector cannot falsely satisfy semantic projection", () => {
     const tree = setup({ receiptTaskIds: ["PF-004"] });
@@ -1254,6 +1227,7 @@ describe("verify-family mutations", () => {
   const runtimeMember = (
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> => {
+    const binary = syntheticArtifactBinary();
     const candidate = {
       schemaVersion: 2,
       tool: "script-kit-devtools.layout",
@@ -1278,12 +1252,14 @@ describe("verify-family mutations", () => {
         comparableJoinCount: 1,
       },
       repository: { gitCommit: HEAD },
+      binary,
+      cleanup: { closed: true, ownedPids: [], ownedSessions: [], ownedBrowserPids: [], survivors: [] },
       transaction: {
         transactionId: "proof:family-member",
         runId: "family-member-test",
         pid: 42,
         processStartTime: "Fri Aug 7 00:00:00 2026",
-        binarySha256: "a".repeat(64),
+        binarySha256: binary.sha256,
         automationId: "main",
         windowInstanceId: "main@1",
         windowGeneration: 1,
@@ -1467,16 +1443,45 @@ describe("verify-family mutations", () => {
 });
 
 describe("verify-scope and verify-all", () => {
-  test("complete synthetic scope passes and registry validation agrees", () => {
-    const tree = setup({ receiptTaskIds: CONS_PROOF_GOV_IDS });
-    const { receipt, exitCode } = tree.runScope();
-    expect(receipt.disposition).toBe("EVALUABLE_PASS");
-    expect(receipt.scopePassedTaskCount).toBe(28);
-    expect(receipt.missingScopeTaskIds).toEqual([]);
-    expect(exitCode).toBe(0);
-    const validation = validateReceipt("devtools.consistency.verify-scope", receipt);
-    expect(validation.valid).toBe(true);
-    expect(validation.disposition).toBe("EVALUABLE_PASS");
+  describe("complete synthetic proof/governance scope", () => {
+    let tree: Tree;
+    let scope: { receipt: Record<string, any>; exitCode: number };
+
+    beforeAll(() => {
+      tree = setup({ receiptTaskIds: CONS_PROOF_GOV_IDS });
+      // Share a real source-bound scope audit, not a second copy of its proof
+      // preparation. Both observations use this unchanged receipt tree.
+      scope = tree.runScope();
+    });
+
+    test("complete synthetic scope passes and registry validation agrees", () => {
+      const { receipt, exitCode } = scope;
+      expect(receipt.disposition).toBe("EVALUABLE_PASS");
+      expect(receipt.scopePassedTaskCount).toBe(28);
+      expect(receipt.missingScopeTaskIds).toEqual([]);
+      expect(exitCode).toBe(0);
+      const validation = validateReceipt("devtools.consistency.verify-scope", receipt);
+      expect(validation.valid).toBe(true);
+      expect(validation.disposition).toBe("EVALUABLE_PASS");
+    });
+
+    test("a passing 28-task scope NEVER makes verify-all pass; the 47 absent program tasks are named", () => {
+      expect(scope.exitCode).toBe(0);
+      expect(scope.receipt.scopePassedTaskCount).toBe(28);
+      expect(scope.receipt.missingScopeTaskIds).toEqual([]);
+      const all = tree.runAll();
+      expect(all.exitCode).not.toBe(0);
+      const expectedMissing = [...PROGRAM_IDS].filter((id) => !CONS_PROOF_GOV_IDS.has(id)).sort();
+      expect(expectedMissing.length).toBe(47);
+      expect([...all.receipt.missingTaskIds].sort()).toEqual(expectedMissing);
+      expect(errorCodes(all.receipt)).toContain("missing-run-manifest");
+      expect(all.receipt.proofCoverage.runtimeInteractionRequiredTaskCount).toBeGreaterThan(50);
+      expect(all.receipt.proofCoverage.runtimeInteractionProvenTaskCount).toBeGreaterThan(0);
+      expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("SAFE-001");
+      expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("UX-001");
+      expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("WF-001");
+      expect(all.receipt.proofCoverage.note).toContain("never count as direct runtime");
+    });
   });
 
   test("one missing scope task keeps the scope nonzero with its exact ID", () => {
@@ -1490,6 +1495,26 @@ describe("verify-scope and verify-all", () => {
     expect(exitCode).toBe(3);
   });
 
+  test("workflow metadata requires explicit immutable identity without legacy provenance", () => {
+    const receipt = passingReceipt("SAFE-001");
+    expect(validateReceipt(WORKFLOW_TASK_PRIMITIVE_ID, receipt).valid).toBe(true);
+    const mutations: Array<(binary: Record<string, unknown>) => void> = [
+      (binary) => { delete binary.artifactReference; },
+      (binary) => { binary.manifestSha256 = WRONG_SHA; },
+      (binary) => { binary.path = "target-agent/runtime/unowned/script-kit-gpui"; },
+      (binary) => { binary.provenance = { path: `${binary.path}.provenance.json` }; },
+    ];
+    for (const mutate of mutations) {
+      const candidate = structuredClone(receipt);
+      mutate(candidate.binary as Record<string, unknown>);
+      const validation = validateReceipt(WORKFLOW_TASK_PRIMITIVE_ID, candidate);
+      expect(validation.valid).toBe(false);
+      expect(validation.errors.join("; ")).toContain("explicit immutable artifact reference");
+    }
+  });
+
+  // This aggregate validates all 28 direct runtime receipts against source/artifact
+  // bytes in scope and program audits; its observed 56s run needs a bounded 120s deadline.
   test("a complete workflow scope requires all 28 exact, source-current direct runtime receipts", () => {
     const tree = setup({ receiptTaskIds: CONS_FLOW_UX_IDS });
     const { receipt, exitCode } = verifyScope({
@@ -1512,7 +1537,7 @@ describe("verify-scope and verify-all", () => {
     const all = tree.runAll();
     expect(all.exitCode).not.toBe(0);
     expect(all.receipt.missingTaskIds.length).toBe(47);
-  });
+  }, 120_000);
 
   test("a fabricated legacy workflow lane cannot discharge any canonical runtime obligation", () => {
     const tree = setup({ receiptTaskIds: [] });
@@ -1557,23 +1582,6 @@ describe("verify-scope and verify-all", () => {
     expect(exitCode).toBe(3);
   });
 
-  test("a passing 28-task scope NEVER makes verify-all pass; the 47 absent program tasks are named", () => {
-    const tree = setup({ receiptTaskIds: CONS_PROOF_GOV_IDS });
-    const scope = tree.runScope();
-    expect(scope.exitCode).toBe(0);
-    const all = tree.runAll();
-    expect(all.exitCode).not.toBe(0);
-    const expectedMissing = [...PROGRAM_IDS].filter((id) => !CONS_PROOF_GOV_IDS.has(id)).sort();
-    expect(expectedMissing.length).toBe(47);
-    expect([...all.receipt.missingTaskIds].sort()).toEqual(expectedMissing);
-    expect(errorCodes(all.receipt)).toContain("missing-run-manifest");
-    expect(all.receipt.proofCoverage.runtimeInteractionRequiredTaskCount).toBeGreaterThan(50);
-    expect(all.receipt.proofCoverage.runtimeInteractionProvenTaskCount).toBeGreaterThan(0);
-    expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("SAFE-001");
-    expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("UX-001");
-    expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("WF-001");
-    expect(all.receipt.proofCoverage.note).toContain("never count as direct runtime");
-  });
 
   test("protected hash drift fails verify-all with protected-hash-drift", () => {
     const tree = setup();

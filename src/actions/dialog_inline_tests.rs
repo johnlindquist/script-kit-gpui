@@ -1170,3 +1170,27 @@ mod actions_dialog_click_contract_tests {
         assert!(should_submit_actions_dialog_row_click(false, 3));
     }
 }
+
+#[cfg(test)]
+mod owned_surface_revision_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn semantic_ids_and_revisions_follow_real_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let entity = cx.new(|cx| ActionsDialog::with_config(cx.focus_handle(), Arc::new(|_| {}), vec![
+            Action::new("first", "First", None, ActionCategory::GlobalOps),
+            Action::new("second", "Second", None, ActionCategory::GlobalOps),
+        ], Arc::new(theme::Theme::default()), ActionsDialogConfig::default()));
+        entity.update(cx, |dialog, cx| {
+            let original = dialog.revision_facts();
+            assert_eq!(dialog.revision_facts(), original);
+            assert!(dialog.select_action_by_semantic_id("choice:99:second", cx).is_none());
+            assert_eq!(dialog.revision_facts(), original);
+            assert!(dialog.select_action_by_semantic_id("choice:1:second", cx).is_some());
+            assert_eq!(dialog.get_selected_action_id().as_deref(), Some("second"));
+            assert!(dialog.revision_facts().0 > original.0);
+            assert_eq!(dialog.revision_facts().1, original.1);
+        });
+    }
+}

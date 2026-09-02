@@ -61,43 +61,62 @@ fn test_multiple_dots_in_filename() {
     assert!(is_javascript(&PathBuf::from("my.test.script.js")));
 }
 
+#[cfg(unix)]
 #[test]
 fn test_process_handle_double_kill_is_safe() {
-    // Double kill should not panic
-    let mut handle = ProcessHandle::new(99999, "[test:double_kill]".to_string()); // Non-existent PID
-    handle.kill();
-    handle.kill(); // Should be safe to call again
-    assert!(handle.killed);
+    let mut split = spawn_script("sleep", &["10"], "[test:double_kill]")
+        .expect("spawn owned sleep")
+        .split();
+    split.kill().expect("complete owned cleanup");
+    split.process_handle.kill();
+    assert!(split.process_handle.killed);
+    assert!(!split.is_running());
 }
 
+#[cfg(unix)]
 #[test]
 fn test_process_handle_drop_calls_kill() {
-    // Create a handle and let it drop
-    let handle = ProcessHandle::new(99998, "[test:drop_kill]".to_string()); // Non-existent PID
-    assert!(!handle.killed);
-    drop(handle);
-    // If we get here without panic, drop successfully called kill
+    let mut split = spawn_script("sleep", &["10"], "[test:drop_kill]")
+        .expect("spawn owned sleep")
+        .split();
+    let pid = split.pid();
+    assert!(!split.process_handle.killed);
+    drop(split.process_handle);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = split.child.try_wait().expect("reap owned child") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = split.child.kill();
+            let _ = split.child.wait();
+            panic!("dropping the handle did not terminate its owned child");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    use std::os::unix::process::ExitStatusExt;
+    assert!(status.signal().is_some(), "drop must signal the owned child");
+    assert_eq!(
+        crate::process_manager::observe_owned_process_group(pid),
+        crate::process_manager::OwnedProcessGroupLiveness::Exited
+    );
+    // Drop cannot reap a Child it does not own. Only now is cleanup confirmed.
+    crate::process_manager::PROCESS_MANAGER.unregister_process(pid);
 }
 
+#[cfg(unix)]
 #[test]
 fn test_process_handle_registers_with_process_manager() {
-    // ProcessHandle::new() internally calls PROCESS_MANAGER.register_process()
-    // and Drop calls PROCESS_MANAGER.unregister_process()
-
-    // Create a handle which should register with PROCESS_MANAGER
-    let test_pid = 88888u32; // Non-existent PID
-    let test_script = "/test/integration_test.ts";
-
-    // Create handle - this calls register_process() internally
-    let handle = ProcessHandle::new(test_pid, test_script.to_string());
-
-    // Verify handle has correct PID
-    assert_eq!(handle.pid, test_pid);
-
-    // Drop will call unregister_process() - this should not panic
-    drop(handle);
-
-    // If we get here, register/unregister cycle completed successfully
+    let mut split = spawn_script("sleep", &["10"], "[test:registration]")
+        .expect("spawn owned sleep")
+        .split();
+    let pid = split.pid();
+    let manager = &crate::process_manager::PROCESS_MANAGER;
+    assert!(manager.get_active_processes().iter().any(|info| info.pid == pid));
+    split.kill().expect("complete owned cleanup");
+    drop(split);
+    assert!(!manager.get_active_processes().iter().any(|info| info.pid == pid));
 }
 
 #[cfg(all(unix, feature = "slow-tests"))]

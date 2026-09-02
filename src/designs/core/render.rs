@@ -125,6 +125,7 @@ pub(crate) fn resolve_tool_badge(result: &SearchResult, is_filtering: bool) -> O
 /// # Arguments
 /// * `variant` - The design variant to render
 /// * `result` - The search result to render
+/// * `semantic_id` - Canonical main-list row identity shared with paint-time row bounds
 /// * `index` - The item index (for element ID and alternating styles)
 /// * `is_selected` - Whether this item is currently selected (full focus styling)
 /// * `is_hovered` - Whether this item is currently hovered (subtle visual feedback)
@@ -138,6 +139,7 @@ pub fn render_design_item(
     variant: DesignVariant,
     main_menu_theme: crate::designs::MainMenuThemeVariant,
     result: &SearchResult,
+    semantic_id: Option<String>,
     index: usize,
     is_selected: bool,
     is_hovered: bool,
@@ -477,6 +479,7 @@ pub fn render_design_item(
 
             ListItem::new(name, list_colors)
                 .index(index)
+                .semantic_id_opt(semantic_id)
                 .icon_kind_opt(icon_kind)
                 .shortcut_opt(shortcut)
                 .description_opt(description)

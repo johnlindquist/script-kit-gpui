@@ -65,7 +65,12 @@ pub fn discover_plugin_skills(index: &PluginIndex) -> Result<Vec<PluginSkill>> {
 
     for plugin in &index.plugins {
         let skills_dir = plugin.root.join("skills");
-        if !skills_dir.exists() {
+        if !skills_dir.try_exists().with_context(|| {
+            format!(
+                "Failed to inspect skills directory: {}",
+                skills_dir.display()
+            )
+        })? {
             continue;
         }
 
@@ -78,14 +83,24 @@ pub fn discover_plugin_skills(index: &PluginIndex) -> Result<Vec<PluginSkill>> {
         })?;
 
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
+            let entry = entry.with_context(|| {
+                format!(
+                    "Failed to enumerate skills directory: {}",
+                    skills_dir.display()
+                )
+            })?;
 
             let skill_root = entry.path();
+            if !fs::metadata(&skill_root)
+                .with_context(|| format!("Failed to inspect skill root: {}", skill_root.display()))?
+                .is_dir()
+            {
+                continue;
+            }
             let skill_doc = skill_root.join("SKILL.md");
-            if !skill_doc.exists() {
+            if !skill_doc.try_exists().with_context(|| {
+                format!("Failed to inspect skill document: {}", skill_doc.display())
+            })? {
                 continue;
             }
 
@@ -95,7 +110,9 @@ pub fn discover_plugin_skills(index: &PluginIndex) -> Result<Vec<PluginSkill>> {
                 .unwrap_or_else(|| "unknown".to_string());
 
             // Parse title and description from SKILL.md content
-            let content = fs::read_to_string(&skill_doc).unwrap_or_default();
+            let content = fs::read_to_string(&skill_doc).with_context(|| {
+                format!("Failed to read skill document: {}", skill_doc.display())
+            })?;
             let (fm_title, fm_description) = parse_skill_frontmatter(&content);
 
             let title = fm_title
@@ -141,6 +158,29 @@ pub fn discover_plugin_skills(index: &PluginIndex) -> Result<Vec<PluginSkill>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_skill_absence_is_empty_but_failed_document_read_rejects_snapshot() {
+        let root = tempfile::tempdir().expect("create plugin container");
+        let plugin = root.path().join("main");
+        fs::create_dir(&plugin).expect("create plugin");
+        let index = crate::plugins::discover_plugins_in(root.path()).expect("discover plugin");
+        assert!(discover_plugin_skills(&index)
+            .expect("optional absence")
+            .is_empty());
+        let skill = plugin.join("skills/retained");
+        fs::create_dir_all(&skill).expect("create skill");
+        fs::write(skill.join("SKILL.md"), "# Retained Skill").expect("write skill");
+        assert_eq!(
+            discover_plugin_skills(&index).expect("read good source")[0].title,
+            "Retained Skill"
+        );
+        fs::write(skill.join("SKILL.md"), [0xff, 0xfe]).expect("write invalid source");
+        assert!(
+            discover_plugin_skills(&index).is_err(),
+            "failed content read is not an empty successful skill"
+        );
+    }
 
     #[test]
     fn parse_frontmatter_title_and_description() {

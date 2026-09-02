@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runtimeArtifactFromEnvironment } from "../../devtools/lib/runtime-task-proof.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -19,7 +20,7 @@ import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-p
 assertNoninteractiveVisualProbe("cons-flow-ux.dictation-recovery-focus");
 
 const ROOT = resolve(import.meta.dir, "../../..");
-const BINARY = resolve(process.env.PROBE_BINARY ?? join(ROOT, "target-agent/artifacts/cons-flow-c13/script-kit-gpui"));
+const BINARY = runtimeArtifactFromEnvironment().executablePath
 const OUT_DIR = join(ROOT, ".test-output", "cons-flow-c13");
 const OUT_PATH = join(OUT_DIR, "dictation-recovery-focus-receipt.json");
 const DICTATION_TARGET: Json = { type: "kind", kind: "dictation", index: 0 };
@@ -111,15 +112,13 @@ async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Pro
   const failures: string[] = []; const facts: Obj = {}; let cleanup: Obj = {}; let driver: Driver | null = null;
   let targetObservation: RuntimeTargetObservation | null = null;
   try {
-    driver = await Driver.launch({
-      binary: BINARY, sessionName: `cons-flow-c13-${id}`, sandboxHome: true, sharedModels: false,
-      readyTimeoutMs: 30_000, defaultTimeoutMs: 15_000,
-      env: {
-        SCRIPT_KIT_TEST_STATUS: "1", SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
-        SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1", SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
-        SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1", ...extraEnv,
-      },
-    });
+    driver = await Driver.launch({ immutableArtifact: runtimeArtifactFromEnvironment().reference, binary: BINARY, sessionName: `cons-flow-c13-${id}`, sandboxHome: true, sharedModels: false,
+    readyTimeoutMs: 30_000, defaultTimeoutMs: 15_000,
+    env: {
+      SCRIPT_KIT_TEST_STATUS: "1", SCRIPT_KIT_STARTUP_PROFILE: "dev-fast",
+      SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1", SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM: "1",
+      SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK: "1", ...extraEnv,
+    }, });
     await driver.waitForSettle(); await body(driver, facts);
     targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
   } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }

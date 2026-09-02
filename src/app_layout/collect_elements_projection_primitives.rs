@@ -1,4 +1,55 @@
+struct FilterableRowsCollection<'a> {
+    input_name: &'a str,
+    input_value: String,
+    list_name: &'a str,
+    empty_state_id: &'static str,
+    empty_text: &'a str,
+    empty_icon_hint: &'static str,
+    rows: &'a [String],
+    selected_index: usize,
+    limit: usize,
+}
+
 impl ScriptListApp {
+    fn info_state_elements(
+        snapshot: &crate::components::InfoStateSemanticSnapshot,
+    ) -> Vec<protocol::ElementInfo> {
+        let mut root = protocol::ElementInfo::panel(snapshot.id);
+        root.semantic_id = format!("info-state:{}", snapshot.id);
+        root.text = snapshot.accessible_prefix.map(str::to_string);
+        root.value = snapshot.default_icon_hint.map(str::to_string);
+        root.role = Some("info-state".to_string());
+        root.kind = Some(snapshot.semantic_kind.to_string());
+        root.source = Some("InfoState".to_string());
+        root.source_name = Some(snapshot.id.to_string());
+        root.selectable = Some(false);
+        root.status_kind = Some(snapshot.semantic_kind.to_string());
+
+        let mut elements = Vec::with_capacity(snapshot.cues.len() + 1);
+        elements.push(root);
+        elements.extend(snapshot.cues.iter().enumerate().map(|(index, cue)| {
+            protocol::ElementInfo {
+                semantic_id: format!("info-cue:{}", cue.semantic_id),
+                element_type: protocol::ElementType::Panel,
+                text: Some(cue.cue_text.clone()),
+                value: cue.canonical_shortcut.clone(),
+                content: None,
+                selected: Some(false),
+                focused: Some(false),
+                index: Some(index),
+                role: Some("guidance-cue".to_string()),
+                kind: Some(cue.cue_kind.to_string()),
+                source: Some("InfoState".to_string()),
+                source_name: Some(snapshot.id.to_string()),
+                selectable: Some(false),
+                status_kind: Some(snapshot.semantic_kind.to_string()),
+                action_disabled: None,
+                style: None,
+            }
+        }));
+        elements
+    }
+
     /// Push an element into the vec only if it hasn't reached the limit.
     /// Returns true if the element was added, false if capped.
     #[inline]

@@ -39,6 +39,7 @@ if ! session_positive_integer "$WAIT_SEC"; then
   echo "[start-isolated] readiness timeout must be a positive whole number: ${WAIT_SEC}" >&2
   exit 64
 fi
+resolve_session_artifact
 
 bash "${SCRIPT_DIR}/preflight-isolated.sh" --mode isolated
 

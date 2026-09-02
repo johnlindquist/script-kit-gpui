@@ -8,7 +8,7 @@
                                             .clone()
                                             .map(|sender| (rid.to_string(), sender))
                                     });
-                                view.dispatch_simulate_key(
+                                let outcome = view.dispatch_simulate_key(
                                     window,
                                     ctx,
                                     crate::simulate_key_dispatch::SimulatedKeyInput {
@@ -22,9 +22,9 @@
                                         crate::protocol::Message::external_command_result(
                                             rid,
                                             "simulateKey".to_string(),
-                                            true,
-                                            None,
-                                            None,
+                                            outcome.status == crate::action_helpers::ActionOutcomeStatus::Success,
+                                            outcome.error_code.map(str::to_string),
+                                            outcome.user_message.or(outcome.detail),
                                         ),
                                     );
                                 }

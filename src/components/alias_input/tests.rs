@@ -10,6 +10,60 @@ use super::types::{
 };
 use super::{AliasInputAction, AliasInputColors, AliasValidationError};
 
+#[gpui::test]
+fn retained_alias_semantics_follow_edits_not_theme_or_inspection(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let input = cx.new(|cx| {
+        super::AliasInput::new(cx, std::sync::Arc::new(Theme::default()))
+            .with_command_id("builtin/clipboard-history")
+            .with_command_name("Clipboard History")
+            .with_current_alias(Some("alpha".into()))
+    });
+    input.update(cx, |input, _| {
+        let before = input.semantic_token();
+        input.input.set_text("bravo");
+        let edited = input.semantic_token();
+        assert_ne!(before, edited, "equal-length edits change source semantics");
+        let elements = input.automation_elements();
+        assert_eq!(elements, input.automation_elements());
+        assert_eq!(input.semantic_token(), edited);
+        let mut theme = Theme::default();
+        theme.colors.background.main = 0x123456;
+        input.update_theme(std::sync::Arc::new(theme));
+        assert_eq!(
+            input.semantic_token(),
+            edited,
+            "appearance is not an alias edit"
+        );
+    });
+}
+
+#[gpui::test]
+fn alias_semantic_controls_use_real_validation_and_pending_actions(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let input = cx.new(|cx| {
+        super::AliasInput::new(cx, std::sync::Arc::new(Theme::default()))
+            .with_current_alias(Some("clip".into()))
+    });
+    input.update(cx, |input, cx| {
+        input.input.set_text("two words");
+        let save = input.automation_elements().into_iter().find(|element| element.semantic_id == "alias-input:save").unwrap();
+        assert_eq!(save.action_disabled.as_deref(), Some("alias_validation_failed"));
+        assert!(input.activate_semantic_action("alias-input:save", cx).is_err());
+        assert!(input.take_pending_action().is_none());
+        input.input.set_text("release");
+        assert_eq!(input.activate_semantic_action("alias-input:save", cx), Ok(true));
+        input.automation_elements();
+        assert!(matches!(input.take_pending_action(), Some(AliasInputAction::Save(value)) if value == "release"));
+        assert!(input.take_pending_action().is_none());
+        assert_eq!(input.activate_semantic_action("alias-input:clear", cx), Ok(true));
+        assert!(matches!(input.take_pending_action(), Some(AliasInputAction::Clear)));
+        input.set_current_alias(None);
+        assert!(!input.automation_elements().iter().any(|element| element.semantic_id == "alias-input:clear"));
+        assert_eq!(input.activate_semantic_action("alias-input:clear", cx), Ok(false));
+    });
+}
+
 #[test]
 fn test_alias_input_colors_default() {
     let colors = AliasInputColors::default();
