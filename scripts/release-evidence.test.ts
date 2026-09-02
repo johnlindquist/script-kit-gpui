@@ -602,24 +602,42 @@ function makeFixture(): ReleaseFixture {
   });
 
   const runtimeResultPath = join(root, "runtime-result.json");
+  // Schema-v3 safety/cleanup from the actual packaged probe in release run
+  // 33647828579 (2026-09-02), not a validator-shaped synthetic launch contract.
   json(runtimeResultPath, {
+    schemaVersion: 3,
     status: "pass",
-    behavior: { status: "pass" },
+    behavior: { status: "pass", failure: null },
     evidenceClass: "RUNTIME_HIDDEN",
     metricKind: "semantic_frame_identity",
     measuresPaint: false,
     provenance: { gitSha: SOURCE_SHA, binarySha256: hash("application-binary") },
     safety: {
       startsApplication: true,
-      isolatedCiLaunchAuthorized: true,
-      sandboxHome: true,
-      windowRevealAllowed: false,
-      windowFocusAllowed: false,
-      nativeInputAllowed: false,
-      screenCaptureAllowed: false,
-      hiddenStateAssertionCount: 4,
+      runtimeStartsApplication: true,
+      runtimeRequiresSandboxHome: true,
+      runtimeRequiresHiddenWindow: true,
+      runtimeRequiresNoninteractive: true,
+      runtimeRequiresCiEnvironment: false,
+      runtimeRequiresSealedEvaluatorPermit: true,
+      revealsWindow: false,
+      focusesWindow: false,
+      drivesNativeInput: false,
+      capturesScreen: false,
+      hiddenStateAssertionCount: 6,
     },
-    cleanup: { hidden: true, closed: true },
+    cleanup: {
+      resourcesAcquired: true,
+      processExited: true,
+      processGroupExited: true,
+      streamsDrained: true,
+      logWriterClosed: true,
+      ownedWindowsClosed: true,
+      referencesFinalized: true,
+      closed: true,
+      survivors: [],
+      failureCodes: [],
+    },
     artifactLifecycle: { allRequiredValid: true, allRecordedPathsReadable: true },
   });
 
@@ -1883,24 +1901,63 @@ describe("fail-closed release evidence", () => {
     const path = join(fixture.root, "runtime-result.json");
     const base = JSON.parse(readFileSync(path, "utf8"));
 
-    for (const forbiddenField of ["windowRevealAllowed", "windowFocusAllowed", "nativeInputAllowed", "screenCaptureAllowed"]) {
-      json(path, { ...base, safety: { ...base.safety, [forbiddenField]: true } });
+    for (const forbiddenField of ["revealsWindow", "focusesWindow", "drivesNativeInput", "capturesScreen"]) {
+      for (const value of [true, undefined]) {
+        json(path, { ...base, safety: { ...base.safety, [forbiddenField]: value } });
+        expect(() => buildGateReceipt({
+          gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
+        })).toThrow("nonintrusive hidden-window safety");
+      }
+    }
+
+    for (const requiredField of [
+      "startsApplication", "runtimeRequiresSandboxHome", "runtimeRequiresHiddenWindow",
+      "runtimeRequiresNoninteractive", "runtimeRequiresSealedEvaluatorPermit",
+    ]) {
+      for (const value of [false, undefined]) {
+        json(path, { ...base, safety: { ...base.safety, [requiredField]: value } });
+        expect(() => buildGateReceipt({
+          gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
+        })).toThrow("nonintrusive hidden-window safety");
+      }
+    }
+
+    for (const hiddenStateAssertionCount of [0, -1, 1.5, "6", undefined]) {
+      json(path, { ...base, safety: { ...base.safety, hiddenStateAssertionCount } });
       expect(() => buildGateReceipt({
         gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
       })).toThrow("nonintrusive hidden-window safety");
     }
 
-    for (const requiredField of ["startsApplication", "isolatedCiLaunchAuthorized"]) {
-      json(path, { ...base, safety: { ...base.safety, [requiredField]: false } });
-      expect(() => buildGateReceipt({
-        gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
-      })).toThrow("nonintrusive hidden-window safety");
+    for (const requiredField of [
+      "ownedWindowsClosed", "processExited", "processGroupExited", "streamsDrained",
+      "referencesFinalized", "closed",
+    ]) {
+      for (const value of [false, undefined]) {
+        json(path, { ...base, cleanup: { ...base.cleanup, [requiredField]: value } });
+        expect(() => buildGateReceipt({
+          gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
+        })).toThrow("cleanly hide and terminate");
+      }
     }
 
-    json(path, { ...base, cleanup: { hidden: true, closed: false } });
+    for (const requiredField of ["survivors", "failureCodes"]) {
+      for (const value of [["unfinished"], "", undefined]) {
+        json(path, { ...base, cleanup: { ...base.cleanup, [requiredField]: value } });
+        expect(() => buildGateReceipt({
+          gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
+        })).toThrow("cleanly hide and terminate");
+      }
+    }
+
+    json(path, { ...base, safety: {
+      startsApplication: true, isolatedCiLaunchAuthorized: true, sandboxHome: true,
+      windowRevealAllowed: false, windowFocusAllowed: false,
+      nativeInputAllowed: false, screenCaptureAllowed: false, hiddenStateAssertionCount: 6,
+    } });
     expect(() => buildGateReceipt({
       gateId: "packaged-root-frame", evidenceClass: "RUNTIME_HIDDEN", sourceSha: SOURCE_SHA, resultPath: path,
-    })).toThrow("cleanly hide and terminate");
+    })).toThrow("nonintrusive hidden-window safety");
   });
 
   test("rejects a missing, nonexecutable, or changed Pi sidecar", () => {

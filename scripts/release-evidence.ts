@@ -2094,16 +2094,23 @@ export function buildGateReceipt(options: {
     requireCondition(result.evidenceClass === "RUNTIME_HIDDEN" && result.measuresPaint === false,
       "packaged root gate must honestly report hidden semantic evidence");
     requireCondition(result.safety?.startsApplication === true &&
-      result.safety?.isolatedCiLaunchAuthorized === true &&
-      result.safety?.sandboxHome === true &&
-      result.safety.windowRevealAllowed === false &&
-      result.safety.windowFocusAllowed === false &&
-      result.safety.nativeInputAllowed === false &&
-      result.safety.screenCaptureAllowed === false &&
+      result.safety.runtimeRequiresSandboxHome === true &&
+      result.safety.runtimeRequiresHiddenWindow === true &&
+      result.safety.runtimeRequiresNoninteractive === true &&
+      result.safety.runtimeRequiresSealedEvaluatorPermit === true &&
+      result.safety.revealsWindow === false &&
+      result.safety.focusesWindow === false &&
+      result.safety.drivesNativeInput === false &&
+      result.safety.capturesScreen === false &&
       Number.isInteger(result.safety.hiddenStateAssertionCount) &&
       result.safety.hiddenStateAssertionCount > 0,
       "packaged root gate lacks verified nonintrusive hidden-window safety");
-    requireCondition(result.cleanup?.hidden === true && result.cleanup?.closed === true,
+    requireCondition(result.cleanup?.ownedWindowsClosed === true &&
+      result.cleanup.processExited === true && result.cleanup.processGroupExited === true &&
+      result.cleanup.streamsDrained === true && result.cleanup.referencesFinalized === true &&
+      result.cleanup.closed === true &&
+      Array.isArray(result.cleanup.survivors) && result.cleanup.survivors.length === 0 &&
+      Array.isArray(result.cleanup.failureCodes) && result.cleanup.failureCodes.length === 0,
       "packaged root gate did not cleanly hide and terminate its owned process");
     requireCondition(result.artifactLifecycle?.allRequiredValid === true &&
       result.artifactLifecycle?.allRecordedPathsReadable === true,
