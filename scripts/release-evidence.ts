@@ -543,7 +543,7 @@ export function buildSigningAttestation(options: {
     const actualTeam = details.match(/^TeamIdentifier=([^\r\n]+)$/m)?.[1]?.trim();
     requireCondition(actualTeam === options.teamIdentifier,
       `signed artifact belongs to another Apple team: ${target}`);
-    requireCondition(/^flags=.*\bruntime\b/m.test(details),
+    requireCondition(/^CodeDirectory\b.*\bflags=0x[0-9a-f]+\([^)]*\bruntime\b[^)]*\)/m.test(details),
       `signed artifact lacks hardened runtime: ${target}`);
     requireSuccessfulSecurityCommand(runCommand, "codesign", [
       "--verify", "--strict", "--verbose=4", target,

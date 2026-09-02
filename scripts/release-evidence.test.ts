@@ -367,7 +367,7 @@ function syntheticSigningRunner(
     return {
       status: 0,
       stdout: "",
-      stderr: `TeamIdentifier=${APPLE_TEAM_ID}\nflags=0x10000(runtime)\n`,
+      stderr: `CodeDirectory v=20500 size=14029 flags=0x10000(runtime) hashes=435+7 location=embedded\nTeamIdentifier=${APPLE_TEAM_ID}\n`,
     };
   }
   return { status: 0, stdout: "accepted", stderr: "" };
@@ -1310,7 +1310,7 @@ describe("fail-closed release evidence", () => {
     expect(() => buildSigningAttestation({
       ...signingOptions,
       runCommand: (executable, args) => executable === "codesign" && args[0] === "-d"
-        ? { status: 0, stdout: "", stderr: "TeamIdentifier=Z9Y8X7W6V5\nflags=0x10000(runtime)\n" }
+        ? { status: 0, stdout: "", stderr: "CodeDirectory v=20500 size=14029 flags=0x10000(runtime) hashes=435+7 location=embedded\nTeamIdentifier=Z9Y8X7W6V5\n" }
         : syntheticSigningRunner(executable, args),
     })).toThrow("belongs to another Apple team");
   });
@@ -1342,7 +1342,7 @@ describe("fail-closed release evidence", () => {
       sourceSha: SOURCE_SHA,
       teamIdentifier: APPLE_TEAM_ID,
       runCommand: (executable, args) => executable === "codesign" && args[0] === "-d"
-        ? { status: 0, stdout: "", stderr: `TeamIdentifier=${APPLE_TEAM_ID}\nflags=0x0(none)\n` }
+        ? { status: 0, stdout: "", stderr: `CodeDirectory v=20400 size=14029 flags=0x0(none) hashes=435+7 location=embedded\nTeamIdentifier=${APPLE_TEAM_ID}\n` }
         : syntheticSigningRunner(executable, args),
     })).toThrow("lacks hardened runtime");
 
