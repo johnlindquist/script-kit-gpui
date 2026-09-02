@@ -4979,6 +4979,9 @@ fn delivery_routes_ai_chat_transcript_to_agent_chat_composer() {
         "crate::dictation::DictationTarget::TabAiHarness =>",
         "crate::dictation::DictationTarget::DayPageToday =>",
     );
+    // Rustfmt may split the call and add a trailing comma; keep checking its
+    // frozen destination arguments independently of that formatting.
+    let agent_chat = compact_delta_contract(agent_chat).replace(",)", ")");
     for required in [
         "with_frozen_dictation_destination",
         "FrozenDictationDestination::AgentChat { policy }",
@@ -4989,7 +4992,7 @@ fn delivery_routes_ai_chat_transcript_to_agent_chat_composer() {
         "insert_owned_dictation_text(thread_id, token, request.transcript.text(), window, cx)",
     ] {
         assert!(
-            agent_chat.contains(required),
+            agent_chat.contains(&compact_delta_contract(required)),
             "frozen Agent Chat contract missing {required}"
         );
     }

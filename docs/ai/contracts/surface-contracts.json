@@ -52,6 +52,29 @@
       ]
     },
     {
+      "id": "main-search-contract",
+      "family": "main",
+      "root": "main",
+      "owner": "src/main_entry/app_run_setup.rs",
+      "factoryOwners": [
+        "src/main_entry/app_run_setup.rs"
+      ],
+      "proofBoundary": "owned-production-runtime",
+      "nativeExclusions": [
+        "WindowServer composition and desktop capture",
+        "AppKit material, native glyph pixels and calibrated native entry/exit motion",
+        "Native focus, activation, IME and global input",
+        "System clipboard, device access, TCC and external-app insertion",
+        "Live providers, credentials, network and operator storage"
+      ],
+      "appViewVariant": "ScriptList",
+      "presentationOwner": "src/render_script_list",
+      "expectedSemanticSurface": "scriptList",
+      "requiredSemanticIds": [
+        "input:filter"
+      ]
+    },
+    {
       "id": "main.about",
       "family": "main",
       "root": "main",
@@ -2896,6 +2919,7 @@
         "main-overlay.tab-ai-save-offer",
         "main-overlay.toast",
         "main-overlay.warning",
+        "main-search-contract",
         "main.menu-syntax-history",
         "main.menu-syntax-object",
         "main.menu-syntax-trigger",
