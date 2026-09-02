@@ -603,6 +603,7 @@ const DICTATION_RECOVERY_HISTORY_ACTION_ID: &str = "dictation_recovery:open_hist
 /// The GPUI entity that renders the compact dictation pill.
 pub struct DictationOverlay {
     state: DictationOverlayState,
+    session_generation: u64,
     display_bars: [f32; WAVEFORM_BAR_COUNT],
     focus_handle: FocusHandle,
     destination_command_bar: crate::actions::CommandBar,
@@ -661,6 +662,7 @@ impl DictationOverlay {
     ) -> Self {
         Self {
             state: DictationOverlayState::default(),
+            session_generation: 0,
             display_bars: silent_bars(),
             focus_handle: cx.focus_handle(),
             destination_command_bar: crate::actions::CommandBar::new(
@@ -1242,15 +1244,25 @@ impl DictationOverlay {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.state.phase != state.phase
+        let session_generation = super::runtime::current_session_generation();
+        let new_session = self.session_generation != session_generation;
+        if new_session
+            || self.state.phase != state.phase
             || self.state.target != state.target
             || self.state.transcript != state.transcript
         {
             self.semantic_revision = self.semantic_revision.wrapping_add(1).max(1);
         }
+        if new_session {
+            self.session_generation = session_generation;
+            self.caption = crate::dictation::live_caption::LiveCaption::default();
+            self.caption_scroll.set_offset(Default::default());
+            self.caption_scrolled_generation = 0;
+            self.display_bars = state.bars;
+        }
         let previous_phase = self.state.phase.clone();
-        let entering_processing =
-            is_processing_phase(&state.phase) && !is_processing_phase(&self.state.phase);
+        let entering_processing = is_processing_phase(&state.phase)
+            && (new_session || !is_processing_phase(&self.state.phase));
         let leaving_processing =
             !is_processing_phase(&state.phase) && is_processing_phase(&self.state.phase);
 
@@ -1311,13 +1323,13 @@ impl DictationOverlay {
         // revealed prefix — so space is ready before the paced reveal reaches
         // it, and never shrunk mid-session. At the growth cap the caption
         // block scrolls instead.
-        if !matches!(state.phase, DictationSessionPhase::Idle) {
+        if new_session || !matches!(state.phase, DictationSessionPhase::Idle) {
             let target_lines =
                 estimate_caption_lines(&self.caption.target_text(), TRANSCRIPT_PREVIEW_MAX_CHARS);
             let extra = target_lines
                 .saturating_sub(1)
                 .min(OVERLAY_MAX_EXTRA_CAPTION_LINES);
-            if extra > self.extra_caption_lines {
+            if new_session || extra > self.extra_caption_lines {
                 self.extra_caption_lines = extra;
                 resize_overlay_height(
                     window,

@@ -182,6 +182,11 @@ static TRANSCRIBER: Mutex<Option<CachedTranscriber>> = Mutex::new(None);
 /// Monotonic counter distinguishing capture sessions for partial results.
 static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Recording identity survives capture teardown through processing and delivery.
+pub(super) fn current_session_generation() -> u64 {
+    SESSION_GENERATION.load(Ordering::Acquire)
+}
+
 /// `true` while a partial transcription inference is running on its worker
 /// thread — prevents overlapping inferences.
 static PARTIAL_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
