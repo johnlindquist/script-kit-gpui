@@ -326,18 +326,22 @@ pub(crate) fn apply_registered_surface_command(
             let (entity, handle) = registered_notes_owner(&target, cx)?;
             match command {
                 protocol::BatchCommand::SetInput { text } => {
-                    handle.update(cx, |_, window, cx| {
+                    crate::notes::update_notes_window_detached(handle, cx, |window, cx| {
                         entity.update(cx, |app, cx| {
                             app.set_editor_text_for_automation(text.clone(), window, cx)
                         });
                     })?
                 }
-                protocol::BatchCommand::OpenActions => handle.update(cx, |_, window, cx| {
-                    entity.update(cx, |app, cx| app.open_actions_panel(window, cx));
-                })?,
-                protocol::BatchCommand::TogglePreview => handle.update(cx, |_, window, cx| {
-                    entity.update(cx, |app, cx| app.toggle_preview(window, cx));
-                })?,
+                protocol::BatchCommand::OpenActions => {
+                    crate::notes::update_notes_window_detached(handle, cx, |window, cx| {
+                        entity.update(cx, |app, cx| app.open_actions_panel(window, cx));
+                    })?
+                }
+                protocol::BatchCommand::TogglePreview => {
+                    crate::notes::update_notes_window_detached(handle, cx, |window, cx| {
+                        entity.update(cx, |app, cx| app.toggle_preview(window, cx));
+                    })?
+                }
                 _ => return Err(unsupported_batch_command_error(kind, command).into()),
             }
             return Ok(None);
