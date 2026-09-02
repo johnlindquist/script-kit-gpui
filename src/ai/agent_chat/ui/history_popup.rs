@@ -1010,11 +1010,16 @@ impl AgentChatHistoryPopupWindow {
 
         unregister_history_popup_automation_window(self.generation);
         if reconcile_owner {
-            if let Some(view) = self.source_view.upgrade() {
-                view.update(cx, |view, cx| {
-                    view.dismiss_history_popup_from_window(self.generation, reason, cx);
-                });
-            }
+            // Popup synchronization can already hold the source view's lease.
+            let source_view = self.source_view.clone();
+            let generation = self.generation;
+            cx.defer(move |cx| {
+                if let Some(view) = source_view.upgrade() {
+                    view.update(cx, |view, cx| {
+                        view.dismiss_history_popup_from_window(generation, reason, cx);
+                    });
+                }
+            });
         }
 
         if restore_focus {
