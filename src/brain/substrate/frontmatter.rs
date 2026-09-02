@@ -24,6 +24,9 @@ pub struct BrainFrontmatter {
     /// User-provided "why" retained from older annotated clipboard captures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// User metadata not owned by the application, including nested YAML values.
+    #[serde(flatten)]
+    pub extra: serde_yaml::Mapping,
 }
 
 impl BrainFrontmatter {
@@ -37,6 +40,7 @@ impl BrainFrontmatter {
             pinned: false,
             source: None,
             why: None,
+            extra: serde_yaml::Mapping::new(),
         }
     }
 
@@ -51,7 +55,7 @@ impl BrainFrontmatter {
     }
 
     /// Serialize frontmatter plus body into a markdown document.
-    pub fn render(&self, body: &str) -> String {
+    pub fn render(&self, body: &str) -> Result<String> {
         let mut lines = Vec::new();
         lines.push("---".to_string());
         lines.push(format!("id: {}", self.id));
@@ -75,16 +79,24 @@ impl BrainFrontmatter {
         if let Some(why) = &self.why {
             lines.push(format!("why: {}", quote_yaml_scalar(why)));
         }
+        if !self.extra.is_empty() {
+            let mut extra = serde_yaml::to_string(&self.extra)?;
+            // Joining the lines restores one separator; retain scalar trailing newlines.
+            if extra.ends_with('\n') {
+                extra.truncate(extra.len() - 1);
+            }
+            lines.push(extra);
+        }
         lines.push("---".to_string());
         lines.push(String::new());
 
         let body = body.trim_start_matches(['\n', '\r']);
-        if body.is_empty() {
+        Ok(if body.is_empty() {
             lines.join("\n")
         } else {
             lines.push(body.to_string());
             lines.join("\n")
-        }
+        })
     }
 
     /// Parse frontmatter and body from a markdown document.
@@ -115,22 +127,57 @@ impl BrainFrontmatter {
                 pinned: parsed.pinned.unwrap_or(false),
                 source: parsed.source,
                 why: parsed.why,
+                extra: parsed.extra,
             },
             body,
         ))
     }
 
-    /// Merge tags, aliases, and source into an existing document body using the
-    /// notes metadata conventions.
-    pub fn merge_into_body(&self, body: &str) -> String {
-        merge_frontmatter(
+    /// Merge visible managed metadata and custom YAML into the document body.
+    pub fn merge_into_body(&self, body: &str) -> Result<String> {
+        let merged = merge_frontmatter(
             body,
             MetadataFrontmatterPatch {
                 tags: self.tags.clone(),
                 aliases: self.aliases.clone(),
                 source: self.source.clone(),
             },
-        )
+        );
+        if self.extra.is_empty() {
+            return Ok(merged);
+        }
+        let mut fields = parse_frontmatter_block(&merged)
+            .map(|raw| serde_yaml::from_str::<serde_yaml::Mapping>(&raw))
+            .transpose()?
+            .unwrap_or_default();
+        fields.extend(
+            self.extra
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        Ok(format!(
+            "---\n{}---\n\n{}",
+            serde_yaml::to_string(&fields)?,
+            strip_frontmatter(&merged)
+        ))
+    }
+
+    /// Preserve editor-supplied metadata without accepting replacement identities.
+    pub fn merge_extra_from_content(&mut self, content: &str) -> Result<()> {
+        let Some(raw) = parse_frontmatter_block(content) else {
+            return Ok(());
+        };
+        let fields: serde_yaml::Mapping =
+            serde_yaml::from_str(&raw).context("parsing user note frontmatter")?;
+        self.extra.extend(fields.into_iter().filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                Some(
+                    "id" | "created" | "updated" | "tags" | "aliases" | "pinned" | "source" | "why"
+                )
+            )
+        }));
+        Ok(())
     }
 }
 
@@ -144,6 +191,8 @@ struct BrainFrontmatterYaml {
     pinned: Option<bool>,
     source: Option<String>,
     why: Option<String>,
+    #[serde(flatten)]
+    extra: serde_yaml::Mapping,
 }
 
 fn quote_yaml_scalar(value: &str) -> String {
@@ -157,9 +206,9 @@ fn parse_frontmatter_block(content: &str) -> Option<String> {
     let body_start = content.len() - rest.len();
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
-        if line.trim_end_matches(['\n', '\r']).trim() == "---" {
+        if line.trim_end() == "---" {
             let body_end = body_start + offset;
-            return Some(content[body_start..body_end].trim_end().to_string());
+            return Some(content[body_start..body_end].to_string());
         }
         offset += line.len();
     }

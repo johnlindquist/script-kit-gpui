@@ -239,7 +239,7 @@ fn frontmatter_bounds(content: &str) -> Option<(usize, usize, usize)> {
     let mut offset = content_start;
     for line in rest.split_inclusive('\n') {
         let line_end = offset + line.len();
-        if line.trim_end_matches(['\n', '\r']).trim() == "---" {
+        if line.trim_end() == "---" {
             return Some((content_start, offset, line_end));
         }
         offset = line_end;

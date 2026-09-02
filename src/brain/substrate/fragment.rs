@@ -59,7 +59,7 @@ pub fn write_fragment_with_why(
     if let Some(why) = why.filter(|value| !value.trim().is_empty()) {
         frontmatter = frontmatter.with_why(why);
     }
-    let document = frontmatter.render(content.trim());
+    let document = frontmatter.render(content.trim())?;
 
     // Serialize slug dedup + write under the process-wide brain write lock so
     // two concurrent fragment writers cannot pick the same slug and clobber each

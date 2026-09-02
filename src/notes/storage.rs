@@ -298,14 +298,20 @@ fn note_body_for_file(content: &str) -> String {
     metadata::strip_frontmatter(content).to_string()
 }
 
-fn user_facing_content(frontmatter: &BrainFrontmatter, body: &str) -> String {
+fn user_facing_content(frontmatter: &BrainFrontmatter, body: &str) -> Result<String> {
     frontmatter.merge_into_body(body)
 }
 
-fn brain_frontmatter_from_note(note: &Note, preserved_source: Option<String>) -> BrainFrontmatter {
+fn brain_frontmatter_from_note(
+    note: &Note,
+    preserved: Option<BrainFrontmatter>,
+) -> Result<BrainFrontmatter> {
     let parsed = metadata::parse_note_metadata(&note.title, &note.content);
+    let (preserved_source, extra) = preserved
+        .map(|frontmatter| (frontmatter.source, frontmatter.extra))
+        .unwrap_or_default();
     let source = preserved_source.or_else(|| source_from_note_content(&note.content));
-    BrainFrontmatter {
+    let mut frontmatter = BrainFrontmatter {
         id: note.id,
         created: note.created_at,
         updated: note.updated_at,
@@ -319,7 +325,10 @@ fn brain_frontmatter_from_note(note: &Note, preserved_source: Option<String>) ->
         pinned: note.is_pinned,
         source,
         why: None,
-    }
+        extra,
+    };
+    frontmatter.merge_extra_from_content(&note.content)?;
+    Ok(frontmatter)
 }
 
 fn source_from_note_content(content: &str) -> Option<String> {
@@ -339,10 +348,10 @@ fn note_from_brain_document(
     body: &str,
     deleted_at: Option<DateTime<Utc>>,
     sort_order: i32,
-) -> Note {
-    let content = user_facing_content(&frontmatter, body);
+) -> Result<Note> {
+    let content = user_facing_content(&frontmatter, body)?;
     let title = Note::with_content(&content).title;
-    Note {
+    Ok(Note {
         id: frontmatter.id,
         title,
         content,
@@ -351,7 +360,7 @@ fn note_from_brain_document(
         deleted_at,
         is_pinned: frontmatter.pinned,
         sort_order,
-    }
+    })
 }
 
 fn load_note_from_file(
@@ -367,7 +376,7 @@ fn load_note_from_file(
         .parse_document(&raw)
         .with_context(|| format!("parsing note file {}", path.display()))?;
     let slug = slug_from_path(path).context("note file missing slug stem")?;
-    let note = note_from_brain_document(frontmatter, &body, deleted_at, sort_order);
+    let note = note_from_brain_document(frontmatter, &body, deleted_at, sort_order)?;
     Ok((note, slug, hash))
 }
 
@@ -735,13 +744,13 @@ fn write_canonical_note_file(
     slug: &str,
 ) -> Result<String> {
     let path = substrate.paths().note_file(slug);
-    let preserved_source = brain_io::read_private_document_if_present(&path)?
+    let preserved_frontmatter = brain_io::read_private_document_if_present(&path)?
         .and_then(|raw| substrate.parse_document(&raw).ok())
-        .and_then(|(frontmatter, _)| frontmatter.source);
+        .map(|(frontmatter, _)| frontmatter);
 
     guard_external_edit_before_write(&path, note.id)?;
 
-    let frontmatter = brain_frontmatter_from_note(note, preserved_source);
+    let frontmatter = brain_frontmatter_from_note(note, preserved_frontmatter)?;
     let body = note_body_for_file(&note.content);
     substrate.write_document(&path, &frontmatter, &body)?;
 
@@ -1112,8 +1121,8 @@ pub(crate) fn verify_saved_note_content(id: NoteId, expected: &str) -> Result<()
         frontmatter.id == id,
         "saved Notes canonical identity differs"
     );
-    let expected_raw = brain_frontmatter_from_note(&note, frontmatter.source)
-        .render(&note_body_for_file(expected));
+    let expected_raw = brain_frontmatter_from_note(&note, Some(frontmatter))?
+        .render(&note_body_for_file(expected))?;
     anyhow::ensure!(raw == expected_raw, "saved Notes canonical content differs");
     Ok(())
 }

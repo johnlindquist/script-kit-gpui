@@ -1257,6 +1257,69 @@ mod tests {
     }
 
     #[test]
+    fn test_save_note_preserves_custom_frontmatter_through_reload() {
+        let _guard = notes_db_test_guard();
+        init_notes_db().expect("notes db should initialize before custom frontmatter test");
+        let token = unique_test_token("canonical_custom_frontmatter");
+        let custom = "owner: Alice\ncustom_nested:\n  tags: [one, two]\n  id: nested-user-id\n  enabled: true\nsummary: |+\n  first line\n  ---\n\n  last line\n\n\n";
+        let expected: serde_yaml::Mapping = serde_yaml::from_str(custom).expect("custom fields");
+        let note = Note::with_content(format!(
+            "---\nid: not-the-note-id\ncreated: not-a-timestamp\nupdated: not-a-timestamp\n{custom}---\n# {token}\nBody sentinel"
+        ));
+        let id = note.id;
+        save_note(&note).expect("save custom frontmatter");
+
+        let substrate = notes_substrate().expect("substrate");
+        let path = note_file_path(id)
+            .expect("canonical path lookup")
+            .expect("canonical path");
+        let raw = brain_io::read_private_document(&path).expect("read canonical document");
+        let (frontmatter, body) = substrate
+            .parse_document(&raw)
+            .expect("parse canonical document");
+        assert_eq!(frontmatter.id, id);
+        assert_eq!(frontmatter.created, note.created_at);
+        assert_eq!(frontmatter.updated, note.updated_at);
+        assert_eq!(frontmatter.extra, expected);
+        assert!(body.contains("Body sentinel"));
+        verify_saved_note_content(id, &note.content).expect("verify saved document");
+
+        let (mut loaded, _, _) =
+            load_note_from_file(&substrate, &path, None, 0).expect("reload note");
+        let mut visible = BrainFrontmatter::new(id, note.created_at, note.updated_at);
+        visible
+            .merge_extra_from_content(&loaded.content)
+            .expect("read visible custom fields");
+        assert_eq!(visible.extra, expected);
+        loaded.content.push_str("\nEdited after reload");
+        save_note(&loaded).expect("save reloaded note");
+
+        let raw = brain_io::read_private_document(&path).expect("read rewritten document");
+        let (frontmatter, body) = substrate
+            .parse_document(&raw)
+            .expect("parse rewritten document");
+        assert_eq!(frontmatter.extra, expected);
+        assert!(body.ends_with("Edited after reload"));
+
+        // Older indexes may contain only the body; a routine edit must not
+        // erase canonical metadata the old reader did not expose.
+        loaded.content = format!("# {token}\nEdited from a body-only index");
+        save_note(&loaded).expect("save body-only indexed note");
+        rebuild_index_from_files().expect("rebuild from canonical documents");
+        let rebuilt = get_note(id)
+            .expect("read rebuilt note")
+            .expect("rebuilt note");
+        let mut visible = BrainFrontmatter::new(id, note.created_at, note.updated_at);
+        visible
+            .merge_extra_from_content(&rebuilt.content)
+            .expect("read rebuilt custom fields");
+        assert_eq!(visible.extra, expected);
+        assert!(rebuilt.content.ends_with("Edited from a body-only index"));
+
+        delete_note_permanently(id).expect("cleanup custom frontmatter note");
+    }
+
+    #[test]
     fn test_rebuild_index_from_files_preserves_cart_items_for_rebuilt_notes() {
         let _guard = notes_db_test_guard();
         init_notes_db().expect("notes db should initialize before cart rebuild preserve test");

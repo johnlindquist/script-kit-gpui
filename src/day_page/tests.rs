@@ -36,7 +36,7 @@ fn write_fragment(
     let parent = path.parent().expect("fragment parent");
     fs::create_dir_all(parent).expect("fragments dir");
     let frontmatter = BrainFrontmatter::new(NoteId::new(), now, now).with_source(source);
-    fs::write(&path, frontmatter.render(body)).expect("write fragment");
+    fs::write(&path, frontmatter.render(body).expect("render fragment")).expect("write fragment");
     path
 }
 

@@ -181,7 +181,7 @@ impl BrainSubstrate {
         if !self.paths.contains(path) {
             bail!("refusing to write outside brain tree: {}", path.display());
         }
-        let document = frontmatter.render(body);
+        let document = frontmatter.render(body)?;
         io::atomic_write(path, &document)
     }
 
@@ -580,9 +580,13 @@ mod tests {
             pinned: true,
             source: Some("scriptkit://agent-chat/thread-123".to_string()),
             why: None,
+            extra: serde_yaml::from_str(
+                "owner: Alice\nsummary: keep this\ncustom:\n  tags: [nested]\n",
+            )
+            .expect("custom metadata"),
         };
 
-        let rendered = frontmatter.render("# Title\n\nBody text");
+        let rendered = frontmatter.render("# Title\n\nBody text").expect("render");
         let (parsed, body) = substrate.parse_document(&rendered).expect("parse");
 
         assert_eq!(parsed, frontmatter);
