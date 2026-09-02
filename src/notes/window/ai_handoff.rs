@@ -476,6 +476,7 @@ impl NotesApp {
 
         let focus_semantic_id = match self.current_focus_surface() {
             super::focus::NotesFocusSurface::Editor => "input:notes-editor",
+            super::focus::NotesFocusSurface::Search => "notes-search",
             super::focus::NotesFocusSurface::Preview => "notes-preview",
             super::focus::NotesFocusSurface::ActionsPanel => "notes-actions",
             super::focus::NotesFocusSurface::BrowsePanel => "notes-switcher",
@@ -1031,6 +1032,7 @@ pub(crate) fn restore_notes_host_return(
             }
 
             let surface = match snapshot.focus_semantic_id {
+                "notes-search" => super::focus::NotesFocusSurface::Search,
                 "notes-preview" => super::focus::NotesFocusSurface::Preview,
                 "notes-actions" => super::focus::NotesFocusSurface::ActionsPanel,
                 "notes-switcher" => super::focus::NotesFocusSurface::BrowsePanel,

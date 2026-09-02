@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NotesFocusSurface {
     Editor,
+    Search,
     Preview,
     ActionsPanel,
     BrowsePanel,
@@ -12,8 +13,11 @@ pub(super) enum NotesFocusSurface {
 fn primary_focus_surface_for_state(
     preview_enabled: bool,
     has_kit_resource_preview: bool,
+    show_search: bool,
 ) -> NotesFocusSurface {
-    if preview_enabled || has_kit_resource_preview {
+    if show_search {
+        NotesFocusSurface::Search
+    } else if preview_enabled || has_kit_resource_preview {
         NotesFocusSurface::Preview
     } else {
         NotesFocusSurface::Editor
@@ -48,7 +52,11 @@ impl NotesApp {
     }
 
     pub(super) fn primary_focus_surface(&self) -> NotesFocusSurface {
-        primary_focus_surface_for_state(self.preview_enabled, self.kit_resource_preview.is_some())
+        primary_focus_surface_for_state(
+            self.preview_enabled,
+            self.kit_resource_preview.is_some(),
+            self.show_search,
+        )
     }
 
     pub(super) fn current_focus_surface(&self) -> NotesFocusSurface {
@@ -145,6 +153,10 @@ impl NotesApp {
                 self.editor_state
                     .update(cx, |state, cx| state.focus(window, cx));
             }
+            NotesFocusSurface::Search => {
+                self.search_state
+                    .update(cx, |state, cx| state.focus(window, cx));
+            }
             NotesFocusSurface::Preview
             | NotesFocusSurface::ActionsPanel
             | NotesFocusSurface::BrowsePanel => {
@@ -172,18 +184,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn primary_focus_tracks_the_rendered_editor_or_preview_surface() {
-        assert_eq!(
-            primary_focus_surface_for_state(false, false),
-            NotesFocusSurface::Editor
-        );
-        assert_eq!(
-            primary_focus_surface_for_state(true, false),
-            NotesFocusSurface::Preview
-        );
-        assert_eq!(
-            primary_focus_surface_for_state(false, true),
-            NotesFocusSurface::Preview
-        );
+    fn primary_focus_tracks_the_rendered_input_or_preview_surface() {
+        for (preview_enabled, has_kit_resource_preview, non_search_surface) in [
+            (false, false, NotesFocusSurface::Editor),
+            (true, false, NotesFocusSurface::Preview),
+            (false, true, NotesFocusSurface::Preview),
+            (true, true, NotesFocusSurface::Preview),
+        ] {
+            assert_eq!(
+                primary_focus_surface_for_state(preview_enabled, has_kit_resource_preview, false),
+                non_search_surface
+            );
+            assert_eq!(
+                primary_focus_surface_for_state(preview_enabled, has_kit_resource_preview, true),
+                NotesFocusSurface::Search
+            );
+        }
     }
 }

@@ -495,7 +495,7 @@ impl NotesApp {
         self.request_focus_surface(focus::NotesFocusSurface::BrowsePanel, window, cx);
     }
 
-    /// Close the browse panel (note switcher) and refocus the editor
+    /// Close the browse panel (note switcher) and restore the primary focus surface
     pub(super) fn close_browse_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Close the note switcher CommandBar window
         self.note_switcher.close(cx);
