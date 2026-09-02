@@ -1848,7 +1848,7 @@ mod tests {
     #[test]
     fn ordinary_array_find_calls_and_undeclared_custom_metadata_are_not_sdk_claims() {
         let mut script = make_script("ordinary", "/tmp/ordinary.ts");
-        script.body = Some("items.find(item => item.name === 'find')".to_string());
+        script.body = Some("items.find(item => item.name === 'find')".into());
         script.typed_metadata = Some(TypedMetadata {
             extra: HashMap::from([(
                 "capabilities".to_string(),

@@ -119,7 +119,7 @@ pub(crate) fn read_scripts_from_dir(
                     "Failed to read scripts directory: {}",
                     scripts_dir.display()
                 )
-            })
+            });
         }
     };
     entries
@@ -166,7 +166,7 @@ fn load_script_entry(entry: std::fs::DirEntry, kit_path: &Path) -> Result<Option
         plugin_id: String::new(),
         plugin_title: None,
         kit_name,
-        body: Some(body),
+        body: Some(body.into()),
     })))
 }
 

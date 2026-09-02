@@ -206,7 +206,6 @@ impl ScriptListApp {
             },
         );
 
-
         // Pre-compute colors
         let list_colors = ListItemColors::from_theme(&self.theme);
         let text_primary = self.theme.colors.text.primary;
@@ -258,7 +257,7 @@ impl ScriptListApp {
 
                                 // Use pre-decoded icon if available, fallback to emoji
                                 let icon = match &app.icon {
-                                    Some(img) => list_item::IconKind::Image(img.clone()),
+                                    Some(img) => list_item::IconKind::Image(img.image().clone()),
                                     None => list_item::IconKind::Emoji("📱".to_string()),
                                 };
 

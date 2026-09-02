@@ -456,7 +456,7 @@ fn browser_tab_icon_for_render(
 
     // Fall back to browser app icon
     if let Some(icon) = app_icons.get(tab.browser_bundle_id.as_ref()) {
-        return list_item::IconKind::Image(icon.clone());
+        return list_item::IconKind::Image(icon.image().clone());
     }
 
     // Last resort: browser-specific emoji

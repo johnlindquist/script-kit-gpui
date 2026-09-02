@@ -499,7 +499,7 @@ mod tests {
             name: "Retained".into(),
             path: PathBuf::from("retained.app"),
             bundle_id: None,
-            icon: Some(icon.clone()),
+            icon: Some(DecodedIcon::new(icon.clone())),
         };
         complete_app_scan(&cache, Ok(vec![app])).expect("initial snapshot");
         let error = complete_app_scan(&cache, Err(anyhow::anyhow!("native scan failed")))
@@ -515,7 +515,7 @@ mod tests {
             let apps = cache.apps.as_ref().expect("retained snapshot");
             assert_eq!(apps[0].path, PathBuf::from("retained.app"));
             assert!(Arc::ptr_eq(
-                apps[0].icon.as_ref().expect("retained icon"),
+                apps[0].icon.as_ref().expect("retained icon").image(),
                 &icon
             ));
         }

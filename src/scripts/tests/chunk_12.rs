@@ -344,10 +344,8 @@ fn test_get_grouped_results_prefers_last_selected_builtin_for_exact_query() {
     assert_eq!(baseline_first, "Clipboard History");
 
     let mut input_history = crate::input_history::InputHistory::new();
-    input_history.add_entry_with_selection(
-        "history",
-        Some("builtin/dictation-history".to_string()),
-    );
+    input_history
+        .add_entry_with_selection("history", Some("builtin/dictation-history".to_string()));
 
     let (grouped, results) = get_grouped_results_with_input_history(
         &scripts,
@@ -457,7 +455,7 @@ fn test_get_grouped_results_excludes_legacy_vault_script_for_unrelated_query() {
                     .to_string(),
             ),
             alias: Some("vault".to_string()),
-            body: Some("const amazon = 'poison';".to_string()),
+            body: Some("const amazon = 'poison';".into()),
             ..Default::default()
         },
     ]);

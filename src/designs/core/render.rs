@@ -250,14 +250,14 @@ pub fn render_design_item(
                 SearchResult::App(am) => {
                     // Apps use pre-decoded icons, fallback to File SVG
                     let icon = match &am.app.icon {
-                        Some(img) => IconKind::Image(img.clone()),
+                        Some(img) => IconKind::Image(img.image().clone()),
                         None => IconKind::Svg("File".to_string()),
                     };
                     (am.app.name.clone(), None, None, Some(icon))
                 }
                 SearchResult::Window(wm) => {
                     let icon = match &wm.app_icon {
-                        Some(img) => IconKind::Image(img.clone()),
+                        Some(img) => IconKind::Image(img.image().clone()),
                         None => IconKind::Svg("panel-top".to_string()),
                     };
                     (

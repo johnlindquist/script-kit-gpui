@@ -100,7 +100,7 @@ impl MainMenuContentDigest {
     fn new() -> Self {
         use sha2::Digest;
         let mut digest = Self(sha2::Sha256::new());
-        digest.text("script-kit-main-menu-content-v2");
+        digest.text("script-kit-main-menu-content-v3");
         digest
     }
     fn bytes(&mut self, value: &[u8]) {
@@ -211,23 +211,10 @@ impl MainMenuContentDigest {
     fn serialized(&mut self, value: &impl Serialize) {
         self.json(&serde_json::to_value(value).expect("JSON-compatible launcher metadata"));
     }
-    #[expect(
-        clippy::expect_used,
-        reason = "RenderImage is immutable and frame_count bounds every hashed frame."
-    )]
     fn icon(&mut self, value: Option<&crate::app_launcher::DecodedIcon>) {
         self.flag(value.is_some());
         if let Some(image) = value {
-            self.number(image.frame_count() as u64);
-            for frame in 0..image.frame_count() {
-                let size = image.size(frame);
-                self.number(size.width.0 as u64);
-                self.number(size.height.0 as u64);
-                let (numerator, denominator) = image.delay(frame).numer_denom_ms();
-                self.number(numerator as u64);
-                self.number(denominator as u64);
-                self.bytes(image.as_bytes(frame).expect("existing icon frame"));
-            }
+            self.bytes(image.content_digest());
         }
     }
     fn script(&mut self, script: &super::Script) {
@@ -243,7 +230,10 @@ impl MainMenuContentDigest {
         self.text(&script.plugin_id);
         self.optional_text(script.plugin_title.as_deref());
         self.optional_text(script.kit_name.as_deref());
-        self.optional_text(script.body.as_deref());
+        self.flag(script.body.is_some());
+        if let Some(body) = &script.body {
+            self.bytes(body.content_digest());
+        }
     }
     fn finish(self) -> String {
         use sha2::Digest;
@@ -1516,7 +1506,11 @@ mod tests {
 
     #[test]
     fn identical_content_ignores_ranking_but_detects_body_and_action_changes() {
-        let result = script_result();
+        let mut result = script_result();
+        let SearchResult::Script(item) = &mut result else {
+            unreachable!()
+        };
+        Arc::make_mut(&mut item.script).body = Some("console.log('original')".into());
         let fingerprint = result.main_menu_content_fingerprint();
         assert_eq!(fingerprint.len(), 64);
         let mut ranked = result.clone();

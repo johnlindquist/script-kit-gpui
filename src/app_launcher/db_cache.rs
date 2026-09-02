@@ -167,12 +167,14 @@ fn load_apps_from_connection(conn: &Connection) -> Result<Vec<AppInfo>> {
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!("Reading cached application path: {}", path.display())
-                })
+                });
             }
         }
         // A malformed optional image is not an invalid application catalogue.
         let icon = icon_blob.and_then(|bytes| {
-            crate::list_item::decode_png_to_render_image_with_bgra_conversion(&bytes).ok()
+            crate::list_item::decode_png_to_render_image_with_bgra_conversion(&bytes)
+                .ok()
+                .map(DecodedIcon::new)
         });
         if icon.is_some() {
             icons_decoded += 1;

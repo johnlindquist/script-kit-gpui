@@ -963,7 +963,7 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/safe-author-command.ts"),
             extension: "ts".to_string(),
             plugin_id: "main".to_string(),
-            body: Some(format!("const token = '{secret}';")),
+            body: Some(format!("const token = '{secret}';").into()),
             typed_metadata: Some(crate::metadata_parser::TypedMetadata {
                 extra: HashMap::from([
                     ("sdkCapabilities".to_string(), serde_json::json!(["home"])),

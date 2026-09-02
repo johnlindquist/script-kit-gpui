@@ -27,8 +27,55 @@ use cocoa::foundation::NSString as CocoaNSString;
 #[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
 
-/// Pre-decoded icon image for efficient rendering
-pub type DecodedIcon = Arc<gpui::RenderImage>;
+/// Pre-decoded icon and its immutable content digest, computed once off the render path.
+#[derive(Clone, Debug)]
+pub struct DecodedIcon {
+    image: Arc<gpui::RenderImage>,
+    content_digest: [u8; 32],
+}
+
+impl DecodedIcon {
+    #[expect(
+        clippy::expect_used,
+        reason = "frame_count bounds every immutable RenderImage frame."
+    )]
+    pub fn new(image: Arc<gpui::RenderImage>) -> Self {
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
+        digest.update((image.frame_count() as u64).to_be_bytes());
+        for frame in 0..image.frame_count() {
+            let size = image.size(frame);
+            let (numerator, denominator) = image.delay(frame).numer_denom_ms();
+            for value in [
+                size.width.0 as u64,
+                size.height.0 as u64,
+                numerator as u64,
+                denominator as u64,
+            ] {
+                digest.update(value.to_be_bytes());
+            }
+            let bytes = image.as_bytes(frame).expect("existing icon frame");
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        }
+        Self {
+            image,
+            content_digest: digest.finalize().into(),
+        }
+    }
+
+    pub fn image(&self) -> &Arc<gpui::RenderImage> {
+        &self.image
+    }
+
+    pub fn into_image(self) -> Arc<gpui::RenderImage> {
+        self.image
+    }
+
+    pub(crate) fn content_digest(&self) -> &[u8; 32] {
+        &self.content_digest
+    }
+}
 
 /// Information about an installed application
 #[derive(Clone)]

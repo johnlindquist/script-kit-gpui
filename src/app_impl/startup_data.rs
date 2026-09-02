@@ -672,7 +672,9 @@ impl ScriptListApp {
                             16,
                             image::Rgba(rgba),
                         ));
-                        let icon = Arc::new(gpui::RenderImage::new(smallvec::smallvec![frame]));
+                        let icon = app_launcher::DecodedIcon::new(Arc::new(
+                            gpui::RenderImage::new(smallvec::smallvec![frame]),
+                        ));
                         Ok(paths.into_iter().map(|path| (path, icon.clone())).collect())
                     },
                 )

@@ -27,7 +27,7 @@ fn make_script(name: &str, description: Option<&str>, body: Option<&str>) -> Arc
         plugin_id: String::new(),
         plugin_title: None,
         kit_name: Some("test".to_string()),
-        body: body.map(|s| s.to_string()),
+        body: body.map(|s| s.into()),
     })
 }
 
@@ -385,7 +385,7 @@ fn alias_match_does_not_block_content_snippet_when_name_and_description_do_not_m
         plugin_id: String::new(),
         plugin_title: None,
         kit_name: Some("test".to_string()),
-        body: Some("const tok = 1;\n".to_string()),
+        body: Some("const tok = 1;\n".into()),
     })];
 
     let results = fuzzy_search_scripts(&scripts, "tok");
@@ -415,7 +415,7 @@ fn filename_match_remains_primary_when_body_also_matches() {
         plugin_id: String::new(),
         plugin_title: None,
         kit_name: Some("test".to_string()),
-        body: Some("import './utility.ts';\n".to_string()),
+        body: Some("import './utility.ts';\n".into()),
     })];
 
     let results = fuzzy_search_scripts(&scripts, "utility.ts");

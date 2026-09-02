@@ -32,7 +32,7 @@ fn make_script_with_body(name: &str, body: &str) -> Arc<Script> {
             name.to_lowercase().replace(' ', "-")
         )),
         extension: "ts".to_string(),
-        body: Some(body.to_string()),
+        body: Some(body.into()),
         ..Default::default()
     })
 }

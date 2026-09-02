@@ -1,7 +1,7 @@
 fn render_target_badge_content(target: crate::dictation::DictationTarget) -> AnyElement {
     if matches!(target, crate::dictation::DictationTarget::ExternalApp) {
         if let Some(icon) = target_badge_frontmost_app_icon() {
-            return crate::icons::render_image(icon, TARGET_BADGE_ICON_SIZE_PX, 1.0);
+            return crate::icons::render_image(icon.into_image(), TARGET_BADGE_ICON_SIZE_PX, 1.0);
         }
     }
 

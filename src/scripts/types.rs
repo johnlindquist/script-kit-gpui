@@ -3,6 +3,7 @@
 //! This module contains the core data types for scripts, scriptlets,
 //! and search results used throughout the script system.
 
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,6 +11,42 @@ use crate::agents::Agent;
 use crate::fallbacks::collector::FallbackItem;
 use crate::metadata_parser::TypedMetadata;
 use crate::schema_parser::Schema;
+
+/// Immutable script source with its digest captured at construction.
+#[derive(Clone, Debug)]
+pub struct ScriptBody {
+    text: String,
+    digest: [u8; 32],
+}
+
+impl ScriptBody {
+    pub(crate) fn content_digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
+impl From<String> for ScriptBody {
+    fn from(text: String) -> Self {
+        use sha2::Digest;
+
+        let digest = sha2::Sha256::digest(text.as_bytes()).into();
+        Self { text, digest }
+    }
+}
+
+impl From<&str> for ScriptBody {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_owned())
+    }
+}
+
+impl Deref for ScriptBody {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
 
 /// Represents a script file with its metadata
 #[derive(Clone, Debug, Default)]
@@ -37,7 +74,7 @@ pub struct Script {
     /// Used for grouping scripts by their source kit in the main menu
     pub kit_name: Option<String>,
     /// Full file body text, read once at load time for content search
-    pub body: Option<String>,
+    pub body: Option<ScriptBody>,
 }
 
 /// Represents a scriptlet parsed from a markdown file

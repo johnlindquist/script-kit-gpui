@@ -185,7 +185,7 @@ fn collect_app_paths_from_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!("Failed to read application root: {}", root.display())
-                })
+                });
             }
         }
     }
@@ -212,7 +212,9 @@ fn parse_app_bundle_with_icon(path: &Path) -> Result<Option<(AppInfo, Option<Vec
 
     // Pre-decode icon for rendering
     let icon = icon_bytes.as_ref().and_then(|bytes| {
-        crate::list_item::decode_png_to_render_image_with_bgra_conversion(bytes).ok()
+        crate::list_item::decode_png_to_render_image_with_bgra_conversion(bytes)
+            .ok()
+            .map(DecodedIcon::new)
     });
 
     Ok(Some((
@@ -285,7 +287,7 @@ fn plist_value(plist_path: &Path, key_path: &str) -> Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("Reading application plist: {}", plist_path.display()))
+                .with_context(|| format!("Reading application plist: {}", plist_path.display()));
         }
     }
     let output = Command::new("/usr/libexec/PlistBuddy")
@@ -347,7 +349,7 @@ fn resolve_bundle_icon_resource_path(app_path: &Path) -> Result<Option<PathBuf>>
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("Reading application resources: {}", resources_dir.display())
-            })
+            });
         }
     }
     let plist_path = app_path.join("Contents/Info.plist");
@@ -368,7 +370,7 @@ fn resolve_bundle_icon_resource_path(app_path: &Path) -> Result<Option<PathBuf>>
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("Reading application icon resource: {}", icon_path.display())
-                    })
+                    });
                 }
             }
         }
@@ -544,7 +546,7 @@ pub fn read_app_icons(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, DecodedIcon)>
                         .with_context(|| {
                             format!("Decoding application icon: {}", path.display())
                         })?;
-                Ok(Some((path, icon)))
+                Ok(Some((path, DecodedIcon::new(icon))))
             })
             .filter_map(|result: Result<Option<(PathBuf, DecodedIcon)>>| result.transpose())
             .collect()

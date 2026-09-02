@@ -9614,7 +9614,7 @@ text_style.text_inset_left,
                 crate::app_launcher::cached_app_icon_for_bundle(bundle_id)
             }
         }) {
-            crate::icons::render_image(icon, 16.0, 1.0)
+            crate::icons::render_image(icon.into_image(), 16.0, 1.0)
         } else {
             use gpui_component::IconNamed;
             gpui::svg()

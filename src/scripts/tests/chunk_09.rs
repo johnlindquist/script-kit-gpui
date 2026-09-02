@@ -172,7 +172,7 @@ fn test_legacy_ai_vault_script_requires_direct_vault_query() {
                     .to_string(),
             ),
             alias: Some("vault".to_string()),
-            body: Some("const amazon = 'body text must not make legacy Vault match';".to_string()),
+            body: Some("const amazon = 'body text must not make legacy Vault match';".into()),
             ..Default::default()
         },
         Script {
@@ -273,7 +273,7 @@ fn test_builtin_match_struct() {
     let builtin_match = BuiltInMatch {
         entry: entry.clone(),
         score: 100,
-            match_evidence: None,
+        match_evidence: None,
     };
 
     assert_eq!(builtin_match.entry.name, "Test Entry");
