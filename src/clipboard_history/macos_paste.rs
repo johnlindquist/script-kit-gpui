@@ -36,20 +36,42 @@ use tracing::debug;
 #[cfg(target_os = "macos")]
 pub fn copy_image_with_file_url(png_bytes: &[u8], file_path: &Path) -> Result<()> {
     crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
-    // SAFETY: All ObjC objects (pasteboard, data, image, url) are nil-checked after
-    // creation. NSData is created from a valid slice. NSImage/NSURL are initialized
-    // from the validated data/path. Pasteboard writeObjects uses Foundation's copy semantics.
-    unsafe {
-        // Get the general pasteboard
-        let pasteboard: id = NSPasteboard::generalPasteboard(nil);
-        if pasteboard.is_null() {
-            anyhow::bail!("Failed to get general pasteboard");
+    with_prepared_image_file_url_objects(png_bytes, file_path, |objects| {
+        // SAFETY: The prepared objects remain alive through this callback, and
+        // the general pasteboard is checked before either native operation.
+        unsafe {
+            let pasteboard: id = NSPasteboard::generalPasteboard(nil);
+            if pasteboard.is_null() {
+                anyhow::bail!("Failed to get general pasteboard");
+            }
+
+            let _: i64 = msg_send![pasteboard, clearContents];
+            let success: bool = msg_send![pasteboard, writeObjects: objects];
+            if !success {
+                anyhow::bail!("NSPasteboard writeObjects returned false");
+            }
         }
+        Ok(())
+    })?;
 
-        // Clear the pasteboard and get a new change count
-        let _: i64 = msg_send![pasteboard, clearContents];
+    debug!(
+        path = %file_path.display(),
+        png_size = png_bytes.len(),
+        "Copied image with file URL to clipboard (CleanShot-style)"
+    );
+    Ok(())
+}
 
-        // Create NSImage from PNG data
+#[cfg(target_os = "macos")]
+fn with_prepared_image_file_url_objects(
+    png_bytes: &[u8],
+    file_path: &Path,
+    publish: impl FnOnce(id) -> Result<()>,
+) -> Result<()> {
+    let path_str = file_path.to_str().context("File path is not valid UTF-8")?;
+    // SAFETY: Every native object is nil-checked. The image's owned reference
+    // is released on every error path and after the publication callback.
+    unsafe {
         let data: id = NSData::dataWithBytes_length_(
             nil,
             png_bytes.as_ptr() as *const std::ffi::c_void,
@@ -66,8 +88,6 @@ pub fn copy_image_with_file_url(png_bytes: &[u8], file_path: &Path) -> Result<()
             anyhow::bail!("Failed to create NSImage from PNG data");
         }
 
-        // Create NSURL from file path
-        let path_str = file_path.to_str().context("File path is not valid UTF-8")?;
         let ns_string: id = NSString::alloc(nil).init_str(path_str);
         if ns_string.is_null() {
             let _: () = msg_send![image, release];
@@ -75,36 +95,22 @@ pub fn copy_image_with_file_url(png_bytes: &[u8], file_path: &Path) -> Result<()
         }
 
         let url: id = NSURL::fileURLWithPath_(nil, ns_string);
+        let _: () = msg_send![ns_string, release];
         if url.is_null() {
             let _: () = msg_send![image, release];
             anyhow::bail!("Failed to create NSURL from path");
         }
 
-        // Create an array containing both the image and the URL
-        // The order matters: first item is preferred representation
-        // We put the image first so image apps get the image, but file URL is also available
+        // Keep image data first, with the file URL available to text consumers.
         let objects: id = NSArray::arrayWithObjects(nil, &[image, url]);
         if objects.is_null() {
             let _: () = msg_send![image, release];
             anyhow::bail!("Failed to create NSArray for writeObjects");
         }
 
-        // Write both objects to the pasteboard
-        let success: bool = msg_send![pasteboard, writeObjects: objects];
-
-        // Release the image (NSArray retains it, but we need to release our reference)
+        let result = publish(objects);
         let _: () = msg_send![image, release];
-
-        if success {
-            debug!(
-                path = %file_path.display(),
-                png_size = png_bytes.len(),
-                "Copied image with file URL to clipboard (CleanShot-style)"
-            );
-            Ok(())
-        } else {
-            anyhow::bail!("NSPasteboard writeObjects returned false")
-        }
+        result
     }
 }
 
@@ -181,18 +187,46 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn test_copy_image_with_invalid_data_fails() {
-        use tempfile::NamedTempFile;
+    fn image_preparation_precedes_pasteboard_publication() {
+        use std::cell::Cell;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
 
-        // Invalid PNG data
-        let invalid_bytes = b"not a png";
+        let valid_png = create_minimal_png();
+        let invalid_path = PathBuf::from(OsString::from_vec(vec![0xff]));
+        for (bytes, path) in [
+            (b"not a png".as_slice(), Path::new("unused.png")),
+            (valid_png.as_slice(), invalid_path.as_path()),
+        ] {
+            let published = Cell::new(false);
+            let result = objc::rc::autoreleasepool(|| {
+                with_prepared_image_file_url_objects(bytes, path, |_| {
+                    published.set(true);
+                    Ok(())
+                })
+            });
+            assert!(result.is_err());
+            assert!(
+                !published.get(),
+                "preparation failures must not reach the pasteboard publisher"
+            );
+        }
 
-        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
-        let path = temp_file.path();
-
-        // This should fail because NSImage can't parse invalid data
-        let result = copy_image_with_file_url(invalid_bytes, path);
-        assert!(result.is_err(), "Should fail with invalid PNG data");
+        let published = Cell::new(false);
+        let result = objc::rc::autoreleasepool(|| {
+            with_prepared_image_file_url_objects(&valid_png, Path::new("unused.png"), |objects| {
+                published.set(true);
+                let count: usize = unsafe { msg_send![objects, count] };
+                assert_eq!(count, 2, "image and file URL must both be prepared");
+                anyhow::bail!("synthetic publication failure")
+            })
+        });
+        assert!(published.get());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "synthetic publication failure"
+        );
     }
 
     /// Create a minimal valid 1x1 red PNG for testing

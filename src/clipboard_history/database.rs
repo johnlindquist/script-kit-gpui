@@ -471,7 +471,7 @@ pub fn prune_old_entries() -> Result<usize> {
     Ok(deleted)
 }
 
-/// Remove text entries that exceed the configured max length.
+/// Remove oversized text entries, except pinned or brain-kept entries.
 ///
 /// Returns the number of entries deleted.
 pub fn trim_oversize_text_entries() -> Result<usize> {
@@ -486,7 +486,7 @@ pub fn trim_oversize_text_entries() -> Result<usize> {
     let max_len_db = i64::try_from(max_len).unwrap_or(i64::MAX);
     let deleted = conn
         .execute(
-            "DELETE FROM history WHERE brain_kept = 0 AND content_type = 'text' AND length(CAST(content AS BLOB)) > ?",
+            "DELETE FROM history WHERE pinned = 0 AND brain_kept = 0 AND content_type = 'text' AND length(CAST(content AS BLOB)) > ?",
             params![max_len_db],
         )
         .context("Failed to trim oversized text entries")?;
@@ -1322,6 +1322,44 @@ mod tests {
         assert!(get_entry_by_id(&brain_id).is_some());
         assert!(get_entry_by_id(&pinned_id).is_some());
 
+        reset_test_clipboard_db();
+    }
+
+    #[test]
+    fn trim_oversize_text_entries_preserves_pinned_and_brain_kept_rows() {
+        let _guard = test_db_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_test_clipboard_db(&dir.path().join("clipboard.sqlite")).expect("test db");
+
+        let pinned_id = add_entry("pinned legacy", ContentType::Text).expect("pinned add");
+        let brain_id = add_entry("brain legacy", ContentType::Text).expect("brain add");
+        let free_id = add_entry("unprotected legacy", ContentType::Text).expect("free add");
+        let small_id = add_entry("small", ContentType::Text).expect("small add");
+        pin_entry(&pinned_id).expect("pin");
+        mark_brain_kept(&brain_id, 1, None).expect("mark brain kept");
+
+        // Existing rows can exceed the current capture limit after a config change.
+        let oversize = "x".repeat(super::super::config::DEFAULT_MAX_TEXT_CONTENT_LEN + 1);
+        {
+            let conn = get_connection().expect("test connection");
+            let conn = conn.lock().expect("test connection lock");
+            conn.execute(
+                "UPDATE history SET content = ?1 WHERE id IN (?2, ?3, ?4)",
+                params![oversize, pinned_id, brain_id, free_id],
+            )
+            .expect("seed legacy oversized rows");
+        }
+
+        let deleted = trim_oversize_text_entries().expect("trim oversized rows");
+
+        assert!(
+            get_entry_by_id(&pinned_id).is_some(),
+            "size trimming must not delete a pinned clipboard entry"
+        );
+        assert!(get_entry_by_id(&brain_id).is_some());
+        assert!(get_entry_by_id(&free_id).is_none());
+        assert!(get_entry_by_id(&small_id).is_some());
+        assert_eq!(deleted, 1);
         reset_test_clipboard_db();
     }
 }
