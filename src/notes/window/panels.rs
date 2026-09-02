@@ -374,13 +374,45 @@ impl NotesApp {
                 return;
             }
 
-            // Find the note by ID string
-            if let Some(note) = self.notes.iter().find(|n| n.id.as_str() == note_id_str) {
-                let note_id = note.id;
+            // Search rows can reach storage before the window's note cache.
+            let resolved_note_id = match NoteId::parse(note_id_str) {
+                Some(id) if self.notes.iter().any(|note| note.id == id) => Some(id),
+                Some(id) => match storage::get_note(id) {
+                    Ok(note) => note.filter(|note| note.deleted_at.is_none()).map(|note| {
+                        self.notes.insert(0, note);
+                        id
+                    }),
+                    Err(error) => {
+                        let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                        tracing::error!(
+                            error_bytes = safe_error.raw_bytes,
+                            error_sha256 = %safe_error.sha256,
+                            "Failed to load note from switcher"
+                        );
+                        window.push_notification(
+                            gpui_component::notification::Notification::error(
+                                "Selected note could not be loaded",
+                            )
+                            .id1::<NotesApp>("notes-switcher-load-failed"),
+                            cx,
+                        );
+                        cx.notify();
+                        self.close_browse_panel(window, cx);
+                        return;
+                    }
+                },
+                None => None,
+            };
+            if let Some(note_id) = resolved_note_id {
                 if self.replace_active_note_mention_with_note(note_id, window, cx) {
                     return;
                 }
                 self.close_browse_panel(window, cx);
+                // The switcher lists active notes, including when opened from Trash.
+                if self.has_unsaved_changes && !self.save_current_note() {
+                    return;
+                }
+                self.view_mode = NotesViewMode::AllNotes;
                 self.select_note(note_id, window, cx);
                 return;
             }
@@ -392,7 +424,14 @@ impl NotesApp {
                 notes_len = self.notes.len(),
                 "notes_note_switcher_selected_note_not_found",
             );
-            self.show_selected_note_missing_feedback("execute_note_switcher_action", cx);
+            window.push_notification(
+                gpui_component::notification::Notification::error(
+                    "Selected note could not be found",
+                )
+                .id1::<NotesApp>("notes-switcher-not-found"),
+                cx,
+            );
+            cx.notify();
             self.close_browse_panel(window, cx);
             return;
         }
