@@ -95,21 +95,18 @@ type PackagedAssuranceId = typeof REQUIRED_PACKAGED_ASSURANCES[number]["id"];
 type PackagedAssuranceGateId = typeof REQUIRED_PACKAGED_ASSURANCES[number]["gateId"];
 const REQUIRED_DIRECT_SURFACE_MAPPING_COUNT = 54;
 
-const V0_1_18_ADVISORY_GATES = new Set<string>([
-  "packaged-first-install",
-  "packaged-permissions",
-  "packaged-migration",
-  "packaged-mock-ai",
-  "packaged-direct-matrix",
-  "packaged-ratified-performance",
-]);
+// These measurements remain advisory until owner ratification and capture authorization.
+const PACKAGED_ADVISORY_GATES: Record<string, true> = {
+  "packaged-first-install": true,
+  "packaged-permissions": true,
+  "packaged-migration": true,
+  "packaged-mock-ai": true,
+  "packaged-direct-matrix": true,
+  "packaged-ratified-performance": true,
+};
 
-function isV0_1_18AdvisoryGate(
-  gateId: string,
-  release: { version: string; tag: string },
-): boolean {
-  return release.version === "0.1.18" && release.tag === "v0.1.18" &&
-    V0_1_18_ADVISORY_GATES.has(gateId);
+function isPackagedAdvisoryGate(gateId: string): boolean {
+  return Object.hasOwn(PACKAGED_ADVISORY_GATES, gateId);
 }
 
 export const RELEASE_INTEGRATION_SUITES = [
@@ -2173,7 +2170,6 @@ export function buildGateReceipt(options: {
 function readGateReceipts(
   paths: string[],
   sourceSha: string,
-  release: { version: string; tag: string },
 ): Array<GateReceipt & { sha256: string }> {
   const receipts = paths.map((path) => {
     const receipt = readJson(path) as unknown as GateReceipt;
@@ -2203,7 +2199,7 @@ function readGateReceipts(
     ids.add(receipt.gateId);
   }
   for (const gateId of Object.keys(REQUIRED_GATE_CLASSES)) {
-    requireCondition(ids.has(gateId) || isV0_1_18AdvisoryGate(gateId, release),
+    requireCondition(ids.has(gateId) || isPackagedAdvisoryGate(gateId),
       `missing required release gate: ${gateId}`);
   }
 
@@ -2225,10 +2221,10 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
   const executableSha = sha256File(executablePath);
   const evidencePaths = options.evidencePaths.filter((path) => {
     const gateId = basename(path, ".json");
-    return basename(path) !== `${gateId}.json` || !isV0_1_18AdvisoryGate(gateId, options) ||
+    return basename(path) !== `${gateId}.json` || !isPackagedAdvisoryGate(gateId) ||
       lstatSync(path, { throwIfNoEntry: false }) !== undefined;
   });
-  const gates = readGateReceipts(evidencePaths, options.sourceSha, options);
+  const gates = readGateReceipts(evidencePaths, options.sourceSha);
   const generatedDesignGate = gates.find((gate) => gate.gateId === "generated-design-contracts");
   const designTokensSha = sha256File(options.designTokensPath);
   const designCssSha = sha256File(options.designCssPath);
@@ -2255,7 +2251,7 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
     "packaged signing attestation does not prove every distribution-security control");
   for (const journeyId of REQUIRED_PACKAGED_JOURNEYS) {
     const journey = gates.find((gate) => gate.gateId === journeyId);
-    if (!journey && isV0_1_18AdvisoryGate(journeyId, options)) continue;
+    if (!journey && isPackagedAdvisoryGate(journeyId)) continue;
     requireCondition(journey?.result?.journeyId === journeyId &&
       journey.result.binarySha256 === executableSha &&
       journey.result.sidecarSha256 === signingGate.result.sidecarSha256 &&
@@ -2264,7 +2260,7 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
   }
   for (const assurance of REQUIRED_PACKAGED_ASSURANCES) {
     const gate = gates.find((candidate) => candidate.gateId === assurance.gateId);
-    if (!gate && isV0_1_18AdvisoryGate(assurance.gateId, options)) continue;
+    if (!gate && isPackagedAdvisoryGate(assurance.gateId)) continue;
     requireCondition(gate?.result?.assuranceId === assurance.id &&
       gate.result.binarySha256 === executableSha &&
       gate.result.sidecarSha256 === signingGate.result.sidecarSha256,
@@ -2295,7 +2291,7 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
   requireCondition(canonicalBindingIds.length === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT &&
     new Set(canonicalBindingIds).size === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT,
     "surface contracts do not contain all canonical generated-contract bindings");
-  requireCondition((!directGate && isV0_1_18AdvisoryGate("packaged-direct-matrix", options)) ||
+  requireCondition((!directGate && isPackagedAdvisoryGate("packaged-direct-matrix")) ||
     (directGate?.result?.bindingIds?.length === canonicalBindingIds.length &&
       directGate.result.bindingIds.every((id, index) => id === canonicalBindingIds[index])),
     "direct_matrix target IDs do not exactly match all canonical generated-contract bindings");
@@ -2412,7 +2408,7 @@ function requireValidManifestGates(manifest: ReleaseManifest): void {
       `manifest evidence was modified after execution: ${gate.gateId}`);
   }
   for (const gateId of Object.keys(REQUIRED_GATE_CLASSES)) {
-    requireCondition(gateIds.has(gateId) || isV0_1_18AdvisoryGate(gateId, manifest),
+    requireCondition(gateIds.has(gateId) || isPackagedAdvisoryGate(gateId),
       `manifest is missing required release gate: ${gateId}`);
   }
   requireCondition(manifest.verification.status === "pass" &&
@@ -2528,7 +2524,7 @@ export function verifyReleaseManifest(options: {
     "packaged signing evidence does not match the published application and Pi sidecar");
   for (const journeyId of REQUIRED_PACKAGED_JOURNEYS) {
     const journey = manifest.verification.gates.find((gate) => gate.gateId === journeyId);
-    if (!journey && isV0_1_18AdvisoryGate(journeyId, manifest)) continue;
+    if (!journey && isPackagedAdvisoryGate(journeyId)) continue;
     requireCondition(journey?.evidenceClass === "PACKAGED_APP" &&
       journey.result?.journeyId === journeyId &&
       journey.result.binarySha256 === manifest.bundle.executable.sha256 &&
@@ -2539,7 +2535,7 @@ export function verifyReleaseManifest(options: {
   for (const assurance of REQUIRED_PACKAGED_ASSURANCES) {
     const gate = manifest.verification.gates.find((candidate) =>
       candidate.gateId === assurance.gateId);
-    if (!gate && isV0_1_18AdvisoryGate(assurance.gateId, manifest)) continue;
+    if (!gate && isPackagedAdvisoryGate(assurance.gateId)) continue;
     requireCondition(gate?.evidenceClass === assurance.evidenceClass &&
       gate.result?.assuranceId === assurance.id &&
       gate.result.binarySha256 === manifest.bundle.executable.sha256 &&
@@ -2596,7 +2592,7 @@ export function buildReleaseScorecard(manifest: ReleaseManifest): ReleaseScoreca
   const performance = manifest.verification.gates.find((gate) =>
     gate.gateId === "packaged-ratified-performance");
   requireCondition((!performance &&
-    isV0_1_18AdvisoryGate("packaged-ratified-performance", manifest)) ||
+    isPackagedAdvisoryGate("packaged-ratified-performance")) ||
     (performance?.evidenceClass === "RUNTIME_VISIBLE" &&
     performance.result?.assuranceId === "ratified_perf" &&
     performance.result.observationLayer === "PAINTED_OUTPUT" &&
@@ -2608,7 +2604,7 @@ export function buildReleaseScorecard(manifest: ReleaseManifest): ReleaseScoreca
     "release scorecard requires explicitly authorized actual painted output from the signed candidate");
   const directMatrix = manifest.verification.gates.find((gate) =>
     gate.gateId === "packaged-direct-matrix");
-  requireCondition((!directMatrix && isV0_1_18AdvisoryGate("packaged-direct-matrix", manifest)) ||
+  requireCondition((!directMatrix && isPackagedAdvisoryGate("packaged-direct-matrix")) ||
     (directMatrix?.result?.assuranceId === "direct_matrix" &&
     directMatrix.result.expectedMappings === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT &&
     directMatrix.result.directProvenMappings === directMatrix.result.expectedMappings &&
@@ -2676,7 +2672,7 @@ export function buildReleaseScorecard(manifest: ReleaseManifest): ReleaseScoreca
     }, ...REQUIRED_PACKAGED_JOURNEYS.map((id): ReleaseScorecard["journeys"][number] => {
       const journey = manifest.verification.gates.find((gate) => gate.gateId === id);
       if (!journey) {
-        requireCondition(isV0_1_18AdvisoryGate(id, manifest),
+        requireCondition(isPackagedAdvisoryGate(id),
           `release scorecard is missing required packaged journey: ${id}`);
         return {
           id,

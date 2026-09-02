@@ -1974,7 +1974,7 @@ describe("fail-closed release evidence", () => {
       .toThrow("Pi sidecar no longer matches");
   });
 
-  test("rejects every missing required gate", () => {
+  test("rejects missing mandatory gates and discloses missing advisory measurements", () => {
     const fixture = makeFixture();
 
     for (const gateId of fixture.gatePaths.keys()) {
@@ -1982,12 +1982,22 @@ describe("fail-closed release evidence", () => {
         .filter(([candidate]) => candidate !== gateId)
         .map(([, path]) => path);
 
-      expect(() => buildReleaseManifest({ ...options(fixture), evidencePaths: remaining }))
-        .toThrow(`missing required release gate: ${gateId}`);
+      const advisory = REQUIRED_PACKAGED_JOURNEYS.some((id) => id === gateId) ||
+        REQUIRED_PACKAGED_ASSURANCES.some((assurance) => assurance.gateId === gateId);
+      if (advisory) {
+        const manifest = buildReleaseManifest({ ...options(fixture), evidencePaths: remaining });
+        const measurement = manifest.verification.packagedJourneys.find((journey) =>
+          journey.id === gateId) ?? manifest.verification.packagedAssurances.find((assurance) =>
+          assurance.gateId === gateId);
+        expect(measurement?.status).toBe("unmeasured");
+      } else {
+        expect(() => buildReleaseManifest({ ...options(fixture), evidencePaths: remaining }))
+          .toThrow(`missing required release gate: ${gateId}`);
+      }
     }
   });
 
-  describe("v0.1.18 packaged advisory", () => {
+  describe("packaged advisory until owner ratification", () => {
     const release = { version: "0.1.18", tag: "v0.1.18" };
     const advisoryGateIds = [
       "packaged-first-install",
@@ -2043,32 +2053,57 @@ describe("fail-closed release evidence", () => {
       }
     });
 
-    test("refuses the same missing six for v0.1.19 and mismatched release identities", () => {
+    test("records missing measurements for every release and rejects unsupported measured claims", () => {
       const fixture = makeFixture();
       for (const id of advisoryGateIds) unlinkSync(fixture.gatePaths.get(id)!);
-      const manifest = buildReleaseManifest({ ...options(fixture), ...release });
-      const nextRelease = { version: "0.1.19", tag: "v0.1.19" };
-      expect(() => buildReleaseManifest({ ...options(fixture), ...nextRelease })).toThrow();
       const presentPaths = [...fixture.gatePaths.entries()]
         .filter(([id]) => !advisoryGateIds.some((advisory) => advisory === id))
         .map(([, path]) => path);
-      expect(() => buildReleaseManifest({
-        ...options(fixture), ...nextRelease, evidencePaths: presentPaths,
-      })).toThrow("missing required release gate: packaged-first-install");
-      expect(() => buildReleaseManifest({
-        ...options(fixture), ...release, tag: nextRelease.tag,
-      })).toThrow("does not match version");
+      for (const version of ["0.1.19", "0.2.0", "1.0.0"]) {
+        const candidateRelease = { version, tag: `v${version}` };
+        const manifest = buildReleaseManifest({ ...options(fixture), ...candidateRelease });
+        expect(manifest.verification.packagedJourneys).toEqual(
+          REQUIRED_PACKAGED_JOURNEYS.map((id) => ({
+            id, evidenceClass: "PACKAGED_APP", status: "unmeasured",
+          })),
+        );
+        expect(manifest.verification.packagedAssurances).toEqual(
+          REQUIRED_PACKAGED_ASSURANCES.map((assurance) => ({
+            ...assurance, status: "unmeasured",
+          })),
+        );
+        expect(buildReleaseManifest({
+          ...options(fixture), ...candidateRelease, evidencePaths: presentPaths,
+        }).verification).toEqual(manifest.verification);
+        json(fixture.manifestPath, manifest);
+        const packaged = { ...verificationOptions(fixture), tag: candidateRelease.tag };
+        const { appPath: _appPath, ...downstream } = packaged;
+        for (const consumer of [packaged, downstream]) {
+          expect(verifyReleaseManifest(consumer)).toEqual(manifest);
+        }
+        const scorecard = buildReleaseScorecard(manifest);
+        expect(scorecard.journeys.slice(1).every((journey) =>
+          journey.status === "unmeasured")).toBe(true);
+        expect(scorecard.directSurfaceCoverage.status).toBe("unmeasured");
+        expect(scorecard.paintedLatency.status).toBe("not_measured");
 
-      Object.assign(manifest, nextRelease);
-      json(fixture.manifestPath, manifest);
-      const packaged = { ...verificationOptions(fixture), tag: nextRelease.tag };
-      const { appPath: _appPath, ...downstream } = packaged;
-      for (const consumer of [packaged, downstream]) {
-        expect(() => verifyReleaseManifest(consumer))
-          .toThrow("missing required release gate: packaged-first-install");
+        for (const id of advisoryGateIds) {
+          const fabricated = structuredClone(manifest);
+          const measurement = fabricated.verification.packagedJourneys.find((journey) =>
+            journey.id === id) ?? fabricated.verification.packagedAssurances.find((assurance) =>
+            assurance.gateId === id);
+          expect(measurement).toBeDefined();
+          measurement!.status = "pass";
+          json(fixture.manifestPath, fabricated);
+          for (const consumer of [packaged, downstream]) {
+            expect(() => verifyReleaseManifest(consumer)).toThrow();
+          }
+          expect(() => buildReleaseScorecard(fabricated)).toThrow();
+        }
       }
-      expect(() => buildReleaseScorecard(manifest))
-        .toThrow("missing required release gate: packaged-first-install");
+      expect(() => buildReleaseManifest({
+        ...options(fixture), ...release, tag: "v0.1.19",
+      })).toThrow("does not match version");
     });
 
     test("keeps every other gate and every unrecognized missing filename mandatory", () => {
@@ -3301,17 +3336,17 @@ describe("nonintrusive CI release ownership and publication graph", () => {
     }
   });
 
-  test("publication keeps packaged readiness strict except v0.1.18 and always uploads its scorecard", () => {
+  test("publication keeps packaged readiness advisory and always uploads its scorecard", () => {
     const release = workflow("release");
     const signing = release.jobs["sign-notarize-macos"];
     const steps = signing.steps ?? [];
     const readiness = steps.findIndex((step) =>
-      step.name === "Block publication on unmeasured exact packaged journeys");
+      step.name === "Record advisory packaged-journey scorecard");
     const scorecard = steps.findIndex((step) =>
       step.name === "Upload packaged release scorecard");
     const manifest = steps.findIndex((step) => step.name === "Generate release manifest");
     expect(readiness).toBeGreaterThanOrEqual(0);
-    expect(steps[readiness]["continue-on-error"]).toBe("${{ github.ref_name == 'v0.1.18' }}");
+    expect(steps[readiness]["continue-on-error"]).toBe(true);
     expect(scorecard).toBe(readiness + 1);
     expect(steps[scorecard].if).toBe("always()");
     expect(manifest).toBeGreaterThan(scorecard);
