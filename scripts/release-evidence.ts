@@ -16,7 +16,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { readReceiptDocument, resolveReceiptDetails } from "./devtools/lib/receipt-artifact.ts";
 import { SDK_SYSTEM_INPUT_TESTS } from "../tests/sdk/system-input-tests.ts";
@@ -94,6 +94,23 @@ export const REQUIRED_PACKAGED_ASSURANCES = [
 type PackagedAssuranceId = typeof REQUIRED_PACKAGED_ASSURANCES[number]["id"];
 type PackagedAssuranceGateId = typeof REQUIRED_PACKAGED_ASSURANCES[number]["gateId"];
 const REQUIRED_DIRECT_SURFACE_MAPPING_COUNT = 54;
+
+const V0_1_18_ADVISORY_GATES = new Set<string>([
+  "packaged-first-install",
+  "packaged-permissions",
+  "packaged-migration",
+  "packaged-mock-ai",
+  "packaged-direct-matrix",
+  "packaged-ratified-performance",
+]);
+
+function isV0_1_18AdvisoryGate(
+  gateId: string,
+  release: { version: string; tag: string },
+): boolean {
+  return release.version === "0.1.18" && release.tag === "v0.1.18" &&
+    V0_1_18_ADVISORY_GATES.has(gateId);
+}
 
 export const RELEASE_INTEGRATION_SUITES = [
   "ai_capability_preflight_contract",
@@ -384,9 +401,20 @@ interface ReleaseManifest {
     status: "pass";
     visibility: {
       journeys: "hidden_only";
-      paintedOutput: "owner_authorized_visible";
+      paintedOutput: "owner_authorized_visible" | "unmeasured";
     };
     gates: Array<GateReceipt & { sha256: string }>;
+    packagedJourneys: Array<{
+      id: PackagedJourneyId;
+      evidenceClass: "PACKAGED_APP";
+      status: "pass" | "unmeasured";
+    }>;
+    packagedAssurances: Array<{
+      id: PackagedAssuranceId;
+      gateId: PackagedAssuranceGateId;
+      evidenceClass: "RUNTIME_HIDDEN" | "RUNTIME_VISIBLE";
+      status: "pass" | "unmeasured";
+    }>;
   };
   artifacts: Array<{
     name: string;
@@ -435,6 +463,11 @@ interface ReleaseScorecard {
     assertions?: number;
   }>;
   journeys: Array<{
+    id: PackagedJourneyId;
+    evidenceClass: "PACKAGED_APP";
+    status: "unmeasured";
+    reason: string;
+  } | {
     id: string;
     evidenceClass: "RUNTIME_HIDDEN" | "PACKAGED_APP";
     status: "pass";
@@ -447,6 +480,9 @@ interface ReleaseScorecard {
     capturesScreen: false;
   }>;
   directSurfaceCoverage: {
+    status: "unmeasured";
+    reason: string;
+  } | {
     status: "pass";
     evidenceClass: "RUNTIME_HIDDEN";
     expectedMappings: number;
@@ -2134,7 +2170,11 @@ export function buildGateReceipt(options: {
   return receipt;
 }
 
-function readGateReceipts(paths: string[], sourceSha: string): Array<GateReceipt & { sha256: string }> {
+function readGateReceipts(
+  paths: string[],
+  sourceSha: string,
+  release: { version: string; tag: string },
+): Array<GateReceipt & { sha256: string }> {
   const receipts = paths.map((path) => {
     const receipt = readJson(path) as unknown as GateReceipt;
     requireGateId(receipt.gateId);
@@ -2163,7 +2203,8 @@ function readGateReceipts(paths: string[], sourceSha: string): Array<GateReceipt
     ids.add(receipt.gateId);
   }
   for (const gateId of Object.keys(REQUIRED_GATE_CLASSES)) {
-    requireCondition(ids.has(gateId), `missing required release gate: ${gateId}`);
+    requireCondition(ids.has(gateId) || isV0_1_18AdvisoryGate(gateId, release),
+      `missing required release gate: ${gateId}`);
   }
 
   return receipts.sort((left, right) => left.gateId.localeCompare(right.gateId));
@@ -2182,7 +2223,12 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
   verifyExecutable(sidecarPath);
 
   const executableSha = sha256File(executablePath);
-  const gates = readGateReceipts(options.evidencePaths, options.sourceSha);
+  const evidencePaths = options.evidencePaths.filter((path) => {
+    const gateId = basename(path, ".json");
+    return basename(path) !== `${gateId}.json` || !isV0_1_18AdvisoryGate(gateId, options) ||
+      lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+  });
+  const gates = readGateReceipts(evidencePaths, options.sourceSha, options);
   const generatedDesignGate = gates.find((gate) => gate.gateId === "generated-design-contracts");
   const designTokensSha = sha256File(options.designTokensPath);
   const designCssSha = sha256File(options.designCssPath);
@@ -2209,6 +2255,7 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
     "packaged signing attestation does not prove every distribution-security control");
   for (const journeyId of REQUIRED_PACKAGED_JOURNEYS) {
     const journey = gates.find((gate) => gate.gateId === journeyId);
+    if (!journey && isV0_1_18AdvisoryGate(journeyId, options)) continue;
     requireCondition(journey?.result?.journeyId === journeyId &&
       journey.result.binarySha256 === executableSha &&
       journey.result.sidecarSha256 === signingGate.result.sidecarSha256 &&
@@ -2217,6 +2264,7 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
   }
   for (const assurance of REQUIRED_PACKAGED_ASSURANCES) {
     const gate = gates.find((candidate) => candidate.gateId === assurance.gateId);
+    if (!gate && isV0_1_18AdvisoryGate(assurance.gateId, options)) continue;
     requireCondition(gate?.result?.assuranceId === assurance.id &&
       gate.result.binarySha256 === executableSha &&
       gate.result.sidecarSha256 === signingGate.result.sidecarSha256,
@@ -2245,9 +2293,11 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
   }).sort();
   const directGate = gates.find((gate) => gate.gateId === "packaged-direct-matrix");
   requireCondition(canonicalBindingIds.length === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT &&
-    new Set(canonicalBindingIds).size === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT &&
-    directGate?.result?.bindingIds?.length === canonicalBindingIds.length &&
-    directGate.result.bindingIds.every((id, index) => id === canonicalBindingIds[index]),
+    new Set(canonicalBindingIds).size === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT,
+    "surface contracts do not contain all canonical generated-contract bindings");
+  requireCondition((!directGate && isV0_1_18AdvisoryGate("packaged-direct-matrix", options)) ||
+    (directGate?.result?.bindingIds?.length === canonicalBindingIds.length &&
+      directGate.result.bindingIds.every((id, index) => id === canonicalBindingIds[index])),
     "direct_matrix target IDs do not exactly match all canonical generated-contract bindings");
 
   const zipMetadata = statSync(options.zipPath);
@@ -2317,9 +2367,19 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
       status: "pass",
       visibility: {
         journeys: "hidden_only",
-        paintedOutput: "owner_authorized_visible",
+        paintedOutput: gates.some((gate) => gate.gateId === "packaged-ratified-performance")
+          ? "owner_authorized_visible" : "unmeasured",
       },
       gates,
+      packagedJourneys: REQUIRED_PACKAGED_JOURNEYS.map((id) => ({
+        id,
+        evidenceClass: "PACKAGED_APP",
+        status: gates.some((gate) => gate.gateId === id) ? "pass" : "unmeasured",
+      })),
+      packagedAssurances: REQUIRED_PACKAGED_ASSURANCES.map((assurance) => ({
+        ...assurance,
+        status: gates.some((gate) => gate.gateId === assurance.gateId) ? "pass" : "unmeasured",
+      })),
     },
     artifacts: [{
       name: options.zipPath.split("/").pop()!,
@@ -2328,6 +2388,53 @@ export function buildReleaseManifest(options: ManifestOptions): ReleaseManifest 
       size_bytes: zipMetadata.size,
     }],
   };
+}
+
+function requireValidManifestGates(manifest: ReleaseManifest): void {
+  requireCondition(Array.isArray(manifest.verification?.gates),
+    "release manifest is missing gate receipts");
+
+  const gateIds = new Set<string>();
+  for (const gate of manifest.verification.gates) {
+    requireGateId(gate.gateId);
+    requireCondition(!gateIds.has(gate.gateId), `duplicate manifest gate: ${gate.gateId}`);
+    gateIds.add(gate.gateId);
+    requireCondition(gate.status === "pass" && gate.sourceSha === manifest.source_sha &&
+      gate.sourceState === "clean" && gate.publishable === true &&
+      gate.schemaVersion === RELEASE_EVIDENCE_SCHEMA_VERSION &&
+      gate.evidenceClass === REQUIRED_GATE_CLASSES[gate.gateId] &&
+      gate.noninteractive === true && /^[a-f0-9]{64}$/.test(gate.sha256),
+      `manifest contains invalid evidence for ${gate.gateId}`);
+    requireValidGateSourceProvenance(gate);
+    requireValidGateResult(gate);
+    const { sha256, ...originalReceipt } = gate;
+    requireCondition(canonicalGateReceiptSha256(originalReceipt) === sha256,
+      `manifest evidence was modified after execution: ${gate.gateId}`);
+  }
+  for (const gateId of Object.keys(REQUIRED_GATE_CLASSES)) {
+    requireCondition(gateIds.has(gateId) || isV0_1_18AdvisoryGate(gateId, manifest),
+      `manifest is missing required release gate: ${gateId}`);
+  }
+  requireCondition(manifest.verification.status === "pass" &&
+    manifest.verification.visibility?.journeys === "hidden_only" &&
+    manifest.verification.visibility.paintedOutput ===
+      (gateIds.has("packaged-ratified-performance") ? "owner_authorized_visible" : "unmeasured"),
+    "release manifest must separate hidden journeys from explicitly owner-authorized painted output");
+  requireCondition(Array.isArray(manifest.verification.packagedJourneys) &&
+    manifest.verification.packagedJourneys.length === REQUIRED_PACKAGED_JOURNEYS.length &&
+    REQUIRED_PACKAGED_JOURNEYS.every((id, index) => {
+      const journey = manifest.verification.packagedJourneys[index];
+      return journey?.id === id && journey.evidenceClass === "PACKAGED_APP" &&
+        journey.status === (gateIds.has(id) ? "pass" : "unmeasured");
+    }), "release manifest must truthfully report every packaged journey as pass or unmeasured");
+  requireCondition(Array.isArray(manifest.verification.packagedAssurances) &&
+    manifest.verification.packagedAssurances.length === REQUIRED_PACKAGED_ASSURANCES.length &&
+    REQUIRED_PACKAGED_ASSURANCES.every((requirement, index) => {
+      const assurance = manifest.verification.packagedAssurances[index];
+      return assurance?.id === requirement.id && assurance.gateId === requirement.gateId &&
+        assurance.evidenceClass === requirement.evidenceClass &&
+        assurance.status === (gateIds.has(requirement.gateId) ? "pass" : "unmeasured");
+    }), "release manifest must truthfully report every packaged assurance as pass or unmeasured");
 }
 
 export function verifyReleaseManifest(options: {
@@ -2348,33 +2455,7 @@ export function verifyReleaseManifest(options: {
     "release manifest belongs to another source revision");
   requireCondition(manifest.tag === options.tag && manifest.tag === `v${manifest.version}`,
     "release manifest tag/version does not match the publication ref");
-  requireCondition(manifest.verification?.status === "pass" &&
-    manifest.verification.visibility?.journeys === "hidden_only" &&
-    manifest.verification.visibility.paintedOutput === "owner_authorized_visible",
-    "release manifest must separate hidden journeys from explicitly owner-authorized painted output");
-  requireCondition(Array.isArray(manifest.verification.gates),
-    "release manifest is missing gate receipts");
-
-  const gateIds = new Set<string>();
-  for (const gate of manifest.verification.gates) {
-    requireGateId(gate.gateId);
-    requireCondition(!gateIds.has(gate.gateId), `duplicate manifest gate: ${gate.gateId}`);
-    gateIds.add(gate.gateId);
-    requireCondition(gate.status === "pass" && gate.sourceSha === options.sourceSha &&
-      gate.sourceState === "clean" && gate.publishable === true &&
-      gate.schemaVersion === RELEASE_EVIDENCE_SCHEMA_VERSION &&
-      gate.evidenceClass === REQUIRED_GATE_CLASSES[gate.gateId] &&
-      gate.noninteractive === true && /^[a-f0-9]{64}$/.test(gate.sha256),
-      `manifest contains invalid evidence for ${gate.gateId}`);
-    requireValidGateSourceProvenance(gate);
-    requireValidGateResult(gate);
-    const { sha256, ...originalReceipt } = gate;
-    requireCondition(canonicalGateReceiptSha256(originalReceipt) === sha256,
-      `manifest evidence was modified after execution: ${gate.gateId}`);
-  }
-  for (const gateId of Object.keys(REQUIRED_GATE_CLASSES)) {
-    requireCondition(gateIds.has(gateId), `manifest is missing required release gate: ${gateId}`);
-  }
+  requireValidManifestGates(manifest);
   const generatedDesignGate = manifest.verification.gates.find((gate) =>
     gate.gateId === "generated-design-contracts");
   requireCondition(generatedDesignGate?.result?.exporterSha256 ===
@@ -2447,6 +2528,7 @@ export function verifyReleaseManifest(options: {
     "packaged signing evidence does not match the published application and Pi sidecar");
   for (const journeyId of REQUIRED_PACKAGED_JOURNEYS) {
     const journey = manifest.verification.gates.find((gate) => gate.gateId === journeyId);
+    if (!journey && isV0_1_18AdvisoryGate(journeyId, manifest)) continue;
     requireCondition(journey?.evidenceClass === "PACKAGED_APP" &&
       journey.result?.journeyId === journeyId &&
       journey.result.binarySha256 === manifest.bundle.executable.sha256 &&
@@ -2457,6 +2539,7 @@ export function verifyReleaseManifest(options: {
   for (const assurance of REQUIRED_PACKAGED_ASSURANCES) {
     const gate = manifest.verification.gates.find((candidate) =>
       candidate.gateId === assurance.gateId);
+    if (!gate && isV0_1_18AdvisoryGate(assurance.gateId, manifest)) continue;
     requireCondition(gate?.evidenceClass === assurance.evidenceClass &&
       gate.result?.assuranceId === assurance.id &&
       gate.result.binarySha256 === manifest.bundle.executable.sha256 &&
@@ -2505,26 +2588,33 @@ export function verifyReleaseManifest(options: {
 }
 
 export function buildReleaseScorecard(manifest: ReleaseManifest): ReleaseScorecard {
+  requireValidManifestGates(manifest);
   const runtime = manifest.verification.gates.find((gate) => gate.gateId === "packaged-root-frame");
-  requireCondition(runtime?.result?.metricKind === "semantic_frame_identity",
+  requireCondition(runtime?.result?.metricKind === "semantic_frame_identity" &&
+    runtime.result.binarySha256 === manifest.bundle.executable.sha256,
     "release scorecard requires an exact packaged semantic-frame journey");
   const performance = manifest.verification.gates.find((gate) =>
     gate.gateId === "packaged-ratified-performance");
-  requireCondition(performance?.evidenceClass === "RUNTIME_VISIBLE" &&
+  requireCondition((!performance &&
+    isV0_1_18AdvisoryGate("packaged-ratified-performance", manifest)) ||
+    (performance?.evidenceClass === "RUNTIME_VISIBLE" &&
     performance.result?.assuranceId === "ratified_perf" &&
     performance.result.observationLayer === "PAINTED_OUTPUT" &&
     performance.result.measuresPaint === true &&
     performance.result.ownerVisibleAuthorization === true &&
     performance.result.ownerRatified === true &&
     performance.result.binarySha256 === manifest.bundle.executable.sha256 &&
-    performance.result.sidecarSha256 === manifest.bundle.sidecar.sha256,
+    performance.result.sidecarSha256 === manifest.bundle.sidecar.sha256),
     "release scorecard requires explicitly authorized actual painted output from the signed candidate");
   const directMatrix = manifest.verification.gates.find((gate) =>
     gate.gateId === "packaged-direct-matrix");
-  requireCondition(directMatrix?.result?.assuranceId === "direct_matrix" &&
+  requireCondition((!directMatrix && isV0_1_18AdvisoryGate("packaged-direct-matrix", manifest)) ||
+    (directMatrix?.result?.assuranceId === "direct_matrix" &&
     directMatrix.result.expectedMappings === REQUIRED_DIRECT_SURFACE_MAPPING_COUNT &&
     directMatrix.result.directProvenMappings === directMatrix.result.expectedMappings &&
-    directMatrix.result.surfaceContractSha256 === manifest.surface_contracts.sha256,
+    directMatrix.result.surfaceContractSha256 === manifest.surface_contracts.sha256 &&
+    directMatrix.result.binarySha256 === manifest.bundle.executable.sha256 &&
+    directMatrix.result.sidecarSha256 === manifest.bundle.sidecar.sha256),
     "release scorecard requires complete exact-contract hidden surface coverage");
 
   return {
@@ -2583,27 +2673,47 @@ export function buildReleaseScorecard(manifest: ReleaseManifest): ReleaseScoreca
       revealsWindow: false,
       drivesNativeInput: false,
       capturesScreen: false,
-    }, ...REQUIRED_PACKAGED_JOURNEYS.map((id) => ({
-      id,
-      evidenceClass: "PACKAGED_APP" as const,
-      status: "pass" as const,
-      metricKind: "packaged_app_journey",
-      measuresPaint: false as const,
-      startsApplication: true as const,
-      isolatedCiLaunchAuthorized: true as const,
-      revealsWindow: false as const,
-      drivesNativeInput: false as const,
-      capturesScreen: false as const,
-    }))],
-    directSurfaceCoverage: {
+    }, ...REQUIRED_PACKAGED_JOURNEYS.map((id): ReleaseScorecard["journeys"][number] => {
+      const journey = manifest.verification.gates.find((gate) => gate.gateId === id);
+      if (!journey) {
+        requireCondition(isV0_1_18AdvisoryGate(id, manifest),
+          `release scorecard is missing required packaged journey: ${id}`);
+        return {
+          id,
+          evidenceClass: "PACKAGED_APP",
+          status: "unmeasured",
+          reason: "No direct same-binary packaged journey receipt was produced.",
+        };
+      }
+      requireCondition(journey.result?.journeyId === id &&
+        journey.result.binarySha256 === manifest.bundle.executable.sha256 &&
+        journey.result.sidecarSha256 === manifest.bundle.sidecar.sha256,
+        `release scorecard requires exact signed-candidate evidence for ${id}`);
+      return {
+        id,
+        evidenceClass: "PACKAGED_APP",
+        status: "pass",
+        metricKind: "packaged_app_journey",
+        measuresPaint: false,
+        startsApplication: true,
+        isolatedCiLaunchAuthorized: true,
+        revealsWindow: false,
+        drivesNativeInput: false,
+        capturesScreen: false,
+      };
+    })],
+    directSurfaceCoverage: directMatrix?.result ? {
       status: "pass",
       evidenceClass: "RUNTIME_HIDDEN",
       expectedMappings: directMatrix.result.expectedMappings!,
       directProvenMappings: directMatrix.result.directProvenMappings!,
       transactionId: directMatrix.result.transactionId!,
       surfaceContractSha256: directMatrix.result.surfaceContractSha256!,
+    } : {
+      status: "unmeasured",
+      reason: "No complete same-candidate target-scoped direct surface matrix was produced.",
     },
-    paintedLatency: {
+    paintedLatency: performance?.result ? {
       status: "pass",
       evidenceClass: "RUNTIME_VISIBLE",
       metricKind: "PAINTED_OUTPUT",
@@ -2615,6 +2725,9 @@ export function buildReleaseScorecard(manifest: ReleaseManifest): ReleaseScoreca
       ownerVisibleAuthorization: true,
       ratifiedBudgetId: performance.result.ratifiedBudgetId!,
       ratificationReference: performance.result.ratificationReference!,
+    } : {
+      status: "not_measured",
+      reason: "No owner-authorized visible painted-output samples or owner-ratified budget were produced.",
     },
   };
 }

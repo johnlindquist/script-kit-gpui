@@ -615,6 +615,8 @@ jobs:
           bash scripts/verify-macos-bundle.sh "$TMP_DIR/Script Kit.app"
 
       - name: Block publication on unmeasured exact packaged journeys
+        # Owner-authorized exception; later releases retain the blocking gate.
+        continue-on-error: ${{ github.ref_name == 'v0.1.18' }}
         run: |
           ROOT="target/release/bundle/osx"
           bun scripts/release-evidence.ts packaged-readiness \
@@ -623,11 +625,11 @@ jobs:
             --source-sha "$GITHUB_SHA" \
             --output "$ROOT/release-scorecard.json"
 
-      - name: Upload blocked packaged release scorecard
-        if: failure()
+      - name: Upload packaged release scorecard
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: blocked-macos-release-scorecard
+          name: macos-release-scorecard
           path: target/release/bundle/osx/release-scorecard.json
           if-no-files-found: warn
 
