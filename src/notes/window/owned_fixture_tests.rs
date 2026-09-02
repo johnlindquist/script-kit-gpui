@@ -1,6 +1,76 @@
 use super::init::NotesInitialData;
 use super::*;
 
+/// A failed save must retain the editable draft and report why close was refused.
+#[gpui::test]
+fn failed_save_keeps_notes_open_for_escape_and_cmd_w(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let app_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let app_slot_for_window = app_slot.clone();
+    let draft = "# Unsaved note\n\nKeep these edits.\n";
+    let handle = cx.update(|cx| {
+        cx.open_window(
+            WindowOptions {
+                show: false,
+                focus: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                let app = cx.new(|cx| {
+                    let mut app = NotesApp::from_initial_data(
+                        NotesInitialData {
+                            notes: vec![Note::with_content(draft)],
+                            deleted_notes: Vec::new(),
+                            host_policy: crate::runtime_policy::WindowHostPolicy::OwnedHidden,
+                            ghost_clipboard: Some(Vec::new()),
+                            now: None,
+                        },
+                        window,
+                        cx,
+                    );
+                    // The selected record disappearing is a real save failure
+                    // that needs neither user storage nor an injected I/O mock.
+                    app.notes.clear();
+                    app.has_unsaved_changes = true;
+                    app
+                });
+                *app_slot_for_window.borrow_mut() = Some(app.clone());
+                cx.new(|cx| Root::new(app, window, cx))
+            },
+        )
+        .expect("isolated Notes window")
+    });
+    let app = app_slot.borrow().clone().expect("Notes entity");
+    let window: gpui::AnyWindowHandle = handle.into();
+    window
+        .update(cx, |_, window, cx| {
+            for key in ["escape", "cmd-w", "ctrl-cmd-w"] {
+                app.update(cx, |app, cx| {
+                    let reveal_before = app.entry_reveal.clone();
+                    app.handle_key_down(
+                        &KeyDownEvent {
+                            keystroke: gpui::Keystroke::parse(key).expect("close shortcut"),
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        window,
+                        cx,
+                    );
+                    assert!(app.has_unsaved_changes, "{key} must retain the dirty draft");
+                    assert_eq!(app.editor_text(cx), draft);
+                    assert_eq!(app.entry_reveal, reveal_before, "{key} must not begin exit");
+                });
+                let layers = Root::read(window, cx).layer_snapshot(cx);
+                assert_eq!(layers.notifications.len(), 1, "repeat close must not spam");
+                assert_eq!(
+                    layers.notifications[0].message.as_deref(),
+                    Some("Couldn't save the note. Your changes are still open.")
+                );
+            }
+        })
+        .expect("failed save leaves the Notes window available");
+}
+
 #[gpui::test]
 fn injected_notes_preserve_reveal_and_real_editor_mutations(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);

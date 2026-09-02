@@ -511,6 +511,26 @@ impl NotesApp {
         true
     }
 
+    pub(super) fn save_before_window_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.save_current_note() {
+            return true;
+        }
+
+        window.push_notification(
+            gpui_component::notification::Notification::error(
+                "Couldn't save the note. Your changes are still open.",
+            )
+            .id1::<NotesApp>("notes-save-failed"),
+            cx,
+        );
+        cx.notify();
+        false
+    }
+
     /// Check if we should save now (debounce check)
     pub(super) fn should_save_now(&self) -> bool {
         if !self.has_unsaved_changes {

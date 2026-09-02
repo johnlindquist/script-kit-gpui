@@ -1379,17 +1379,6 @@ pub fn close_notes_window(cx: &mut App) {
         }
         return;
     }
-    if let Some(notes_app) = NOTES_APP_ENTITY
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-    {
-        notes_app.update(cx, |app, cx| {
-            let _ = app.entry_reveal.prepare_for_window_exit();
-            cx.notify();
-        });
-    }
 
     // Keep the handle and entity registered through the visual tail so a
     // toggle arriving before removal can supersede this exit and reuse the
@@ -1410,9 +1399,17 @@ pub fn close_notes_window(cx: &mut App) {
                 .ok()
                 .and_then(|guard| guard.clone())
             {
-                notes_app.update(cx, |app, _cx| {
+                if !notes_app.update(cx, |app, cx| {
+                    if !app.save_before_window_close(window, cx) {
+                        return false;
+                    }
+                    let _ = app.entry_reveal.prepare_for_window_exit();
                     app.maybe_save_stable_bounds_for_exit(window);
-                });
+                    cx.notify();
+                    true
+                }) {
+                    return Err(());
+                }
             }
             // Safe here: no Root lease is held, so the Root::update inside
             // close_all_dialogs does not double-lease.
@@ -1431,14 +1428,14 @@ pub fn close_notes_window(cx: &mut App) {
             if let Some(ticket) =
                 crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
             {
-                Some((ticket, window.window_handle()))
+                Ok(Some((ticket, window.window_handle())))
             } else {
                 crate::components::footer_chrome::remove_glass_capsule_window(window);
                 window.remove_window();
-                None
+                Ok(None)
             }
         }) {
-            Ok(exit) => {
+            Ok(Ok(exit)) => {
                 tracing::info!(
                     target: "script_kit::keyboard",
                     event = "notes_helper_close_restore_launcher_requested"
@@ -1488,6 +1485,7 @@ pub fn close_notes_window(cx: &mut App) {
                     }
                 }
             }
+            Ok(Err(())) => {}
             Err(error) => {
                 tracing::warn!(
                     target: "script_kit::keyboard",

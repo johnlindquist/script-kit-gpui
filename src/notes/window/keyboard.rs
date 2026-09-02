@@ -191,7 +191,10 @@ impl NotesApp {
             has_active_dialog = window.has_active_dialog(cx),
         );
 
-        self.save_current_note();
+        if !self.save_before_window_close(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
 
         self.command_bar.close_app(cx);
         self.note_switcher.close_app(cx);
@@ -531,7 +534,9 @@ impl NotesApp {
             // Escape close must have the same data-loss profile as Cmd+W:
             // the autosave debounce (SAVE_DEBOUNCE_MS) cannot outrun
             // remove_window(), so save synchronously first.
-            self.save_current_note();
+            if !self.save_before_window_close(window, cx) {
+                return;
+            }
             self.maybe_save_stable_bounds_for_exit(window);
             window.close_all_dialogs(cx);
             let _ = self.entry_reveal.prepare_for_window_exit();
@@ -656,21 +661,7 @@ impl NotesApp {
                     cx.stop_propagation();
                 }
                 key if key.eq_ignore_ascii_case("w") && !modifiers.shift => {
-                    tracing::info!(
-                        target: "script_kit::keyboard",
-                        event = "notes_cmd_w_close",
-                        focus_surface = ?self.current_focus_surface(),
-                        show_search = self.show_search,
-                        focus_mode = self.focus_mode,
-                    );
-                    self.command_bar.close_app(cx);
-                    self.note_switcher.close_app(cx);
-                    self.maybe_save_stable_bounds_for_exit(window);
-                    window.close_all_dialogs(cx);
-                    let _ = self.entry_reveal.prepare_for_window_exit();
-                    self.lock_native_resize_for_exit(window);
-                    super::window_ops::close_current_notes_window(window, cx);
-                    cx.stop_propagation();
+                    self.close_notes_window_from_top_level_cmd_w("notes_cmd_w_close", window, cx);
                 }
                 "." => {
                     if modifiers.shift {
