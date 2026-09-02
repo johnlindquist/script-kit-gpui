@@ -31,6 +31,64 @@ impl AgentChatThread {
             && (!self.is_provider_free_fixture() || crate::runtime_policy::is_owned_evaluation())
     }
 
+    /// Persist the visible terminal transcript without title generation or memory ingestion.
+    /// Only successful completion uses the returned snapshot for those additional effects.
+    pub(super) fn save_conversation_history(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(history::SavedConversation, history::AgentChatHistoryEntry)> {
+        if !self.retains_history()
+            || !self
+                .messages
+                .iter()
+                .any(|message| matches!(message.role, AgentChatThreadMessageRole::User))
+        {
+            return None;
+        }
+        let custom_title = history::load_conversation(&self.ui_thread_id)
+            .and_then(|conversation| conversation.custom_title);
+        let conversation = history::SavedConversation {
+            session_id: self.ui_thread_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            custom_title,
+            messages: self
+                .messages
+                .iter()
+                .map(|message| history::SavedMessage {
+                    role: format!("{:?}", message.role),
+                    body: message.body.to_string(),
+                })
+                .collect(),
+        };
+        let entry = history::build_history_entry(&conversation)?;
+        if let Err(error) = history::save_completed_conversation(&conversation, &entry) {
+            let safe_error = crate::logging::log_private_user_value(&error.to_string());
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_conversation_not_saved",
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+            );
+            self.push_notice(
+                "Conversation could not be saved",
+                "Copy important messages before closing this chat.",
+                cx,
+            );
+            return None;
+        }
+        let safe_title = crate::logging::log_private_user_value(entry.title_display());
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "agent_chat_history_index_entry_built",
+            session_id = %entry.session_id,
+            title_bytes = safe_title.raw_bytes,
+            title_sha256 = %safe_title.sha256,
+            preview_len = entry.preview.len(),
+            message_count = entry.message_count,
+        );
+        Some((conversation, entry))
+    }
+
     pub(super) fn maybe_spawn_auto_title(&mut self, conversation: &history::SavedConversation) {
         if self.is_provider_free_fixture() || crate::runtime_policy::is_owned_evaluation() {
             return;

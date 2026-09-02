@@ -2778,68 +2778,12 @@ impl AgentChatThread {
                     }
                 }
 
-                // Save conversation summary + full messages to history.
-                // Build a rich index entry from the full conversation so
-                // search_history() can match on later transcript content.
-                // Zero-retention sessions (Quick AI) skip both writes.
-                let history_trace_label = if self.retains_history()
-                    && self
-                        .messages
-                        .iter()
-                        .any(|m| matches!(m.role, AgentChatThreadMessageRole::User))
-                {
-                    let timestamp = chrono::Utc::now().to_rfc3339();
-                    let existing_custom_title =
-                        super::history::load_conversation(&self.ui_thread_id)
-                            .and_then(|conversation| conversation.custom_title);
-                    let conversation = super::history::SavedConversation {
-                        session_id: self.ui_thread_id.clone(),
-                        timestamp,
-                        custom_title: existing_custom_title.clone(),
-                        messages: self
-                            .messages
-                            .iter()
-                            .map(|m| super::history::SavedMessage {
-                                role: format!("{:?}", m.role),
-                                body: m.body.to_string(),
-                            })
-                            .collect(),
-                    };
-                    super::history::build_history_entry(&conversation).and_then(|entry| {
-                        match super::history::save_completed_conversation(&conversation, &entry) {
-                            Ok(()) => {
-                                self.maybe_spawn_auto_title(&conversation);
-                                let safe_title =
-                                    crate::logging::log_private_user_value(entry.title_display());
-                                tracing::info!(
-                                    target: "script_kit::tab_ai",
-                                    event = "agent_chat_history_index_entry_built",
-                                    session_id = %entry.session_id,
-                                    title_bytes = safe_title.raw_bytes,
-                                    title_sha256 = %safe_title.sha256,
-                                    preview_len = entry.preview.len(),
-                                    message_count = entry.message_count,
-                                );
-                                Some(entry.title_display().to_string())
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "script_kit::tab_ai",
-                                    reason = ?error,
-                                    "agent_chat_completed_conversation_not_saved"
-                                );
-                                self.push_notice(
-                                    "Conversation could not be saved",
-                                    "Copy important messages before closing this chat.",
-                                    cx,
-                                );
-                                None
-                            }
-                        }
-                    })
-                } else {
-                    None
-                };
+                let history_trace_label =
+                    self.save_conversation_history(cx)
+                        .map(|(conversation, entry)| {
+                            self.maybe_spawn_auto_title(&conversation);
+                            entry.title_display().to_string()
+                        });
 
                 // The finished turn appended a user message; refresh the
                 // rewind checkpoints so Cmd+K can offer it for editing.
@@ -2973,6 +2917,7 @@ impl AgentChatThread {
                 let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
                 changed = true;
                 changed |= self.push_message(AgentChatThreadMessageRole::Error, safe_message);
+                self.save_conversation_history(cx);
             }
         }
 
@@ -3033,6 +2978,7 @@ impl AgentChatThread {
             let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
             self.push_message(AgentChatThreadMessageRole::Error, message);
         }
+        self.save_conversation_history(cx);
 
         true
     }
@@ -3667,6 +3613,7 @@ impl AgentChatThread {
             })
             .unwrap_or(PartialOutputState::None);
         let _ = self.transition_reliability(AiOperationEvent::RuntimeStopped { partial }, cx);
+        self.save_conversation_history(cx);
     }
 
     pub(crate) fn draft_snapshot(&self) -> AgentChatThreadDraftSnapshot {

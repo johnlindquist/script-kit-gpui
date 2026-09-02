@@ -401,6 +401,14 @@ fn prime_running_reliability(thread: &mut AgentChatThread) {
 fn explicit_stop_preserves_partial_or_empty_output_as_quiet_user_stopped(
     cx: &mut gpui::TestAppContext,
 ) {
+    let _guard = crate::test_utils::SK_PATH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let previous_sk_path = std::env::var_os(crate::setup::SK_PATH_ENV);
+    let temp = tempfile::tempdir().expect("temporary history root");
+    std::env::set_var(crate::setup::SK_PATH_ENV, temp.path());
+    super::super::history::invalidate_history_cache();
     for assistant_body in [Some("  exact partial bytes  "), Some("")] {
         let mut thread = test_thread(Vec::new(), false);
         thread.push_message(AgentChatThreadMessageRole::User, "accepted request");
@@ -447,6 +455,97 @@ fn explicit_stop_preserves_partial_or_empty_output_as_quiet_user_stopped(
             );
         });
     }
+    match previous_sk_path {
+        Some(path) => std::env::set_var(crate::setup::SK_PATH_ENV, path),
+        None => std::env::remove_var(crate::setup::SK_PATH_ENV),
+    }
+    super::super::history::invalidate_history_cache();
+}
+
+#[gpui::test]
+fn terminal_partial_history_preserves_flushed_text_without_sending_drafts_or_queues(
+    cx: &mut gpui::TestAppContext,
+) {
+    let _guard = crate::test_utils::SK_PATH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let previous_sk_path = std::env::var_os(crate::setup::SK_PATH_ENV);
+    let temp = tempfile::tempdir().expect("temporary history root");
+    std::env::set_var(crate::setup::SK_PATH_ENV, temp.path());
+    super::super::history::invalidate_history_cache();
+
+    for policy in [
+        AgentChatSessionPolicy::Full,
+        AgentChatSessionPolicy::QuickAi,
+    ] {
+        for (terminal, message_count) in [("stop", 2), ("failure", 3), ("closed", 2)] {
+            let session_id = format!("terminal-{policy:?}-{terminal}");
+            let mut thread = test_thread(Vec::new(), false);
+            thread.ui_thread_id = session_id.clone();
+            thread.session_policy = policy;
+            thread.push_message(AgentChatThreadMessageRole::User, "accepted request");
+            prime_running_reliability(&mut thread);
+            thread
+                .streaming_text_buffer
+                .push_chunk("  partial café 東京  ".into());
+            thread.input.set_text("unsubmitted draft");
+            thread
+                .queued_messages
+                .push_back(AgentChatQueuedMessage::new(
+                    "held queued request".to_string(),
+                    Vec::new(),
+                ));
+            let entity = cx.new(|_| thread);
+            entity.update(cx, |thread, cx| match terminal {
+                "stop" => thread.stop_streaming(cx),
+                "failure" => thread.apply_event(
+                    AgentChatEvent::TurnFailed {
+                        failure: process_failure(
+                            ProtocolComponent::Pi,
+                            ProcessFailureFacts::RuntimeClosed,
+                        ),
+                    },
+                    cx,
+                ),
+                "closed" => {
+                    assert!(thread.finish_stream_closed_without_terminal_with_context(cx));
+                }
+                _ => unreachable!(),
+            });
+            cx.read_entity(&entity, |thread, _| {
+                assert!(thread.streaming_text_buffer.is_empty());
+                assert_eq!(thread.input.text(), "unsubmitted draft");
+                assert_eq!(thread.queued_messages.len(), 1);
+                assert_eq!(thread.queued_messages[0].text, "held queued request");
+            });
+            let saved = super::super::history::load_conversation(&session_id);
+            if policy == AgentChatSessionPolicy::QuickAi {
+                assert!(
+                    saved.is_none(),
+                    "Quick AI must not retain {terminal} output"
+                );
+                continue;
+            }
+            let saved = saved.expect("terminal transcript must be durable");
+            assert_eq!(saved.messages.len(), message_count, "{terminal}");
+            assert_eq!(saved.messages[0].body, "accepted request");
+            assert_eq!(saved.messages[1].body, "  partial café 東京  ");
+            assert!(saved.messages.iter().all(|message| {
+                !message.body.contains("unsubmitted draft")
+                    && !message.body.contains("held queued request")
+            }));
+            assert!(super::super::history::load_history().iter().any(|entry| {
+                entry.session_id == session_id && entry.message_count == message_count
+            }));
+        }
+    }
+
+    match previous_sk_path {
+        Some(path) => std::env::set_var(crate::setup::SK_PATH_ENV, path),
+        None => std::env::remove_var(crate::setup::SK_PATH_ENV),
+    }
+    super::super::history::invalidate_history_cache();
 }
 
 fn block_text(block: &ContentBlock) -> &str {
