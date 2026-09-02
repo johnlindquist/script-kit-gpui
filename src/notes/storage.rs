@@ -907,7 +907,7 @@ fn reindex_external_note_file(path: &Path) -> Result<()> {
     let mut indexed = note;
     indexed.sort_order = sort_order;
     upsert_note_index_with_conn(&conn, &indexed, &slug, &hash)?;
-    remember_note_hash(indexed.id, hash);
+    // Indexing an external version does not mean an open editor adopted it.
     invalidate_root_notes_search_cache();
     debug!(note_id = %indexed.id, file = %path.display(), "Reindexed externally edited note");
     Ok(())

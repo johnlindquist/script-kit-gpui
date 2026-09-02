@@ -1601,6 +1601,54 @@ mod tests {
     }
 
     #[test]
+    fn test_watcher_reindex_preserves_external_content_before_stale_editor_save() {
+        let _guard = notes_db_test_guard();
+        init_notes_db().expect("notes db should initialize before watcher conflict test");
+        let token = unique_test_token("watcher_conflict");
+        let mut note = Note::with_content(format!("# {token}\nOriginal editor body"));
+        save_note(&note).expect("save editor baseline");
+        let path = note_file_path(note.id)
+            .expect("path lookup")
+            .expect("canonical path");
+        let external = brain_io::read_private_document(&path)
+            .expect("canonical document")
+            .replace("Original editor body", "External capture must survive");
+        brain_io::atomic_write(&path, &external).expect("external edit");
+        reindex_external_note_file(&path).expect("process actual watcher callback");
+        assert!(get_note(note.id)
+            .expect("updated index")
+            .expect("indexed note")
+            .content
+            .contains("External capture must survive"));
+
+        note.content.push_str("\nLocal edit from stale editor");
+        note.updated_at = Utc::now();
+        save_note(&note).expect("save stale editor with conflict preservation");
+        let prefix = format!(
+            "{}.conflict-",
+            path.file_stem()
+                .expect("stem")
+                .to_str()
+                .expect("UTF-8 stem")
+        );
+        let conflict = fs::read_dir(path.parent().expect("notes directory"))
+            .expect("read notes directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .find(|candidate| candidate.file_name().and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix)))
+            .expect("the watcher must not authorize destroying an external edit the editor never adopted");
+        assert_eq!(
+            brain_io::read_private_document(&conflict).expect("preserved external document"),
+            external
+        );
+        assert!(brain_io::read_private_document(&path)
+            .expect("saved local document")
+            .contains("Local edit from stale editor"));
+        delete_note_permanently(note.id).expect("cleanup note");
+        fs::remove_file(conflict).expect("cleanup preserved fixture");
+    }
+
+    #[test]
     fn test_backlinks_recompute_when_target_alias_changes() {
         let _guard = notes_db_test_guard();
         init_notes_db().expect("notes db should initialize before stale backlink test");
