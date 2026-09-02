@@ -636,15 +636,9 @@ impl ScriptListApp {
         if let Some(chat_entity) =
             crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
         {
-            let resumed = chat_entity.update(cx, |chat_view, cx| {
-                chat_view.resume_from_history(session_id, cx)
+            chat_entity.update(cx, |chat_view, cx| {
+                chat_view.resume_from_history(session_id, Some(first_message), cx);
             });
-            if !resumed {
-                let fallback_input = first_message.to_string();
-                chat_entity.update(cx, |chat_view, cx| {
-                    chat_view.set_input(fallback_input, cx);
-                });
-            }
 
             self.reset_to_script_list(cx);
             return;
@@ -653,14 +647,9 @@ impl ScriptListApp {
         self.open_tab_ai_agent_chat_with_entry_intent(None, cx);
 
         if let AppView::AgentChatView { entity } = &self.current_view {
-            let resumed = entity.update(cx, |chat_view, cx| {
-                chat_view.resume_from_history(session_id, cx)
+            entity.update(cx, |chat_view, cx| {
+                chat_view.resume_from_history(session_id, Some(first_message), cx);
             });
-            if !resumed {
-                entity.update(cx, |chat_view, cx| {
-                    chat_view.set_input(first_message.to_string(), cx);
-                });
-            }
         }
     }
 

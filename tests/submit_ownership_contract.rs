@@ -85,7 +85,7 @@ fn brain_inbox_enter_stages_agent_chat_without_submit_or_resolve() {
         staging_body.contains(
             "open_clean_agent_chat(cx)"
         ) && staging_body.contains("stage_brain_inbox_context_on_agent_chat(")
-            && staging_body.contains("chat_view.resume_from_history(thread_id, cx)"),
+            && staging_body.contains("chat_view.resume_from_history(thread_id,"),
         "The Brain Inbox staging helper should open Agent Chat without entry intent, optionally resume chat history, and stage inbox context"
     );
     assert!(
@@ -96,7 +96,7 @@ fn brain_inbox_enter_stages_agent_chat_without_submit_or_resolve() {
         "The Brain Inbox staging helper must not auto-submit, put the full prompt in the composer, or resolve the inbox item"
     );
     assert!(
-        staging_body.find("resume_from_history(thread_id, cx)")
+        staging_body.find("resume_from_history(thread_id,")
             < staging_body.find("stage_brain_inbox_context_on_agent_chat("),
         "Brain Inbox chat_turn handoff should resume history before staging the inbox context"
     );

@@ -4655,20 +4655,7 @@ text_style.text_inset_left,
                 return;
             }
         }
-        if let Some(conv) = super::history::load_conversation(&entry.session_id) {
-            self.live_thread().update(cx, |thread, cx| {
-                thread.load_saved_messages(&conv.messages, cx);
-            });
-            if let Some(transcript) = &self.transcript {
-                transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
-            }
-        } else {
-            self.live_thread().update(cx, |thread, cx| {
-                thread.input.set_text(entry.first_message.clone());
-                thread.notify_semantic_change(cx);
-            });
-        }
-        self.notify_semantic_change(cx);
+        self.resume_from_history(&entry.session_id, Some(&entry.first_message), cx);
     }
 
     pub(crate) fn select_history_session_by_id(
@@ -12016,44 +12003,73 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         self.pending_history_resume.take()
     }
 
-    /// Resume a conversation from history by session_id.
-    ///
-    /// Loads the saved conversation messages into the live thread.
-    /// Returns `true` if the conversation was loaded, `false` if the
-    /// saved file was not found (falls back to setting input text).
-    pub(crate) fn resume_from_history(&mut self, session_id: &str, cx: &mut Context<Self>) -> bool {
-        if let Some(conv) = super::history::load_conversation(session_id) {
-            self.live_thread().update(cx, |thread, cx| {
-                thread.load_saved_messages(&conv.messages, cx);
-            });
-            if let Some(transcript) = &self.transcript {
-                transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
+    /// Continue saved history on a fresh connection with its transcript attached.
+    /// The original conversation stays bound if preparation or creation fails.
+    /// Legacy index-only entries may supply an initial composer draft.
+    pub(crate) fn resume_from_history(
+        &mut self,
+        session_id: &str,
+        fallback_input: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.capabilities(cx).history {
+            return false;
+        }
+        let conversation = super::history::load_conversation(session_id);
+        let context_part = if conversation.is_some() {
+            match self.build_history_attachment_part(
+                session_id,
+                super::history_attachment::AgentChatHistoryAttachMode::Transcript,
+            ) {
+                Ok(part) => Some(part),
+                Err(error) => {
+                    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                    tracing::warn!(
+                        target: "script_kit::tab_ai",
+                        event = "agent_chat_history_resume_prepare_failed",
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
+                    );
+                    return false;
+                }
             }
-            tracing::info!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_history_item_resumed",
-                session_id = %session_id,
-                message_count = conv.messages.len(),
-            );
-            self.notify_semantic_change(cx);
-            true
+        } else if fallback_input.is_some() {
+            None
         } else {
             tracing::warn!(
                 target: "script_kit::tab_ai",
-                event = "agent_chat_history_resume_fallback",
+                event = "agent_chat_history_resume_missing",
                 session_id = %session_id,
             );
-            false
+            return false;
+        };
+
+        if !self.start_new_thread(cx) {
+            return false;
         }
+        self.live_thread().update(cx, |thread, cx| {
+            if let Some(conversation) = &conversation {
+                thread.load_saved_messages(&conversation.messages, cx);
+            } else if let Some(input) = fallback_input {
+                thread.input.set_text(input.to_string());
+                thread.notify_semantic_change(cx);
+            }
+            if let Some(part) = context_part {
+                thread.add_context_part_with_provenance(
+                    part,
+                    ContextProvenance::AttachmentPortal,
+                    ContextRole::Supplemental,
+                    cx,
+                );
+            }
+        });
+        self.notify_semantic_change(cx);
+        true
     }
 
-    /// Resume a saved conversation and deliver a Brain Inbox follow-up prompt.
-    ///
-    /// Auto-submits the follow-up when the saved conversation loaded, or when
-    /// the live thread is still empty (matching the non-chat inbox handoff).
-    /// Parks it as a composer draft when resume failed and the thread already
-    /// holds a different conversation, so an unrelated chat never receives a
-    /// surprise turn. An empty follow-up only loads the conversation.
+    /// Continue saved history and deliver a Brain Inbox follow-up prompt.
+    /// Failed preparation or thread creation preserves the active draft and chat.
+    /// An empty follow-up only opens the saved conversation.
     pub(crate) fn resume_from_history_with_followup(
         &mut self,
         session_id: &str,
@@ -12068,21 +12084,12 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
             );
             return;
         }
-        let resumed = self.resume_from_history(session_id, cx);
-        let followup = followup_prompt.trim();
-        if followup.is_empty() {
+        if !self.resume_from_history(session_id, None, cx) {
             return;
         }
-        let thread_is_empty = self.live_thread().read(cx).messages.is_empty();
-        if resumed || thread_is_empty {
+        let followup = followup_prompt.trim();
+        if !followup.is_empty() {
             self.submit_reused_entry_intent(followup.to_string(), cx);
-        } else {
-            self.set_input(followup.to_string(), cx);
-            tracing::info!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_history_followup_parked_resume_missed",
-                session_id = %session_id,
-            );
         }
     }
 

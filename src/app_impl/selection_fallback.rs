@@ -1116,8 +1116,10 @@ impl ScriptListApp {
             crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
         {
             chat_entity.update(cx, |chat_view, cx| {
-                if let Some(thread_id) = history_thread_id {
-                    chat_view.resume_from_history(thread_id, cx);
+                if history_thread_id
+                    .is_some_and(|thread_id| !chat_view.resume_from_history(thread_id, None, cx))
+                {
+                    return;
                 }
                 Self::stage_brain_inbox_context_on_agent_chat(chat_view, context_part.clone(), cx);
             });
@@ -1130,8 +1132,10 @@ impl ScriptListApp {
         if let AppView::AgentChatView { entity } = &self.current_view {
             let entity = entity.clone();
             entity.update(cx, |chat_view, cx| {
-                if let Some(thread_id) = history_thread_id {
-                    chat_view.resume_from_history(thread_id, cx);
+                if history_thread_id
+                    .is_some_and(|thread_id| !chat_view.resume_from_history(thread_id, None, cx))
+                {
+                    return;
                 }
                 Self::stage_brain_inbox_context_on_agent_chat(chat_view, context_part, cx);
             });
