@@ -2,6 +2,10 @@
 
 pub(crate) use crate::windows::automation_transaction_provider::apply_registered_root_layer_selection;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep exact window, revision, and dispatch authority explicit across the async batch boundary"
+)]
 fn select_main_window_semantic_id_for_batch(
     this: &gpui::WeakEntity<ScriptListApp>,
     main_window_handle: Option<gpui::AnyWindowHandle>,

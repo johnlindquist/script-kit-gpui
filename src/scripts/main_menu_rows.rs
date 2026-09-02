@@ -222,6 +222,10 @@ pub(crate) fn preserve_displayed_main_menu_rows(
         if !matches!(item, GroupedListItem::Item(_)) {
             continue;
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "Canonical row keys and paired item/order construction form a bijection."
+        )]
         let mut row = original[order.next().expect("every retained item has a row")]
             .take()
             .expect("each row is retained once");

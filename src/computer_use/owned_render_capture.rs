@@ -396,6 +396,7 @@ pub(crate) fn validate_current_frame_identity(
     Ok(())
 }
 
+#[allow(dead_code)] // Deferred GPUI input validation calls this through the binary app layer.
 /// Validate while the exact target window is already borrowed for deferred
 /// input. Never re-enter its handle, pump work, redraw, or capture native pixels.
 pub(crate) fn validate_owned_frame_for_input(

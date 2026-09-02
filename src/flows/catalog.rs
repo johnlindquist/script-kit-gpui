@@ -128,12 +128,14 @@ struct CachedRosterEntry {
     generation: u64,
 }
 
+type NotifyHook = Box<dyn Fn(&str, u64) + Send + Sync>;
+
 #[derive(Default)]
 pub struct FlowCatalog {
     entries: Mutex<HashMap<String, CachedRosterEntry>>,
     /// One worker and one latest source-change request per working directory.
     refreshing: Mutex<HashMap<String, bool>>,
-    notify: Mutex<Option<Box<dyn Fn(&str, u64) + Send + Sync>>>,
+    notify: Mutex<Option<NotifyHook>>,
 }
 
 impl FlowCatalog {
@@ -263,10 +265,7 @@ impl FlowCatalog {
                 .spawn(move || loop {
                     let entry = fetch_roster_blocking(&work_cwd);
                     let mut refreshing = catalog.refreshing.lock();
-                    if refreshing
-                        .get_mut(&work_cwd)
-                        .is_some_and(|desired| std::mem::take(desired))
-                    {
+                    if refreshing.get_mut(&work_cwd).is_some_and(std::mem::take) {
                         // A newer source request supersedes this snapshot.
                         // Re-read on the same worker; never stack another fetch.
                         drop(refreshing);
@@ -304,6 +303,10 @@ impl FlowCatalog {
         self.notify(&cwd, generation);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Generation exhaustion must stop publication rather than reuse a roster identity."
+    )]
     fn store_refresh(&self, cwd: &str, mut entry: RosterEntry) -> u64 {
         let mut entries = self.entries.lock();
         if matches!(entry.status, RosterStatus::Error | RosterStatus::Legacy) {

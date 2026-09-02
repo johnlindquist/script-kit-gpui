@@ -343,6 +343,10 @@ impl ScriptListApp {
         self.mark_main_data_changed();
         self.rebuild_main_window_preflight_if_needed();
         self.refresh_ghost_with_input(cx);
+        #[expect(
+            clippy::expect_used,
+            reason = "Publication sequence exhaustion must fail before an identity can be reused."
+        )]
         let sequence = self.main_menu_last_publication().map_or(1, |stamp| {
             stamp
                 .sequence

@@ -41,6 +41,10 @@ struct SentenceScenario {
     input: String,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "Malformed compiled scenario JSON is a fixture defect, not an empty scenario list."
+)]
 static SENTENCE_SCENARIOS: LazyLock<Vec<SentenceScenario>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("search_sentences.json"))
         .expect("compiled sentence search scenarios")
@@ -583,6 +587,10 @@ impl SearchGate {
             payload_phase,
         })
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "The complete release batch is validated under the same lock before mutation."
+    )]
     pub(crate) fn release(&self, ids: &[u64]) -> Result<()> {
         crate::protocol::validate_search_run_ids(ids).map_err(anyhow::Error::msg)?;
         let wakes = {
@@ -636,6 +644,10 @@ impl SearchGate {
         }
         Ok(())
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "Released IDs are collected from this registry while its lock remains held."
+    )]
     pub(crate) fn take_released_source_changes(self: &Arc<Self>) -> Vec<SearchRun> {
         let mut state = self.state.lock();
         if state.retired {
@@ -690,6 +702,10 @@ impl SearchGate {
     /// The real resource read/highlight precedes this fixed fixture delay.
     /// Retirement does not cancel it: the production preview owner must reject
     /// the actual late completion using its captured subject and query stamp.
+    #[expect(
+        clippy::expect_used,
+        reason = "The preview waiter remains registered until its owning wait guard is dropped."
+    )]
     pub(crate) async fn wait_for_preview_completion(
         self: &Arc<Self>,
         generation: u64,
@@ -910,6 +926,10 @@ impl SearchRun {
     pub(crate) fn source(&self) -> &'static str {
         self.source
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "SearchRun owns an existing registered identity, including after gate retirement."
+    )]
     pub(crate) fn finish_source_change(&self) {
         let mut state = self.gate.state.lock();
         let run = state
@@ -957,6 +977,10 @@ impl SearchRun {
         };
         format!("example.invalid {source} {index}{revised}")
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "SearchRun owns an existing registered identity, including after gate retirement."
+    )]
     pub(crate) async fn ready(&self) -> Result<Outcome> {
         std::future::poll_fn(|cx| {
             let mut state = self.gate.state.lock();
@@ -977,6 +1001,10 @@ impl SearchRun {
     }
     /// The outer error is a capability refusal before the source read callback
     /// executes. An ordinary native IO error belongs inside the callback's T.
+    #[expect(
+        clippy::expect_used,
+        reason = "SearchRun owns an existing registered identity; losing it must not permit a read."
+    )]
     pub(crate) fn read_synchronously<T>(
         &self,
         build: impl FnOnce(Outcome, &SearchRun) -> T,
@@ -1006,6 +1034,10 @@ impl SearchRun {
     }
     /// Keep each producer's native transport. In the disconnect scenario the
     /// captured sender is genuinely dropped without sending any payload.
+    #[expect(
+        clippy::expect_used,
+        reason = "Run registration outlives delivery, and a delayed delivery installs its deadline."
+    )]
     pub(crate) async fn deliver<T, R>(
         &self,
         send: impl FnOnce(T) -> R,
@@ -1076,6 +1108,10 @@ impl SearchRun {
                 .sender_dropped = true;
         }
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "SearchRun owns an existing registered identity, including after gate retirement."
+    )]
     pub(crate) fn finish(&self, terminal: ProviderTerminal, policy: RootProviderPublicationPolicy) {
         let mut state = self.gate.state.lock();
         let source = {
@@ -1225,6 +1261,10 @@ pub(crate) fn window_result(
     })
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "The compiled timestamp is valid and fixture runs require installed owned authority."
+)]
 pub(crate) fn local_snapshot(
     refresh: &crate::scripts::root_search_contract::RootLocalContentRefresh,
     outcome: Outcome,
@@ -1408,6 +1448,10 @@ pub(crate) fn file_view_directory_stream<F>(
     );
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Keep the existing script/scriptlet tuple consumed by the catalogue owner."
+)]
 pub(crate) fn script_catalog(
     outcome: Outcome,
     run: &SearchRun,
@@ -1869,6 +1913,10 @@ pub(crate) fn prepare(
     Ok(gate)
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "Directory suggestions require the fixture HOME established during preparation."
+)]
 pub(crate) fn suggested_input(scenario: &str) -> String {
     if let Some(sentence) = sentence_input(scenario) {
         return sentence.into();

@@ -386,6 +386,7 @@ pub(crate) struct RootTodoRefreshSnapshot {
 }
 
 impl RootTodoRefreshSnapshot {
+    #[allow(dead_code)] // Root search completion receipts use this through the binary app layer.
     pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
         self.hits.as_ref().map(Vec::len)
     }
@@ -444,6 +445,7 @@ pub(crate) fn root_todos_snapshot_is_fresh() -> bool {
         .is_ok_and(|cache| root_todos_snapshot_cache_is_fresh(&cache))
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 fn fresh_root_todos_snapshot_status(cache: &RootTodoSnapshotCache) -> Option<(u64, usize)> {
     if cache.refresh_lifecycle.in_flight.is_some() || !root_todos_snapshot_cache_is_fresh(cache) {
         return None;
@@ -454,6 +456,7 @@ fn fresh_root_todos_snapshot_status(cache: &RootTodoSnapshotCache) -> Option<(u6
     ))
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 /// Current snapshot state revision and row count, including accepted empty snapshots.
 pub(crate) fn root_todos_fresh_cache_status() -> Option<(u64, usize)> {
     let cache = ROOT_TODO_SNAPSHOT.try_lock().ok()?;
@@ -495,6 +498,7 @@ pub(crate) fn read_root_todos_snapshot(
     }
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn owned_root_todos_snapshot(
     refresh: RootOwnedProviderRefresh,
     result: anyhow::Result<Vec<RootTodoSearchHit>>,
@@ -509,6 +513,7 @@ pub(crate) fn owned_root_todos_snapshot(
     })
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn reset_owned_root_todos() -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),
@@ -528,6 +533,7 @@ pub(crate) fn reset_owned_root_todos() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Owned search source changes call this through the binary app layer.
 pub(crate) fn invalidate_owned_root_todos_freshness() -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),

@@ -284,10 +284,15 @@ impl ScriptListApp {
         let catalogue = super::startup_data::OwnedMainCatalogueSources::initial(scope.root());
         self.spine_cwd = Some(catalogue.cwd);
         self.spine_cwd_label = Some(catalogue.cwd_label.into());
-        self.spine_cwd_revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Catalogue cwd revisions must fail on exhaustion rather than reuse an identity."
+        )]
+        let next_revision = self
             .spine_cwd_revision
             .checked_add(1)
             .expect("owned catalogue cwd revision exhausted");
+        self.spine_cwd_revision = next_revision;
         self.install_loaded_skills(catalogue.skills);
         let scriptlets =
             scripts::ScriptletCatalogue::from_scriptlets(catalogue.scriptlets).publish();
@@ -474,6 +479,10 @@ impl ScriptListApp {
         };
         cx.spawn(async move |this, cx| {
             if let (Some(run), Some(tx)) = (&work.run, tx) {
+                #[expect(
+                    clippy::result_large_err,
+                    reason = "Keep the native channel error and owned payload without a boxing allocation."
+                )]
                 run.deliver(move |result| tx.try_send(result), |outcome, run| {
                     crate::design_evaluation::search_fixtures::script_catalog(outcome, run).map(|(scripts, scriptlets)| AsyncScriptRefreshLoadResult {
                         scripts, scriptlets: scripts::ScriptletCatalogue::from_scriptlets(scriptlets), scripts_elapsed: std::time::Duration::ZERO,

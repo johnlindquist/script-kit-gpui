@@ -627,6 +627,7 @@ fn root_browser_tabs_cache_is_fresh(
             .is_some_and(|snapshot| now.saturating_duration_since(snapshot.captured_at) <= ttl)
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 fn fresh_root_browser_tabs_cache_status(
     cache: &RootBrowserTabSnapshotState,
     now: Instant,
@@ -645,6 +646,7 @@ fn fresh_root_browser_tabs_cache_status(
     })
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 /// Positive current snapshot evidence; missing, contested, stale, or failed
 /// caches are unknown rather than an invented empty successful snapshot.
 pub(crate) fn root_browser_tabs_fresh_cache_status(
@@ -759,6 +761,7 @@ pub(crate) fn refresh_root_browser_tabs_snapshot(
     list_open_tabs_for_root_providers(&providers)
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn owned_root_browser_tabs_snapshot(
     result: Result<Vec<BrowserTabInfo>>,
 ) -> Result<Vec<BrowserTabInfo>> {
@@ -769,6 +772,7 @@ pub(crate) fn owned_root_browser_tabs_snapshot(
     result
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn reset_owned_root_browser_tabs() -> Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),
@@ -788,6 +792,7 @@ pub(crate) fn reset_owned_root_browser_tabs() -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Owned search source changes call this through the binary app layer.
 pub(crate) fn invalidate_owned_root_browser_tabs_freshness() -> Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),

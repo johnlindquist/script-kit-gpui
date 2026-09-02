@@ -397,6 +397,7 @@ fn root_browser_history_cache_is_fresh(
             .is_some_and(|snapshot| now.saturating_duration_since(snapshot.captured_at) <= ttl)
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 fn fresh_root_browser_history_cache_status(
     cache: &RootBrowserHistorySnapshotState,
     now: Instant,
@@ -417,6 +418,7 @@ fn fresh_root_browser_history_cache_status(
     })
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 /// Positive snapshot evidence without starting work or recovering poisoned locks.
 pub(crate) fn root_browser_history_fresh_cache_status(
     cache_ttl_ms: u64,
@@ -534,6 +536,7 @@ pub(crate) fn discard_root_browser_history_refresh(refresh: RootBrowserHistoryRe
     discard_root_browser_history_refresh_from_state(&mut cache, refresh.generation)
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn owned_root_browser_history_snapshot(
     result: Result<Vec<RootBrowserHistorySearchHit>>,
 ) -> Result<Vec<RootBrowserHistorySearchHit>> {
@@ -544,6 +547,7 @@ pub(crate) fn owned_root_browser_history_snapshot(
     result
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn reset_owned_root_browser_history() -> Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),
@@ -563,6 +567,7 @@ pub(crate) fn reset_owned_root_browser_history() -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Owned search source changes call this through the binary app layer.
 pub(crate) fn invalidate_owned_root_browser_history_freshness() -> Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),

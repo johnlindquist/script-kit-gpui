@@ -317,10 +317,15 @@ impl ScriptListApp {
                 .viewport_intent
                 .note_input(source)
         {
-            self.main_menu_result_caches.viewport_revision = self
+            #[expect(
+                clippy::expect_used,
+                reason = "Fail closed on exhaustion rather than reuse a viewport revision."
+            )]
+            let next_revision = self
                 .main_menu_viewport_revision()
                 .checked_add(1)
                 .expect("main menu viewport revision exhausted");
+            self.main_menu_result_caches.viewport_revision = next_revision;
         }
     }
 
@@ -837,11 +842,16 @@ impl ScriptListApp {
         if self.resolved_main_menu_selected_subject().is_none() {
             return;
         }
-        self.main_menu_result_caches.reveal_sequence = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a deferred reveal ticket."
+        )]
+        let next_sequence = self
             .main_menu_result_caches
             .reveal_sequence
             .checked_add(1)
             .expect("main menu reveal sequence exhausted");
+        self.main_menu_result_caches.reveal_sequence = next_sequence;
         let ticket = MainMenuRevealTicket {
             sequence: self.main_menu_result_caches.reveal_sequence,
             query: self.root_search.query_stamp(),
@@ -1201,7 +1211,7 @@ impl ScriptListApp {
             if grouped_items.is_empty() {
                 (Vec::new(), 0, gpui::px(0.0), false)
             } else {
-                let scroll_top = script_list_pixel_top_for_offset(&grouped_items, offset, heights);
+                let scroll_top = script_list_pixel_top_for_offset(grouped_items, offset, heights);
                 let usable_height = (viewport_height
                     - main_list_header_overlay_height(self.current_main_menu_theme.def())
                     - main_list_footer_overlay_total_padding())
@@ -1226,7 +1236,7 @@ impl ScriptListApp {
                     })
                     .unwrap_or_else(|| offset.item_ix.min(grouped_items.len() - 1));
                 let anchor_top =
-                    script_list_pixel_top_for_item(&grouped_items, fallback_item_ix, heights);
+                    script_list_pixel_top_for_item(grouped_items, fallback_item_ix, heights);
                 let offset_in_item = gpui::px((scroll_top - anchor_top).max(0.0));
                 let first_visible_keys = (fallback_item_ix..grouped_items.len())
                     .take(MAIN_MENU_VIEWPORT_ANCHOR_KEY_COUNT)
@@ -1292,10 +1302,15 @@ impl ScriptListApp {
 
         self.last_scrolled_index = None;
 
-        self.main_list_row_generation = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a measured row generation."
+        )]
+        let next_generation = self
             .main_list_row_generation
             .checked_add(1)
             .expect("main list row generation exhausted");
+        self.main_list_row_generation = next_generation;
 
         if old_list_count != item_count {
             self.main_list_state.splice(0..old_list_count, item_count);
@@ -1363,10 +1378,15 @@ impl ScriptListApp {
             },
         };
         self.main_list_state.scroll_to(restored_offset);
-        self.main_menu_result_caches.viewport_revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a viewport revision."
+        )]
+        let next_revision = self
             .main_menu_viewport_revision()
             .checked_add(1)
             .expect("main menu viewport revision exhausted");
+        self.main_menu_result_caches.viewport_revision = next_revision;
 
         if crate::logging::filter_perf_trace_enabled() {
             tracing::info!(

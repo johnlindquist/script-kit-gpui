@@ -12,6 +12,8 @@ use super::super::command_contract::{
 use super::super::types::{FallbackMatch, Script, SearchResult};
 use super::{MAX_MENU_BAR_ITEMS, MIN_MENU_BAR_SCORE};
 
+// Keep the same explicit source, query, context and ranking inputs as the grouping owner.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_search_mode_results(
     mut results: Vec<SearchResult>,
     scripts: &[Arc<Script>],

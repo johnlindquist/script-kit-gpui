@@ -73,10 +73,14 @@ pub use cache::{
 };
 pub(crate) use cache::{
     discard_root_clipboard_history_refresh, finish_root_clipboard_history_refresh,
-    invalidate_owned_root_clipboard_history_freshness, owned_root_clipboard_history_snapshot,
-    read_root_clipboard_history_snapshot, reset_owned_root_clipboard_history,
-    root_clipboard_history_cache_is_fresh, root_clipboard_history_fresh_cache_status,
+    read_root_clipboard_history_snapshot, root_clipboard_history_cache_is_fresh,
     try_begin_root_clipboard_history_refresh, RootClipboardHistorySnapshot,
+};
+// The binary app and owned search fixtures consume these shared-module exports.
+#[allow(unused_imports)]
+pub(crate) use cache::{
+    invalidate_owned_root_clipboard_history_freshness, owned_root_clipboard_history_snapshot,
+    reset_owned_root_clipboard_history, root_clipboard_history_fresh_cache_status,
 };
 
 // Database operations

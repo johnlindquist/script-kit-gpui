@@ -103,6 +103,10 @@ fn fetching_request_matches(
         && state.fetching_menu_generation == generation
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "Fetch generation exhaustion must fail before starting work or reusing an identity."
+)]
 fn advance_fetch_generation(state: &mut TrackerState) -> u64 {
     state.fetching_menu_generation = state
         .fetching_menu_generation
@@ -157,6 +161,10 @@ impl Drop for MenuChangeSubscription {
 }
 
 /// Subscribe to already-running tracker producers; never starts native tracking.
+#[expect(
+    clippy::expect_used,
+    reason = "Subscription IDs must never be reused: dropping an old owner must not remove a new one."
+)]
 pub fn subscribe_menu_changes() -> MenuChangeSubscription {
     let (sender, receiver) = async_channel::bounded(1);
     let mut subscribers = MENU_CHANGE_SUBSCRIBERS.lock();

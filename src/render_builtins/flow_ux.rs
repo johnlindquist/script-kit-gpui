@@ -376,6 +376,10 @@ pub(crate) struct FlowMainReturnState {
 /// Ephemeral origin captured when a conversation is opened. It deliberately
 /// does not enter C05 persistence: returning to a view is presentation state,
 /// not conversation history.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "A single return route owns its view state inline without allocating on navigation."
+)]
 #[derive(Clone, Debug)]
 pub(crate) enum FlowConversationReturnRoute {
     Desk(FlowDeskReturnState),
@@ -562,7 +566,9 @@ impl ScriptListApp {
     pub(crate) fn start_flow_ux_tick(&mut self, cx: &mut Context<Self>) {
         // Owned sources deliver to the same reducers from bounded evaluator
         // events; they never poll codex or mdflow's process registries.
-        if crate::runtime_policy::is_owned_evaluation() { return; }
+        if crate::runtime_policy::is_owned_evaluation() {
+            return;
+        }
         if self.flow_ux_tick_running {
             return;
         }
@@ -742,7 +748,8 @@ impl ScriptListApp {
         let cwd = self.flow_ux_cwd();
         let roster = crate::flows::catalog::flow_catalog().roster_for(&cwd);
         resolve_flow_desk_state(
-            crate::runtime_policy::is_owned_evaluation() || crate::flows::catalog::mdflow_binary().is_some(),
+            crate::runtime_policy::is_owned_evaluation()
+                || crate::flows::catalog::mdflow_binary().is_some(),
             roster.status,
             roster.failure,
             !filter.trim().is_empty(),
@@ -1519,7 +1526,11 @@ impl ScriptListApp {
                 self.retry_flow_turn(session_id, cx);
             }
             AiRecoveryAction::RepairComponent { .. } => {
-                if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process).is_err() { return; }
+                if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+                    .is_err()
+                {
+                    return;
+                }
                 // mdflow missing/broken: the desk's install affordance is
                 // the one repair path (quick terminal `npm i -g mdflow`).
                 self.conversations.flow_sessions[index]

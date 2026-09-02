@@ -383,6 +383,10 @@ impl OwnedRootSearchClock {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "A poisoned owned clock must fail closed, never fall back to native time."
+)]
 pub fn root_search_now() -> Instant {
     if let Some(policy) = owned_evaluation() {
         let clock = policy
@@ -397,6 +401,10 @@ pub fn root_search_now() -> Instant {
 }
 
 /// Use real wall time in production and the declared fixture time in owned search.
+#[expect(
+    clippy::expect_used,
+    reason = "A poisoned owned clock must fail closed, never invent a display timestamp."
+)]
 pub fn root_search_display_unix_ms() -> i64 {
     if let Some(policy) = owned_evaluation() {
         let clock = policy

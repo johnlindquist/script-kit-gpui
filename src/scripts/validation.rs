@@ -729,6 +729,10 @@ pub(crate) fn register_scriptlet_capabilities(
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "Generation exhaustion must stop publication rather than reuse a capability identity."
+)]
 pub(crate) fn publish_scriptlet_capability_snapshot(
     source: Option<&Path>,
     parsed: Vec<(Arc<Scriptlet>, Option<TypedMetadata>)>,

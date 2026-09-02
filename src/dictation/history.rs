@@ -36,6 +36,7 @@ pub(crate) struct RootDictationHistorySnapshot {
 }
 
 impl RootDictationHistorySnapshot {
+    #[allow(dead_code)] // Root search completion receipts use this through the binary app layer.
     pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
         self.cache.as_ref().map(|cache| cache.entries.len())
     }
@@ -686,6 +687,7 @@ fn dictation_history_cache_is_fresh(cache: &DictationHistoryIndexCache) -> bool 
     history_file_signature(&history_path()).is_ok_and(|signature| cache.signature == signature)
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 /// Accepted snapshot publication revision and row count, never a worker identity.
 pub(crate) fn root_dictation_history_fresh_cache_status() -> Option<(u64, usize)> {
     let lifecycle = dictation_history_refresh_lifecycle().try_lock().ok()?;
@@ -748,6 +750,7 @@ pub(crate) fn read_root_dictation_history_snapshot() -> RootDictationHistorySnap
     read_root_dictation_history_snapshot_at(&history_path())
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn owned_root_dictation_history_snapshot(
     result: anyhow::Result<Vec<DictationHistoryEntry>>,
 ) -> anyhow::Result<RootDictationHistorySnapshot> {
@@ -765,6 +768,7 @@ pub(crate) fn owned_root_dictation_history_snapshot(
     })
 }
 
+#[allow(dead_code)] // Owned search source changes call this through the binary app layer.
 pub(crate) fn invalidate_owned_root_dictation_history_freshness() -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),
@@ -787,6 +791,7 @@ pub(crate) fn invalidate_owned_root_dictation_history_freshness() -> anyhow::Res
     Ok(())
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn reset_owned_root_dictation_history() -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),

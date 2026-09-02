@@ -204,9 +204,17 @@ impl MainMenuContentDigest {
             }
         }
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "Launcher metadata is JSON-compatible; failure must not produce a partial digest."
+    )]
     fn serialized(&mut self, value: &impl Serialize) {
         self.json(&serde_json::to_value(value).expect("JSON-compatible launcher metadata"));
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "RenderImage is immutable and frame_count bounds every hashed frame."
+    )]
     fn icon(&mut self, value: Option<&crate::app_launcher::DecodedIcon>) {
         self.flag(value.is_some());
         if let Some(image) = value {

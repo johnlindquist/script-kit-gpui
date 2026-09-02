@@ -459,6 +459,10 @@ impl MainMenuResultCacheState {
         self.cached_grouped_first_selectable_index.is_some()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Commit the existing query, rows, calculator, and ranking evidence together."
+    )]
     fn store_grouped_results(
         &mut self,
         computed_filter_text: String,
@@ -494,7 +498,10 @@ impl MainMenuResultCacheState {
         }
         let mut selectable = rows.iter().filter(|row| row.eligibility.selectable);
         let first = selectable.next().map(|row| row.grouped_index);
-        let last = selectable.last().map(|row| row.grouped_index).or(first);
+        let last = selectable
+            .next_back()
+            .map(|row| row.grouped_index)
+            .or(first);
         let calculator = calculator.filter(|_| {
             rows.iter()
                 .any(|row| row.subject == MainMenuRowSubject::Calculator)
@@ -516,10 +523,15 @@ impl MainMenuResultCacheState {
         self.committed_query = Some(query);
         self.ranking_evidence = ranking_evidence;
         self.grouped_cache_key = computed_filter_text;
-        self.result_revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on revision exhaustion rather than reuse a committed result identity."
+        )]
+        let next_revision = self
             .result_revision
             .checked_add(1)
             .expect("main menu result revision exhausted");
+        self.result_revision = next_revision;
         self.publication_error = None;
         Ok(())
     }
@@ -589,6 +601,10 @@ pub(crate) struct AgentChatMainReturnState {
     pending_placeholder: Option<String>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the owned return snapshot inline without allocating or changing handoff ownership."
+)]
 #[derive(Clone, Debug)]
 pub(crate) enum AgentChatReturnRoute {
     Source(AgentChatReturnOrigin),
@@ -694,12 +710,16 @@ impl ScriptListApp {
     }
 
     pub(crate) fn begin_main_menu_preview_work(&mut self, binding: MainMenuPreviewBinding) -> u64 {
-        self.main_menu_result_caches.preview_work_sequence = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a preview work identity."
+        )]
+        let sequence = self
             .main_menu_result_caches
             .preview_work_sequence
             .checked_add(1)
             .expect("main menu preview work sequence exhausted");
-        let sequence = self.main_menu_result_caches.preview_work_sequence;
+        self.main_menu_result_caches.preview_work_sequence = sequence;
         self.push_main_menu_preview_work_observation(MainMenuPreviewWorkObservation {
             sequence,
             binding,
@@ -792,10 +812,15 @@ impl ScriptListApp {
 
     pub(crate) fn reset_main_menu_viewport_intent(&mut self) {
         self.main_menu_result_caches.viewport_intent = MainMenuViewportIntent::FollowSelection;
-        self.main_menu_result_caches.viewport_revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a viewport revision."
+        )]
+        let next_revision = self
             .main_menu_viewport_revision()
             .checked_add(1)
             .expect("main menu viewport revision exhausted");
+        self.main_menu_result_caches.viewport_revision = next_revision;
         self.main_menu_result_caches.pending_reveal = None;
     }
 
@@ -874,10 +899,15 @@ impl ScriptListApp {
                 MainMenuSelectionOrigin::ProviderReconciliation => "provider_reconciliation",
                 MainMenuSelectionOrigin::Restoration => "restoration",
             };
-            self.main_menu_result_caches.selection_revision = self
+            #[expect(
+                clippy::expect_used,
+                reason = "Fail closed on exhaustion rather than reuse a selection revision."
+            )]
+            let next_revision = self
                 .main_menu_selection_revision()
                 .checked_add(1)
                 .expect("main menu selection revision exhausted");
+            self.main_menu_result_caches.selection_revision = next_revision;
             self.hovered_index = None;
             self.last_scrolled_index = None;
             self.clear_menu_syntax_filter_accept_hint();
@@ -908,10 +938,15 @@ impl ScriptListApp {
         };
         self.selected_index = selected.unwrap_or(0);
         let changed = previous != self.selected_index || anchor_removed;
-        cache.selection_revision = cache
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a selection revision."
+        )]
+        let next_revision = cache
             .selection_revision
             .checked_add(1)
             .expect("main menu selection revision exhausted");
+        cache.selection_revision = next_revision;
         self.hovered_index = None;
         self.last_scrolled_index = None;
         changed
@@ -919,10 +954,15 @@ impl ScriptListApp {
 
     pub(crate) fn reset_main_menu_selection_intent(&mut self) {
         self.main_menu_result_caches.selection_intent = MainMenuSelectionIntent::AutomaticTop;
-        self.main_menu_result_caches.selection_revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a selection revision."
+        )]
+        let next_revision = self
             .main_menu_selection_revision()
             .checked_add(1)
             .expect("main menu selection revision exhausted");
+        self.main_menu_result_caches.selection_revision = next_revision;
     }
 
     pub(crate) fn restore_main_menu_selection_from_snapshot(

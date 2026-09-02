@@ -241,7 +241,7 @@ pub(crate) fn get_grouped_results_with_input_history_and_query(
         frecency_store,
         suggested_config,
         flow_discovery,
-        ranking.as_deref_mut(),
+        ranking,
     )
 }
 
@@ -728,12 +728,7 @@ pub(crate) fn get_grouped_results_with_validation_and_query(
                 || !report.warnings.is_empty())
                 && !advanced_query_rejects_issue(advanced_query)
             {
-                prepend_script_issues_row(
-                    &mut grouped,
-                    &mut flat_results,
-                    report,
-                    ranking.as_deref_mut(),
-                );
+                prepend_script_issues_row(&mut grouped, &mut flat_results, report, ranking);
             }
         }
     }
@@ -1450,7 +1445,7 @@ fn append_root_agent_chat_history_section(
         .collect::<Vec<_>>();
 
     record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
-    if let Some(ranking) = ranking.as_deref_mut() {
+    if let Some(ranking) = ranking {
         for (row, hit) in rows.iter().zip(hits) {
             if let Some(facts) = row
                 .stable_selection_key()
@@ -1494,7 +1489,7 @@ fn append_root_brain_section(
     options: crate::brain::RootBrainSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
-    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some() || !crate::brain::root_brain_query_is_eligible(filter_text, options)
     {
@@ -1537,7 +1532,7 @@ fn append_root_brain_section(
     if ranking.is_some() {
         let pin = (insertion_index < root_file_passive_insertion_index(grouped, flat_results))
             .then_some("brain-before-file-handoff");
-        record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), pin);
+        record_passive_ranking(ranking, &rows, Some(limit), pin);
     }
     append_root_passive_section_at(
         grouped,
@@ -1559,7 +1554,7 @@ fn append_root_notes_section(
     options: crate::notes::RootNotesSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
-    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some() || !crate::notes::root_notes_query_is_eligible(filter_text, options)
     {
@@ -1596,7 +1591,7 @@ fn append_root_notes_section(
         })
         .collect::<Vec<_>>();
 
-    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    record_passive_ranking(ranking, &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1646,7 +1641,7 @@ fn append_root_todos_section(
     rows.truncate(limit);
 
     record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
-    if let Some(ranking) = ranking.as_deref_mut() {
+    if let Some(ranking) = ranking {
         let provider_ranks: std::collections::HashMap<_, _> = hits
             .iter()
             .enumerate()
@@ -1682,7 +1677,7 @@ fn append_root_clipboard_history_section(
     options: crate::clipboard_history::RootClipboardHistorySectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
-    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::clipboard_history::root_clipboard_history_query_is_eligible(filter_text, options)
@@ -1722,7 +1717,7 @@ fn append_root_clipboard_history_section(
         })
         .collect::<Vec<_>>();
 
-    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    record_passive_ranking(ranking, &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -1795,7 +1790,7 @@ fn append_root_dictation_history_section(
         .collect::<Vec<_>>();
 
     record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
-    if let Some(ranking) = ranking.as_deref_mut() {
+    if let Some(ranking) = ranking {
         for (row, hit) in rows.iter().zip(hits) {
             if let Some(facts) = row
                 .stable_selection_key()
@@ -1834,7 +1829,7 @@ fn append_root_browser_tabs_section(
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
     domain_intent: bool,
-    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::browser_tabs::root_browser_tabs_query_is_eligible(filter_text, options.clone())
@@ -1873,7 +1868,7 @@ fn append_root_browser_tabs_section(
         .collect::<Vec<_>>();
 
     record_passive_ranking(
-        ranking.as_deref_mut(),
+        ranking,
         &rows,
         Some(limit),
         domain_intent.then_some("bare-domain-tabs"),
@@ -1910,7 +1905,7 @@ fn append_root_browser_history_section(
     options: crate::browser_history::RootBrowserHistorySectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
-    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::browser_history::root_browser_history_query_is_eligible(
@@ -1947,7 +1942,7 @@ fn append_root_browser_history_section(
         })
         .collect::<Vec<_>>();
 
-    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    record_passive_ranking(ranking, &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -2127,7 +2122,7 @@ fn append_root_ai_vault_section(
     options: crate::ai_vault::RootAiVaultSectionOptions,
     budget: &mut RootPassiveResultBudget,
     explicit_source_filter: bool,
-    mut ranking: Option<&mut MainMenuRankingEvidenceMap>,
+    ranking: Option<&mut MainMenuRankingEvidenceMap>,
 ) {
     if advanced_query.is_some()
         || !crate::ai_vault::root_ai_vault_query_is_eligible(filter_text, &options)
@@ -2153,7 +2148,7 @@ fn append_root_ai_vault_section(
         })
         .collect::<Vec<_>>();
 
-    record_passive_ranking(ranking.as_deref_mut(), &rows, Some(limit), None);
+    record_passive_ranking(ranking, &rows, Some(limit), None);
     budget.consume(rows.len());
     let status = explicit_source_filter.then(|| {
         source_chip_result_status(
@@ -2325,8 +2320,7 @@ fn append_root_file_section(
         file_group.push(GroupedListItem::Item(idx));
     }
     if let Some(handoff) = handoff {
-        if let (Some(ranking), Some(key)) = (ranking.as_deref_mut(), handoff.stable_selection_key())
-        {
+        if let (Some(ranking), Some(key)) = (ranking, handoff.stable_selection_key()) {
             ranking.entry(key).or_default().pin_reason = Some("file-search-handoff");
         }
         let idx = flat_results.len();
@@ -2434,6 +2428,8 @@ fn root_file_passive_insertion_index(
         .unwrap_or(grouped.len())
 }
 
+// Match the other root-section appenders without introducing a one-off argument bundle.
+#[allow(clippy::too_many_arguments)]
 fn append_root_windows_section(
     grouped: &mut Vec<GroupedListItem>,
     flat_results: &mut Vec<SearchResult>,

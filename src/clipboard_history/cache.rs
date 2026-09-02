@@ -54,6 +54,7 @@ pub(crate) struct RootClipboardHistorySnapshot {
 }
 
 impl RootClipboardHistorySnapshot {
+    #[allow(dead_code)] // Root search completion receipts use this through the binary app layer.
     pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
         self.entries.as_ref().map(Vec::len)
     }
@@ -191,6 +192,7 @@ pub(crate) fn root_clipboard_history_cache_is_fresh() -> bool {
         && (!get_entry_cache().lock().is_empty() || *entry_cache_ready().lock())
 }
 
+#[allow(dead_code)] // Root search cache receipts use this through the binary app layer.
 /// Accepted metadata cache revision and row count, observed under the owner locks.
 pub(crate) fn root_clipboard_history_fresh_cache_status() -> Option<(u64, usize)> {
     let lifecycle = entry_cache_refresh_lifecycle().try_lock()?;
@@ -233,6 +235,7 @@ pub(crate) fn read_root_clipboard_history_snapshot() -> RootClipboardHistorySnap
     }
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn owned_root_clipboard_history_snapshot(
     result: anyhow::Result<Vec<ClipboardEntryMeta>>,
 ) -> anyhow::Result<RootClipboardHistorySnapshot> {
@@ -243,6 +246,7 @@ pub(crate) fn owned_root_clipboard_history_snapshot(
     Ok(RootClipboardHistorySnapshot { entries: result })
 }
 
+#[allow(dead_code)] // Owned search fixtures call this through the binary app layer.
 pub(crate) fn reset_owned_root_clipboard_history() -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),
@@ -263,6 +267,7 @@ pub(crate) fn reset_owned_root_clipboard_history() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Owned search source changes call this through the binary app layer.
 pub(crate) fn invalidate_owned_root_clipboard_history_freshness() -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::runtime_policy::is_owned_evaluation(),

@@ -620,11 +620,8 @@ impl ScriptListApp {
         };
         cx.spawn(async move |this, cx| {
             if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
-                run.deliver(
-                    move |snapshot| tx.send(snapshot),
-                    |outcome, run| owned_search::tab_result(outcome, run),
-                )
-                .await;
+                run.deliver(move |snapshot| tx.send(snapshot), owned_search::tab_result)
+                    .await;
             }
             let received = receive_root_passive_provider(rx, cx.background_executor()).await;
             let terminal = match &received {
@@ -843,7 +840,7 @@ impl ScriptListApp {
             if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
                 run.deliver(
                     move |snapshot| tx.send(snapshot),
-                    |outcome, run| owned_search::history_result(outcome, run),
+                    owned_search::history_result,
                 ).await;
             }
             let received = receive_root_passive_provider(rx, cx.background_executor()).await;
@@ -1490,7 +1487,7 @@ impl ScriptListApp {
             if let (Some(run), Some(tx)) = (&owned_run, owned_sender) {
                 run.deliver(
                     move |snapshot| tx.send(snapshot),
-                    |outcome, run| owned_search::conversation_snapshot(outcome, run),
+                    owned_search::conversation_snapshot,
                 ).await;
             }
             let received = receive_root_passive_provider(rx, cx.background_executor()).await;
@@ -2774,7 +2771,7 @@ impl ScriptListApp {
                 root_file_options.query_intent =
                     crate::file_search::RootFileQueryIntent::ExplicitFilesSourceFilter;
                 let visible_limit = self.root_file_source_chip_visible_limit_for(
-                    &raw_filter_text,
+                    raw_filter_text,
                     search_text,
                     advanced_predicate_active,
                     self.root_search.root_file_search_mode,
@@ -3007,7 +3004,7 @@ impl ScriptListApp {
                 crate::scripts::prepend_root_brain_inbox_section(
                     &mut grouped_items,
                     &mut flat_results,
-                    &raw_filter_text,
+                    raw_filter_text,
                     self.root_search.root_brain_inbox_items(),
                     self.config
                         .get_unified_search()
@@ -3031,7 +3028,7 @@ impl ScriptListApp {
                 crate::scripts::prepend_root_conversations_section(
                     &mut grouped_items,
                     &mut flat_results,
-                    &raw_filter_text,
+                    raw_filter_text,
                     &records,
                     &flows,
                     chrono::Utc::now().timestamp(),

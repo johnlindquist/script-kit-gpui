@@ -66,7 +66,6 @@ fn agent_chat_hot_prewarm_enabled_from(disabled: Option<&str>, enabled: Option<&
 impl ScriptListApp {
     /// Open a deterministic, provider-free standard Agent Chat surface for
     /// DevTools and visual smoke tests. This intentionally bypasses Pi warm-up.
-
     pub(crate) fn open_standard_agent_chat_mock_fixture(&mut self, cx: &mut Context<Self>) {
         let owned_hidden = matches!(&self.main_services, MainServices::OwnedFixtures(_));
         let source_view = self.current_view.clone();

@@ -74,6 +74,8 @@ pub use io::{serialize_message, JsonlReader, ParseIssueKind};
 pub use message::{capabilities, Message};
 #[allow(unused_imports)]
 pub use semantic_id::{generate_semantic_id, generate_semantic_id_named, value_to_slug};
+// The binary's owned runtime and search fixtures consume these shared-module exports.
+#[allow(unused_imports)]
 pub(crate) use types::design_evaluation::{
     parse_owned_frame_cursor, validate_search_run_ids, MAX_SEARCH_RELEASE_RUNS,
 };

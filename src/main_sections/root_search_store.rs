@@ -1,6 +1,10 @@
 static NEXT_ROOT_SEARCH_LIFETIME: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
+#[expect(
+    clippy::expect_used,
+    reason = "Fail closed on exhaustion rather than reuse a root query lifetime."
+)]
 fn next_root_search_lifetime() -> u64 {
     NEXT_ROOT_SEARCH_LIFETIME
         .fetch_update(
@@ -254,10 +258,15 @@ impl RootSearchStore {
         &mut self,
         candidates: std::sync::Arc<[std::sync::Arc<crate::scripts::Script>]>,
     ) -> u64 {
-        self.script_catalogue_revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a script catalogue revision."
+        )]
+        let next_revision = self
             .script_catalogue_revision
             .checked_add(1)
             .expect("script catalogue revision exhausted");
+        self.script_catalogue_revision = next_revision;
         self.script_catalogue_candidates = candidates;
         self.script_catalogue_revision
     }
@@ -351,17 +360,27 @@ impl RootSearchStore {
             self.query_stamp.lifetime = next_root_search_lifetime();
             self.query_owner_active = true;
         }
-        self.query_stamp.revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reattach work to a reused query revision."
+        )]
+        let next_revision = self
             .query_stamp
             .revision
             .checked_add(1)
             .expect("root query revision exhausted");
+        self.query_stamp.revision = next_revision;
         if self.accepted_scope != scope {
-            self.query_stamp.scope_revision = self
+            #[expect(
+                clippy::expect_used,
+                reason = "Fail closed on exhaustion rather than reuse a query scope revision."
+            )]
+            let next_revision = self
                 .query_stamp
                 .scope_revision
                 .checked_add(1)
                 .expect("root query scope exhausted");
+            self.query_stamp.scope_revision = next_revision;
         }
         self.accepted_query.clear();
         self.accepted_query.push_str(raw);
@@ -369,19 +388,25 @@ impl RootSearchStore {
         self.accepted_scope.push_str(scope);
         self.retire_passive_consumers();
         for run in self.provider_ownership.values_mut() {
-            let compatible_file = matches!(run.source, "files" | "directory")
-                && run.terminal.is_none()
-                && run.consumer == Some(previous)
-                && compatible_file_work.is_some_and(|(query, scope, _)| {
-                    run.work_query == query && run.work_scope == scope
-                });
-            run.consumer = if !run.query_bound || compatible_file {
+            let compatible_policy = match compatible_file_work {
+                Some((query, scope, policy))
+                    if matches!(run.source, "files" | "directory")
+                        && run.terminal.is_none()
+                        && run.consumer == Some(previous)
+                        && run.work_query == query
+                        && run.work_scope == scope =>
+                {
+                    Some(policy)
+                }
+                _ => None,
+            };
+            run.consumer = if !run.query_bound || compatible_policy.is_some() {
                 Some(self.query_stamp)
             } else {
                 None
             };
-            if compatible_file {
-                run.publication_policy = compatible_file_work.expect("matched compatible work").2;
+            if let Some(policy) = compatible_policy {
+                run.publication_policy = policy;
             }
         }
         true
@@ -393,11 +418,16 @@ impl RootSearchStore {
         }
         self.query_owner_active = false;
         self.query_stamp.lifetime = next_root_search_lifetime();
-        self.query_stamp.revision = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a retired query revision."
+        )]
+        let next_revision = self
             .query_stamp
             .revision
             .checked_add(1)
             .expect("root query revision exhausted");
+        self.query_stamp.revision = next_revision;
         self.computed_query_stamp = None;
         self.retire_passive_consumers();
         for run in self.provider_ownership.values_mut() {
@@ -489,9 +519,14 @@ impl RootSearchStore {
 
     pub(crate) fn allocate_named_provider_generation(&mut self, source: &'static str) -> u64 {
         let generation = self.named_provider_generations.entry(source).or_default();
-        *generation = generation
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than admit a stale provider generation."
+        )]
+        let next_generation = generation
             .checked_add(1)
             .expect("root provider generation exhausted");
+        *generation = next_generation;
         *generation
     }
 
@@ -612,6 +647,10 @@ impl RootSearchStore {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.retire_query_owner();
+        #[expect(
+            clippy::expect_used,
+            reason = "Fixture retirement must fail closed instead of reusing query or scope revisions."
+        )]
         let stamp = RootSearchQueryStamp {
             lifetime: next_root_search_lifetime(),
             revision: self
@@ -625,20 +664,36 @@ impl RootSearchStore {
                 .checked_add(1)
                 .expect("root query scope exhausted"),
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "Fixture retirement must fail closed instead of reusing a file generation."
+        )]
         let files = self
             .root_file_search_generation
             .checked_add(1)
             .expect("root file generation exhausted");
+        #[expect(
+            clippy::expect_used,
+            reason = "Fixture retirement must fail closed instead of reusing a brain generation."
+        )]
         let brain = self
             .root_brain_search_generation
             .checked_add(1)
             .expect("root brain generation exhausted");
+        #[expect(
+            clippy::expect_used,
+            reason = "Fixture retirement must fail closed instead of reusing a window generation."
+        )]
         let windows = self
             .root_windows_refresh_token
             .checked_add(1)
             .expect("root window generation exhausted");
         let coordinator = std::mem::take(&mut self.provider_generations);
         let named_generations = std::mem::take(&mut self.named_provider_generations);
+        #[expect(
+            clippy::expect_used,
+            reason = "Fixture retirement must fail closed instead of reusing a catalogue revision."
+        )]
         let script_catalogue_revision = self
             .script_catalogue_revision
             .checked_add(1)
@@ -779,10 +834,15 @@ impl RootSearchStore {
             return false;
         }
         self.root_brain_lexical_results = Some((self.query_stamp, hits));
-        self.root_brain_source_epoch = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a brain source epoch."
+        )]
+        let next_epoch = self
             .root_brain_source_epoch
             .checked_add(1)
             .expect("root brain source epoch exhausted");
+        self.root_brain_source_epoch = next_epoch;
         true
     }
 
@@ -881,10 +941,15 @@ impl RootSearchStore {
         }
         self.root_brain_semantic_results = Some((query, hits));
         self.root_brain_semantic_results_stamp = Some(self.query_stamp);
-        self.root_brain_source_epoch = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse a brain source epoch."
+        )]
+        let next_epoch = self
             .root_brain_source_epoch
             .checked_add(1)
             .expect("root brain source epoch exhausted");
+        self.root_brain_source_epoch = next_epoch;
         true
     }
 
@@ -949,10 +1014,15 @@ impl RootSearchStore {
             return false;
         }
         self.root_brain_inbox_items = items;
-        self.root_brain_inbox_epoch = self
+        #[expect(
+            clippy::expect_used,
+            reason = "Fail closed on exhaustion rather than reuse an inbox epoch."
+        )]
+        let next_epoch = self
             .root_brain_inbox_epoch
             .checked_add(1)
             .expect("root brain inbox epoch exhausted");
+        self.root_brain_inbox_epoch = next_epoch;
         true
     }
 
@@ -961,10 +1031,15 @@ impl RootSearchStore {
         self.root_brain_inbox_items.retain(|item| item.id != id);
         let changed = self.root_brain_inbox_items.len() != previous_len;
         if changed {
-            self.root_brain_inbox_epoch = self
+            #[expect(
+                clippy::expect_used,
+                reason = "Fail closed on exhaustion rather than reuse an inbox epoch."
+            )]
+            let next_epoch = self
                 .root_brain_inbox_epoch
                 .checked_add(1)
                 .expect("root brain inbox epoch exhausted");
+            self.root_brain_inbox_epoch = next_epoch;
         }
         changed
     }
