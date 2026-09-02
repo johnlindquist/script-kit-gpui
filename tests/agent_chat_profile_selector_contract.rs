@@ -37,7 +37,10 @@ const UI_WINDOW_SOURCE: &str = include_str!("../src/app_impl/ui_window.rs");
 fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source.find(signature).expect("signature must exist");
     let rest = &source[start..];
-    let body_start = rest.find('{').expect("function body must start");
+    let body_start = signature.len()
+        + rest[signature.len()..]
+            .find('{')
+            .expect("function or block body must start after its signature");
     let mut depth = 0usize;
     for (idx, ch) in rest[body_start..].char_indices() {
         match ch {
@@ -278,8 +281,11 @@ fn profile_search_renderer_has_right_pane_preview() {
     assert!(RENDER_PROFILE_SEARCH_SOURCE.contains("profile-search-preview-tools"));
 }
 
+/// Profile rows must inherit shared selection/hover/theme behavior, not pin a
+/// particular decoration such as the shared component's optional accent bar.
 #[test]
 fn profile_search_renderer_uses_shared_list_item_contract() {
+    let body = fn_body(RENDER_PROFILE_SEARCH_SOURCE, "fn render_profile_search(");
     for needle in [
         "ListItem::new(result.profile.name.clone(), list_colors)",
         "let description = profile_search_row_description(result);",
@@ -290,14 +296,13 @@ fn profile_search_renderer_uses_shared_list_item_contract() {
         ".hovered(is_hovered)",
         "let main_menu_theme = self.current_main_menu_theme;",
         ".main_menu_theme(main_menu_theme)",
-        ".with_accent_bar(true)",
         ".trailing_accessory_opt(",
         "profile_search_row_status_accessory(",
         "ListItemColors::from_theme(&self.theme)",
         "ListItem owns selected/hover/theme",
     ] {
         assert!(
-            RENDER_PROFILE_SEARCH_SOURCE.contains(needle),
+            body.contains(needle),
             "ProfileSearch rows must use shared ListItem contract: {needle}"
         );
     }
@@ -314,7 +319,7 @@ fn profile_search_renderer_uses_shared_list_item_contract() {
         "StyledText::new",
     ] {
         assert!(
-            !RENDER_PROFILE_SEARCH_SOURCE.contains(forbidden),
+            !body.contains(forbidden),
             "ProfileSearch must not reintroduce one-off row styling: {forbidden}"
         );
     }
@@ -347,16 +352,34 @@ fn profile_search_footer_uses_switch_profile_label() {
     assert!(body.contains("\"Switch Profile\".to_string()"));
 }
 
+/// Profile queries must publish synchronously and return before the general
+/// coalesced filter path; both caret-preserving and end-of-input callers share it.
 #[test]
 fn profile_search_filter_updates_bypass_coalescer_for_instant_search() {
-    let body = fn_body(
+    let wrapper = fn_body(
         FILTER_INPUT_UPDATES_SOURCE,
         "pub(crate) fn set_filter_text_immediate(",
     );
-    assert!(body.contains("matches!(self.current_view, AppView::ProfileSearchView { .. })"));
-    assert!(body.contains("self.computed_filter_text = text.clone();"));
-    assert!(body.contains("self.filter_coalescer.reset();"));
-    assert!(body.contains("cx.notify();"));
+    assert!(wrapper.contains("self.set_filter_text_and_cursor_immediate("));
+    let owner = fn_body(
+        FILTER_INPUT_UPDATES_SOURCE,
+        "pub(crate) fn set_filter_text_and_cursor_immediate(",
+    );
+    let profile_branch = fn_body(
+        owner,
+        "if handled_by_subview && matches!(self.current_view, AppView::ProfileSearchView { .. })",
+    );
+    for required in [
+        "self.computed_filter_text = text.clone();",
+        "self.filter_coalescer.reset();",
+        "cx.notify();",
+        "return;",
+    ] {
+        assert!(
+            profile_branch.contains(required),
+            "missing immediate profile update: {required}"
+        );
+    }
 }
 
 #[test]
@@ -432,19 +455,39 @@ fn profile_search_devtools_collector_exposes_rows_and_preview_not_current_view_f
     assert!(!profile_arm.contains("collector_used_current_view_fallback"));
 }
 
+/// Agents must address profiles by stable IDs and distinguish the current
+/// chat profile from the Quick AI profile, including when they are the same row.
 #[test]
 fn profile_search_devtools_rows_use_stable_profile_id_semantic_ids() {
+    let body = fn_body(
+        COLLECT_ELEMENTS_SOURCE,
+        "fn collect_profile_search_elements(",
+    );
     for needle in [
         "format!(\"profile-search-row:{}\", result.profile.id)",
         "element_type: protocol::ElementType::Choice",
         "selected: Some(index == selected_index)",
         "value: Some(result.profile.id.clone())",
         "selectable: Some(true)",
-        "result.selected.then(|| \"current\".to_string())",
     ] {
         assert!(
-            COLLECT_ELEMENTS_SOURCE.contains(needle),
+            body.contains(needle),
             "ProfileSearch rows must expose stable selectable row semantics: {needle}"
+        );
+    }
+    let status = fn_body(
+        body,
+        "status_kind: match (result.selected, result.quick_ai)",
+    );
+    for arm in [
+        "(true, true) => Some(\"current+quick-ai\".to_string())",
+        "(true, false) => Some(\"current\".to_string())",
+        "(false, true) => Some(\"quick-ai\".to_string())",
+        "(false, false) => None",
+    ] {
+        assert!(
+            status.contains(arm),
+            "missing profile status mapping: {arm}"
         );
     }
 }
@@ -540,32 +583,34 @@ fn profile_search_selection_refreshes_header_labels_after_reset() {
     );
 }
 
+/// The Enter that selects a profile must not execute a launcher item after
+/// returning. Check every live execution site inside the key handler, not an
+/// obsolete fallback helper or a pointer-click handler elsewhere in the render.
 #[test]
 fn script_list_enter_guard_runs_before_execute_selected_paths() {
     let body = fn_body(RENDER_SCRIPT_LIST_SOURCE, "fn render_script_list(");
-    let key_handler = body
-        .split("let handle_key = cx.listener(")
-        .nth(1)
-        .expect("ScriptList render must define handle_key")
-        .split("let handle_key_up = cx.listener(")
-        .next()
-        .expect("ScriptList key handler must precede key-up handler");
+    let key_handler = fn_body(body, "let handle_key = cx.listener(");
     let guard_pos = key_handler
         .find("consume_return_to_script_list_enter_guard")
         .expect("ScriptList must consume return-to-list Enter guard");
+    let guard = fn_body(key_handler, "consume_return_to_script_list_enter_guard");
+    assert!(guard.contains("cx.stop_propagation();"));
+    assert!(guard.contains("return;"));
     for needle in [
-        "execute_selected_fallback",
         "try_apply_pending_menu_syntax_ai_proposal",
         "try_handle_spine_enter",
-        "execute_selected(cx)",
+        "execute_selected(",
     ] {
-        let pos = key_handler
-            .find(needle)
-            .unwrap_or_else(|| panic!("ScriptList Enter path missing {needle}"));
         assert!(
-            guard_pos < pos,
-            "return-to-ScriptList guard must run before {needle}"
+            key_handler.contains(needle),
+            "ScriptList Enter path missing {needle}"
         );
+        for (pos, _) in key_handler.match_indices(needle) {
+            assert!(
+                guard_pos < pos,
+                "return-to-ScriptList guard must run before {needle}"
+            );
+        }
     }
 }
 
@@ -577,6 +622,8 @@ fn script_list_key_up_clears_return_to_script_list_enter_guard() {
     );
 }
 
+/// Keep profile selection on the left status marker rather than duplicating
+/// a trailing action, and dispatch GPUI/native clicks through the owning binding.
 #[test]
 fn footer_profile_affordance_is_merged_into_left_status_marker() {
     assert!(FOOTER_CHROME_SOURCE.contains("FOOTER_PROFILE_ICON_TOKEN"));
@@ -593,7 +640,12 @@ fn footer_profile_affordance_is_merged_into_left_status_marker() {
 
     assert!(FOOTER_POPUP_SOURCE.contains("pub action: Option<FooterAction>"));
     assert!(FOOTER_POPUP_SOURCE.contains("pub icon_token: Option<String>"));
-    assert!(FOOTER_POPUP_SOURCE.contains("dispatch_agent_chat_footer_action"));
+    let marker = fn_body(FOOTER_POPUP_SOURCE, "fn render_left_info(");
+    let marker_action = fn_body(marker, "if let Some(action) = info.action");
+    assert!(marker_action.contains("let binding = self.binding.clone();"));
+    assert!(marker_action.contains("dispatch_bound_footer_action(&binding, action)"));
+    let native_action = fn_body(FOOTER_POPUP_SOURCE, "fn send_footer_action_from_sender(");
+    assert!(native_action.contains("dispatch_bound_footer_action(&binding, action)"));
 }
 
 #[test]
