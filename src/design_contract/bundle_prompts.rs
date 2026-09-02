@@ -490,7 +490,10 @@ fn append_prompt_design_tokens(
             CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y, HEADER_DIVIDER_MARGIN, HEADER_PADDING_X,
             HEADER_PADDING_Y,
         };
-        use crate::window_resize::{height_for_view, ViewType};
+        use crate::window_resize::arg_layout::{
+            resolved_arg_layout, target_arg_window_height, ArgLayoutInputs, ArgPresentationMode,
+            RenderedFooterReservation, MINI_VISIBLE_ROW_LIMIT,
+        };
 
         let arg_input_height = CURSOR_HEIGHT_LG + (CURSOR_MARGIN_Y * 2.0); // 22
                                                                            // Painted input line box tracks the gpui-component Input font
@@ -506,12 +509,41 @@ fn append_prompt_design_tokens(
                                                                                    // Vendor gpui-component caret: width 2px, height 0.85 × line height.
                                                                                    // For Size::Size(px(20)) font the line box tracks the font size.
         let arg_caret_height = 0.85 * 20.0; // 17
-                                            // The launcher opens in MINI mode by default, so a script-driven arg
-                                            // prompt sizes through ViewType::MiniPrompt (5-visible-row clamp),
-                                            // NOT ArgPromptWithChoices. Runtime window capture 2026-07-12: 279.
-        let arg_fixture_height = f32::from(height_for_view(ViewType::MiniPrompt, 6)); // 279
-        let arg_full_mode_height = f32::from(height_for_view(ViewType::ArgPromptWithChoices, 6)); // 319
-        let arg_footer_spacer = crate::components::footer_chrome::current_main_menu_footer_height(); // 32
+                                            // Resolve the stock geometry without operator preferences, live theme,
+                                            // or host-native glass capability. The portable baseline reserves the
+                                            // stock footer; a runtime-only detached-glass gutter is not part of it.
+        let layout = crate::config::LayoutConfig::default();
+        let arg_footer_spacer = def.footer.metrics.height_px;
+        let arg_inputs = ArgLayoutInputs {
+            mode: ArgPresentationMode::Mini,
+            choice_count: 6,
+            window_height: f32::MAX,
+            window_non_content_height: crate::window_resize::layout::WINDOW_BORDER_Y,
+            header_chrome_height: crate::components::main_view_chrome::main_view_header_metrics(
+                def,
+                Some(def.search.height),
+            )
+            .header_height,
+            section_slot_height: 0.0,
+            row_slot_height: ListItemMetricsOverride::from_main_menu_def(def).item_height,
+            list_padding_top: 0.0,
+            list_padding_bottom: 0.0,
+            footer: RenderedFooterReservation {
+                owner_role: crate::list_item::geometry_roles::GeometryRole::FooterNativeHost,
+                reservation_height: arg_footer_spacer,
+            },
+            mini_visible_row_limit: MINI_VISIBLE_ROW_LIMIT,
+        };
+        let arg_height = |mode| {
+            target_arg_window_height(
+                resolved_arg_layout(ArgLayoutInputs { mode, ..arg_inputs }),
+                arg_inputs.window_non_content_height,
+                f32::from(crate::window_resize::layout::MIN_HEIGHT),
+                layout.standard_height,
+            )
+        };
+        let arg_fixture_height = arg_height(ArgPresentationMode::Mini);
+        let arg_full_mode_height = arg_height(ArgPresentationMode::Full);
 
         b.source_len(
             "argPrompt.header.paddingX",
@@ -617,7 +649,7 @@ fn append_prompt_design_tokens(
             None,
             false,
             &[
-                "window_resize::height_for_view(MiniPrompt, 6) — launcher opens mini",
+                "window_resize::arg_layout::resolved_arg_layout(InfoBarBase baseline, default layout)",
                 "argPrompt.header.height",
             ],
         );
@@ -626,11 +658,11 @@ fn append_prompt_design_tokens(
             "argPrompt.windowHeight.miniVsFull",
             &[
                 (
-                    "height_for_view(MiniPrompt, 6) — default mini launcher",
+                    "resolved_arg_layout(Mini, InfoBarBase baseline, default layout)",
                     format!("{arg_fixture_height}"),
                 ),
                 (
-                    "height_for_view(ArgPromptWithChoices, 6) — full-mode model",
+                    "resolved_arg_layout(Full, InfoBarBase baseline, default layout)",
                     format!("{arg_full_mode_height}"),
                 ),
             ],
