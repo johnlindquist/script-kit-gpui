@@ -1042,23 +1042,12 @@ pub fn init_notes_db() -> Result<()> {
         fs::create_dir_all(parent).context("Failed to create notes db directory")?;
     }
 
-    let db_exists = db_path.exists();
-    let (conn, recovered) = open_or_recover_notes_db(&db_path)?;
+    let (conn, _) = open_or_recover_notes_db(&db_path)?;
 
-    if !db_exists || recovered || schema_needs_rebuild(&conn)? {
-        rebuild_index_from_files_with_conn(&conn)
-            .context("Failed to rebuild notes index from brain files")?;
-    } else {
-        backfill_note_metadata_with_conn(&conn)
-            .context("Failed to backfill notes metadata schema")?;
-        rebuild_notes_search_index_with_conn(&conn)
-            .context("Failed to backfill notes FTS index")?;
-        conn.execute(
-            &format!("PRAGMA user_version = {NOTES_INDEX_SCHEMA_VERSION}"),
-            [],
-        )
-        .context("Failed to set notes index schema version")?;
-    }
+    // Markdown is canonical. Reconcile on every cold start so offline edits
+    // replace stale index rows and seed the save-conflict baselines.
+    rebuild_index_from_files_with_conn(&conn)
+        .context("Failed to rebuild notes index from brain files")?;
 
     info!(db_path = %db_path.display(), "Notes database initialized");
 

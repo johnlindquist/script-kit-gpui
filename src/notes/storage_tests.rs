@@ -681,6 +681,79 @@ mod tests {
     }
 
     #[test]
+    fn cold_start_preserves_offline_canonical_edits() {
+        const STAGE: &str = "SCRIPT_KIT_NOTES_OFFLINE_RESTART_TEST_STAGE";
+        const TEST: &str = "notes::storage::tests::cold_start_preserves_offline_canonical_edits";
+        if let Ok(stage) = std::env::var(STAGE) {
+            let _guard = notes_db_test_guard();
+            init_notes_db().expect("initialize a fresh process against the sandbox");
+            let metadata = get_notes_brain_base_path().join("restart-test-note.json");
+            match stage.as_str() {
+                "seed" => {
+                    let note = Note::with_content("# Cold startup note\nBEFORE-OFFLINE-EDIT");
+                    save_note(&note).expect("save original note");
+                    let path = note_file_path(note.id)
+                        .expect("canonical path")
+                        .expect("note file");
+                    fs::write(metadata, serde_json::to_vec(&(note.id, path)).unwrap()).unwrap();
+                }
+                "reopen" => {
+                    let (id, path): (NoteId, PathBuf) =
+                        serde_json::from_slice(&fs::read(metadata).unwrap()).unwrap();
+                    let mut note = get_note(id)
+                        .expect("load reopened note")
+                        .expect("saved note");
+                    note.content.push_str("\nSaved after restart");
+                    save_note(&note).expect("save the reopened editor content");
+                    let canonical = fs::read_to_string(path).expect("read saved canonical file");
+                    assert!(
+                        canonical.contains("OFFLINE-CANONICAL-EDIT"),
+                        "cold-start save discarded the offline edit: {canonical}"
+                    );
+                }
+                _ => panic!("unknown offline restart test stage"),
+            }
+            return;
+        }
+
+        // Re-execute this existing harness so process-wide OnceLocks are fresh,
+        // even when other storage tests have already initialized the parent.
+        let sandbox = tempfile::tempdir().expect("isolated restart storage");
+        let brain = sandbox.path().join("brain");
+        let db = sandbox.path().join("db/notes.sqlite");
+        let run = |stage| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(STAGE, stage)
+                .env("SCRIPT_KIT_NONINTERACTIVE", "1")
+                .env("SCRIPT_KIT_TEST_NOTES_DB_PATH", &db)
+                .env("SCRIPT_KIT_TEST_NOTES_BRAIN_PATH", &brain)
+                .output()
+                .expect("run the isolated storage test");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run("seed");
+        let (_, path): (NoteId, PathBuf) =
+            serde_json::from_slice(&fs::read(brain.join("restart-test-note.json")).unwrap())
+                .unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        assert!(original.contains("BEFORE-OFFLINE-EDIT"));
+        fs::write(
+            &path,
+            original.replacen("BEFORE-OFFLINE-EDIT", "OFFLINE-CANONICAL-EDIT", 1),
+        )
+        .unwrap();
+        run("reopen");
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .contains("Saved after restart"));
+    }
+
+    #[test]
     fn test_init_notes_db_recreates_triggers_for_existing_connection() {
         let _guard = notes_db_test_guard();
         init_notes_db().expect("notes db should initialize before trigger recreation");
