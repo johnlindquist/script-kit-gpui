@@ -1526,6 +1526,81 @@ mod tests {
     }
 
     #[test]
+    fn test_same_title_note_preserves_trash_and_restores_without_overwriting() {
+        let _guard = notes_db_test_guard();
+        init_notes_db().expect("notes db should initialize before trash collision test");
+        let token = unique_test_token("trash_collision");
+        let mut original = Note::with_content(format!("# {token}\nOriginal deleted body"));
+        save_note(&original).expect("save original");
+        let original_path = note_file_path(original.id)
+            .expect("original path lookup")
+            .expect("original path");
+        let substrate = notes_substrate().expect("substrate");
+        let trash_path = substrate
+            .paths()
+            .trash_dir()
+            .join(original_path.file_name().expect("original filename"));
+        original.soft_delete();
+        save_note(&original).expect("trash original");
+        let trash_before = brain_io::read_private_document(&trash_path).expect("trashed document");
+        let unrelated_path = substrate
+            .paths()
+            .trash_dir()
+            .join(format!("{token}-day.md"));
+        let unrelated_body = "# Unrelated day page\nKeep this capture.\n";
+        brain_io::atomic_write(&unrelated_path, unrelated_body).expect("unrelated trash document");
+
+        let replacement = Note::with_content(format!("# {token}\nDifferent active body"));
+        save_note(&replacement).expect("save different note with the same title");
+        assert!(
+            trash_path.exists(),
+            "saving a new note must not consume another note's trash document"
+        );
+        save_note(&replacement).expect("ordinary active save must not restore another note");
+        assert_eq!(
+            brain_io::read_private_document(&trash_path).expect("original still in trash"),
+            trash_before
+        );
+        let replacement_path = note_file_path(replacement.id)
+            .expect("replacement path lookup")
+            .expect("replacement path");
+        let replacement_before = brain_io::read_private_document(&replacement_path)
+            .expect("replacement canonical document");
+
+        original.restore();
+        save_note(&original).expect("restore original without replacing the active note");
+        let restored_path = note_file_path(original.id)
+            .expect("restored path lookup")
+            .expect("restored path");
+        assert_ne!(restored_path, replacement_path);
+        assert!(
+            !trash_path.exists(),
+            "the exact original should be restored"
+        );
+        let restored = brain_io::read_private_document(&restored_path).expect("restored document");
+        assert_eq!(
+            substrate
+                .parse_document(&restored)
+                .expect("parse restored")
+                .0
+                .id,
+            original.id
+        );
+        assert!(restored.contains("Original deleted body"));
+        assert_eq!(
+            brain_io::read_private_document(&replacement_path).expect("active note unchanged"),
+            replacement_before
+        );
+        assert_eq!(
+            brain_io::read_private_document(&unrelated_path).expect("unrelated trash unchanged"),
+            unrelated_body
+        );
+        fs::remove_file(&unrelated_path).expect("cleanup unrelated fixture");
+        delete_note_permanently(original.id).expect("cleanup original");
+        delete_note_permanently(replacement.id).expect("cleanup replacement");
+    }
+
+    #[test]
     fn test_backlinks_recompute_when_target_alias_changes() {
         let _guard = notes_db_test_guard();
         init_notes_db().expect("notes db should initialize before stale backlink test");

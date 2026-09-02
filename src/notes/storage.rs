@@ -391,13 +391,21 @@ fn lookup_note_slug(conn: &Connection, note_id: NoteId) -> Result<Option<String>
     .map(|row| row.flatten())
 }
 
-fn resolve_note_slug(conn: &Connection, note: &Note) -> Result<String> {
-    if let Some(slug) = lookup_note_slug(conn, note.id)? {
-        return Ok(slug);
-    }
-
-    let substrate = notes_substrate()?;
-    substrate.allocate_slug(&note.title, BrainSlugDir::Notes)
+fn resolve_note_save_target(conn: &Connection, note: &Note) -> Result<(String, bool)> {
+    let existing = conn
+        .query_row(
+            "SELECT file_slug, deleted_at IS NOT NULL FROM notes WHERE id = ?1",
+            params![note.id.as_str()],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()
+        .context("Failed to look up note save target")?;
+    let (slug, was_deleted) = existing.unwrap_or((None, false));
+    let slug = match slug {
+        Some(slug) => slug,
+        None => notes_substrate()?.allocate_slug(&note.title, BrainSlugDir::Notes)?,
+    };
+    Ok((slug, was_deleted && note.deleted_at.is_none()))
 }
 
 fn write_conflict_copy(path: &Path, contents: &str) -> Result<()> {
@@ -767,7 +775,11 @@ fn trash_canonical_note_file(substrate: &BrainSubstrate, slug: &str) -> Result<(
     Ok(())
 }
 
-fn restore_canonical_note_file(substrate: &BrainSubstrate, slug: &str) -> Result<()> {
+fn restore_canonical_note_file(
+    substrate: &BrainSubstrate,
+    note_id: NoteId,
+    slug: &str,
+) -> Result<()> {
     let destination = substrate.paths().note_file(slug);
     let trash_dir = substrate.paths().trash_dir();
     if !trash_dir.exists() {
@@ -776,7 +788,7 @@ fn restore_canonical_note_file(substrate: &BrainSubstrate, slug: &str) -> Result
     crate::atomic_file::ensure_private_directory(&trash_dir)
         .context("Failed to prepare private Notes trash directory")?;
 
-    let suffix = format!("{slug}.md");
+    let mut matching_path = None;
     for entry in fs::read_dir(&trash_dir)
         .with_context(|| format!("reading trash dir {}", trash_dir.display()))?
     {
@@ -788,10 +800,23 @@ fn restore_canonical_note_file(substrate: &BrainSubstrate, slug: &str) -> Result
         if !name.ends_with(".md") {
             continue;
         }
-        if name == suffix || name.starts_with(&format!("{slug}-")) {
-            substrate.restore(&path, &destination)?;
-            return Ok(());
+        let raw = brain_io::read_private_document(&path)
+            .with_context(|| format!("reading trash document {}", path.display()))?;
+        // Day pages share the trash but have no Notes frontmatter identity.
+        if metadata::strip_frontmatter(&raw).len() == raw.len() {
+            continue;
         }
+        let (frontmatter, _) = substrate.parse_document(&raw)?;
+        if frontmatter.id == note_id {
+            anyhow::ensure!(
+                matching_path.is_none(),
+                "multiple trash documents match the note identity"
+            );
+            matching_path = Some(path);
+        }
+    }
+    if let Some(path) = matching_path {
+        substrate.restore(&path, &destination)?;
     }
     Ok(())
 }
@@ -1078,12 +1103,23 @@ pub fn save_note(note: &Note) -> Result<()> {
     let db = get_db()?;
     let mut conn = db.lock().map_err(db_lock_err)?;
 
-    let slug = resolve_note_slug(&conn, note)?;
+    let (mut slug, is_restoring) = resolve_note_save_target(&conn, note)?;
+    if is_restoring {
+        let destination = substrate.paths().note_file(&slug);
+        if let Some(raw) = brain_io::read_private_document_if_present(&destination)? {
+            let (existing, _) = substrate.parse_document(&raw)?;
+            if existing.id != note.id {
+                slug = substrate.allocate_slug(&note.title, BrainSlugDir::Notes)?;
+            }
+        }
+    }
     let hash = if note.deleted_at.is_some() {
         trash_canonical_note_file(&substrate, &slug)?;
         String::new()
     } else {
-        restore_canonical_note_file(&substrate, &slug)?;
+        if is_restoring {
+            restore_canonical_note_file(&substrate, note.id, &slug)?;
+        }
         write_canonical_note_file(&substrate, note, &slug)?
     };
 
