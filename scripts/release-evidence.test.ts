@@ -3082,6 +3082,10 @@ describe("nonintrusive CI release ownership and publication graph", () => {
 const describeMacOS = process.platform === "darwin" ? describe : describe.skip;
 
 describeMacOS("packaged macOS metadata and executable identity", () => {
+  const sourceVersion = readFileSync(resolve(import.meta.dir, "../Cargo.toml"), "utf8")
+    .match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
+  if (!sourceVersion) throw new Error("Cargo.toml package version is required");
+
   function inspectBundle(options: {
     identifier?: string;
     version?: string;
@@ -3095,7 +3099,7 @@ describeMacOS("packaged macOS metadata and executable identity", () => {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleIdentifier</key><string>${options.identifier ?? "com.scriptkit.app"}</string>
-  <key>CFBundleShortVersionString</key><string>${options.version ?? "0.1.17"}</string>
+  <key>CFBundleShortVersionString</key><string>${options.version ?? sourceVersion}</string>
   <key>CFBundleExecutable</key><string>${options.executable ?? "script-kit-gpui"}</string>
 </dict></plist>`);
 
