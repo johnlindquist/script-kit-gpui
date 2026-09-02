@@ -1362,4 +1362,38 @@ mod tests {
         assert_eq!(deleted, 1);
         reset_test_clipboard_db();
     }
+
+    #[test]
+    fn metadata_backfill_tolerates_malformed_unicode_png_rows() {
+        let _guard = test_db_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_test_clipboard_db(&dir.path().join("clipboard.sqlite")).expect("test db");
+        let entry_id = add_entry("legacy placeholder", ContentType::Text).expect("seed entry");
+        let malformed = format!("png:{}é", "A".repeat(31));
+
+        {
+            let conn = get_connection().expect("test connection");
+            let conn = conn.lock().expect("test connection lock");
+            conn.execute(
+                "UPDATE history SET content = ?1, content_type = 'image', text_preview = NULL, byte_size = 0 WHERE id = ?2",
+                params![malformed, entry_id],
+            )
+            .expect("seed malformed legacy image row");
+
+            populate_existing_metadata(&conn)
+                .expect("metadata migration must tolerate corrupt PNG");
+
+            let (content, width, height, byte_size): (String, Option<i64>, Option<i64>, i64) = conn
+                .query_row(
+                    "SELECT content, image_width, image_height, byte_size FROM history WHERE id = ?1",
+                    params![entry_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("legacy row must remain available");
+            assert_eq!(content, malformed);
+            assert_eq!((width, height), (None, None));
+            assert_eq!(byte_size, malformed.len() as i64);
+        }
+        reset_test_clipboard_db();
+    }
 }

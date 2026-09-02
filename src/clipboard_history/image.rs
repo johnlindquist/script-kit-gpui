@@ -388,13 +388,8 @@ fn png_dims_from_bytes(png: &[u8]) -> Option<(u32, u32)> {
 /// Decodes only the first 32 base64 characters (24 bytes) to read PNG header.
 /// Returns None if header is invalid, triggering fallback to full decode.
 fn get_png_dimensions_fast(base64_data: &str) -> Option<(u32, u32)> {
-    // Need at least 32 base64 chars to get 24 PNG bytes
-    if base64_data.len() < 32 {
-        return None;
-    }
-
-    // Decode only the first 32 base64 chars
-    let header_b64 = &base64_data[..32];
+    // Base64 is byte-oriented; malformed Unicode must be rejected, not sliced as text.
+    let header_b64 = base64_data.as_bytes().get(..32)?;
     let header = BASE64.decode(header_b64).ok()?;
 
     if header.len() < 24 {
