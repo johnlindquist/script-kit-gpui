@@ -620,6 +620,9 @@ pub struct NotesApp {
     /// Whether the search bar is shown (Cmd+F)
     show_search: bool,
 
+    /// Last focused primary input; transient popups do not replace this preference.
+    search_was_last_focused: bool,
+
     /// Whether markdown preview is enabled (Cmd+Shift+P)
     preview_enabled: bool,
 

@@ -128,6 +128,10 @@ impl NotesApp {
                     this.notes_editor
                         .update(cx, |editor, cx| editor.sync_markdown_link_highlights(cx));
                 }
+                InputEvent::Focus if this.search_was_last_focused => {
+                    this.search_was_last_focused = false;
+                    cx.notify();
+                }
                 _ => {}
             }
         });
@@ -139,10 +143,13 @@ impl NotesApp {
 
         // Subscribe to search changes
         let search_sub = cx.subscribe_in(&search_state, window, {
-            move |this, _, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    this.on_search_change(window, cx);
+            move |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => this.on_search_change(window, cx),
+                InputEvent::Focus if !this.search_was_last_focused => {
+                    this.search_was_last_focused = true;
+                    cx.notify();
                 }
+                _ => {}
             }
         });
 
@@ -205,6 +212,7 @@ impl NotesApp {
             force_hovered: false,
             show_format_toolbar: false,
             show_search: false,
+            search_was_last_focused: false,
             preview_enabled: false,
             last_line_count: initial_line_count,
             initial_height,

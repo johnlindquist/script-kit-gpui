@@ -14,8 +14,9 @@ fn primary_focus_surface_for_state(
     preview_enabled: bool,
     has_kit_resource_preview: bool,
     show_search: bool,
+    search_was_last_focused: bool,
 ) -> NotesFocusSurface {
-    if show_search {
+    if show_search && search_was_last_focused {
         NotesFocusSurface::Search
     } else if preview_enabled || has_kit_resource_preview {
         NotesFocusSurface::Preview
@@ -51,11 +52,32 @@ impl NotesApp {
         }
     }
 
+    fn remember_primary_input_focus(&mut self, window: &Window, cx: &Context<Self>) {
+        // Snapshot the real focus handle before a popup takes focus. Input focus
+        // callbacks alone do not cover every window activation/dispatch boundary.
+        if self
+            .search_state
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.search_was_last_focused = true;
+        } else if self
+            .editor_state
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.search_was_last_focused = false;
+        }
+    }
+
     pub(super) fn primary_focus_surface(&self) -> NotesFocusSurface {
         primary_focus_surface_for_state(
             self.preview_enabled,
             self.kit_resource_preview.is_some(),
             self.show_search,
+            self.search_was_last_focused,
         )
     }
 
@@ -79,6 +101,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_primary_input_focus(window, cx);
         tracing::info!(
             target: "notes",
             requested_surface = ?surface,
@@ -98,6 +121,7 @@ impl NotesApp {
     /// (e.g., from an async action dispatch that only had `&mut App`).
     pub(super) fn drain_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(surface) = self.pending_focus_surface.take() {
+            self.remember_primary_input_focus(window, cx);
             let previous_surface = self.current_focus_surface();
             self.record_focus_transition("drain-pending", surface, previous_surface, window, cx);
             self.apply_focus_surface(surface, window, cx);
@@ -111,6 +135,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_primary_input_focus(window, cx);
         let surface = if self.command_bar.is_open() {
             NotesFocusSurface::ActionsPanel
         } else if self.note_switcher.is_open() {
@@ -150,10 +175,12 @@ impl NotesApp {
 
         match surface {
             NotesFocusSurface::Editor => {
+                self.search_was_last_focused = false;
                 self.editor_state
                     .update(cx, |state, cx| state.focus(window, cx));
             }
             NotesFocusSurface::Search => {
+                self.search_was_last_focused = true;
                 self.search_state
                     .update(cx, |state, cx| state.focus(window, cx));
             }
@@ -191,14 +218,22 @@ mod tests {
             (false, true, NotesFocusSurface::Preview),
             (true, true, NotesFocusSurface::Preview),
         ] {
-            assert_eq!(
-                primary_focus_surface_for_state(preview_enabled, has_kit_resource_preview, false),
-                non_search_surface
-            );
-            assert_eq!(
-                primary_focus_surface_for_state(preview_enabled, has_kit_resource_preview, true),
-                NotesFocusSurface::Search
-            );
+            for (show_search, search_was_last_focused, expected) in [
+                (false, false, non_search_surface),
+                (false, true, non_search_surface),
+                (true, false, non_search_surface),
+                (true, true, NotesFocusSurface::Search),
+            ] {
+                assert_eq!(
+                    primary_focus_surface_for_state(
+                        preview_enabled,
+                        has_kit_resource_preview,
+                        show_search,
+                        search_was_last_focused,
+                    ),
+                    expected
+                );
+            }
         }
     }
 }
