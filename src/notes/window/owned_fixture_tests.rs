@@ -1,7 +1,7 @@
 use super::init::NotesInitialData;
 use super::*;
 
-/// A failed save must retain the editable draft and report why close was refused.
+/// A failed save must retain draft identity through view changes and refuse closing.
 #[gpui::test]
 fn failed_save_keeps_notes_open_for_escape_and_cmd_w(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -44,6 +44,15 @@ fn failed_save_keeps_notes_open_for_escape_and_cmd_w(cx: &mut gpui::TestAppConte
     let window: gpui::AnyWindowHandle = handle.into();
     window
         .update(cx, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                let selection_before = app.selected_note_id;
+                app.set_view_mode(NotesViewMode::Trash, window, cx);
+                assert_eq!(app.view_mode, NotesViewMode::AllNotes);
+                assert_eq!(app.selected_note_id, selection_before);
+                assert!(app.has_unsaved_changes);
+                assert_eq!(app.editor_text(cx), draft);
+            });
+
             for key in ["escape", "cmd-w", "ctrl-cmd-w"] {
                 app.update(cx, |app, cx| {
                     let reveal_before = app.entry_reveal.clone();

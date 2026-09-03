@@ -905,6 +905,12 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Keep the current document bound until its draft is safely saved.
+        if self.has_unsaved_changes && !self.save_current_note() {
+            cx.notify();
+            return;
+        }
+
         self.view_mode = mode;
 
         // Select first note in new view
