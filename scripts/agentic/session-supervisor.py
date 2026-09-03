@@ -570,6 +570,23 @@ def stop_session(directory):
         if actual != identity["supervisorStartTime"]:
             raise RuntimeError("session_supervisor_pid_reused")
         os.kill(supervisor, signal.SIGTERM)
+    elif not (path / "app-exit.json").exists():
+        # The supervisor died without writing its exit receipt (kill -9, OOM,
+        # spawn refusal). The session is provably dead only when the app PID is
+        # gone or belongs to a different process AND its dedicated process group
+        # has no live members. Record the orphan reap; never fabricate app-exit.json.
+        try:
+            app_start = process_start(identity["pid"])
+        except RuntimeError:
+            app_start = None
+        if app_start is None or app_start != identity["processStartTime"]:
+            if group_members(identity["processGroupId"]) == []:
+                append_lifecycle(path / "lifecycle.ndjson", {
+                    "schemaVersion": 1, "event": "session_orphan_reaped", "sessionGeneration": generation,
+                    "pid": identity["pid"], "supervisorPid": supervisor,
+                    "appPidReused": app_start is not None,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                return 0
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
