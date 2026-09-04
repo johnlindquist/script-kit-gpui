@@ -100,6 +100,14 @@ impl HeadlessAppContext {
         }
     }
 
+    /// Enables or disables automatic drawing after app updates. Enabled by default.
+    ///
+    /// When disabled, effects still run and windows retain their dirty state until
+    /// the caller explicitly draws them. Explicit drawing is never disabled.
+    pub fn set_automatic_drawing(&mut self, enabled: bool) {
+        self.app.borrow_mut().automatic_drawing = enabled;
+    }
+
     /// Opens a window for headless rendering.
     pub fn open_window<V: Render + 'static>(
         &mut self,

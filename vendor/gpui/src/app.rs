@@ -649,6 +649,8 @@ pub struct App {
     pub(crate) window_update_stack: Vec<WindowId>,
     pub(crate) mode: GpuiMode,
     flushing_effects: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    automatic_drawing: bool,
     pending_updates: usize,
     quit_mode: QuitMode,
     quitting: bool,
@@ -690,6 +692,8 @@ impl App {
                 mode: GpuiMode::Production,
                 actions: Rc::new(ActionRegistry::default()),
                 flushing_effects: false,
+                #[cfg(any(test, feature = "test-support"))]
+                automatic_drawing: true,
                 pending_updates: 0,
                 active_drag: None,
                 background_executor,
@@ -1438,20 +1442,22 @@ impl App {
                 }
             } else {
                 #[cfg(any(test, feature = "test-support"))]
-                for window in self
-                    .windows
-                    .values()
-                    .filter_map(|window| {
-                        let window = window.as_deref()?;
-                        window.invalidator.is_dirty().then_some(window.handle)
-                    })
-                    .collect::<Vec<_>>()
-                {
-                    // The window may have been removed by an earlier draw in this
-                    // loop (e.g. a floating popup closed during a focus-loss hide),
-                    // so a missing window is not an error here.
-                    self.update_window(window, |_, window, cx| window.draw(cx).clear())
-                        .ok();
+                if self.automatic_drawing {
+                    for window in self
+                        .windows
+                        .values()
+                        .filter_map(|window| {
+                            let window = window.as_deref()?;
+                            window.invalidator.is_dirty().then_some(window.handle)
+                        })
+                        .collect::<Vec<_>>()
+                    {
+                        // The window may have been removed by an earlier draw in this
+                        // loop (e.g. a floating popup closed during a focus-loss hide),
+                        // so a missing window is not an error here.
+                        self.update_window(window, |_, window, cx| window.draw(cx).clear())
+                            .ok();
+                    }
                 }
 
                 if self.pending_effects.is_empty() {
