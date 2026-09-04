@@ -3129,13 +3129,18 @@ fn handle_tooltip_mouse_move(
                     cx.update(|window, cx| {
                         let new_tooltip =
                             build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
-                                let active_tooltip = active_tooltip.clone();
+                                // This callback is stored in the state it observes.
+                                let active_tooltip = Rc::downgrade(&active_tooltip);
                                 ActiveTooltip::Visible {
                                     tooltip: AnyTooltip {
                                         view,
                                         mouse_position: window.mouse_position(),
                                         check_visible_and_update: Rc::new(
                                             move |tooltip_bounds, window, cx| {
+                                                let Some(active_tooltip) = active_tooltip.upgrade()
+                                                else {
+                                                    return false;
+                                                };
                                                 handle_tooltip_check_visible_and_update(
                                                     &active_tooltip,
                                                     tooltip_is_hoverable,
